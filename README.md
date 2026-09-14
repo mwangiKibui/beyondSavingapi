@@ -21,3 +21,17 @@ curl http://localhost:8000/health
 - Postgres: `localhost:5432` (default `beyondsaving` / `beyondsaving`)
 
 Stop with `docker compose down` (add `-v` to also drop volumes).
+
+## Structure
+
+```
+app/
+  main.py         # FastAPI app instance, routes
+  core/
+    config.py     # Settings (pydantic-settings) — reads env vars / .env
+```
+
+Config is centralized in `app.core.config.Settings`, loaded once via
+`get_settings()`. Values come from the process environment (set by
+docker-compose's `environment:` block in dev) with `.env` as a fallback
+for running outside Docker.

@@ -4,6 +4,7 @@ services:
     ports:
       - "${APP_PORT:-8000}:8000"
     environment:
+      APP_ENV: ${APP_ENV:-development}
       DATABASE_URL: postgresql://${POSTGRES_USER:-beyondsaving}:${POSTGRES_PASSWORD:-beyondsaving}@postgres:5432/${POSTGRES_DB:-beyondsaving}
       REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: minio:9000
