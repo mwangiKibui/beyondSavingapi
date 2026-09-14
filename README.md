@@ -5,30 +5,58 @@ Backend API for beyondSaving.
 Tasks are tracked in the [beyondSaving project board](https://github.com/users/mwangiKibui/projects/4), sourced from `docs/mvp1-tasks.md` in the local `beyondSaving` planning workspace (`ab-` issue codes match that list).
 
 Companion frontend: [beyondSavingUI](https://github.com/mwangiKibui/beyondSavingUI).
+Companion database (schema, migrations, seed data): [beyondSavingdb](https://github.com/mwangiKibui/beyondSavingdb).
 
-## Local development
+## Running the full stack locally
 
-Stack: Python (FastAPI), Postgres, Redis, MinIO.
+These three repos are expected to be cloned as siblings (e.g. all under one
+`beyondSaving/` folder) — this repo owns the docker-compose stack that the
+other two connect to.
+
+**1. Infra + API** (this repo) — Postgres, Redis, MinIO, and the FastAPI app:
 
 ```
 cp .env.example .env
 docker compose up -d --build
 curl http://localhost:8000/health
+# -> {"status":"ok","env":"development","redis":"ok","storage":"ok"}
 ```
 
 - API: http://localhost:8000
 - MinIO console: http://localhost:9001 (default `minioadmin` / `minioadmin`)
 - Postgres: `localhost:5432` (default `beyondsaving` / `beyondsaving`)
 
-Stop with `docker compose down` (add `-v` to also drop volumes).
+Stop with `docker compose down` (add `-v` to also drop volumes and start
+from an empty database next time).
+
+**2. Schema + sample data** — from the sibling `beyondSavingdb` repo (see
+its README for full details):
+
+```
+cd ../beyondSavingdb
+cp .env.example .env
+migrate -database "$(source .env && echo "$DATABASE_URL")" -path migrations up
+docker exec -i beyondsavingapi-postgres-1 psql -U beyondsaving -d beyondsaving < seed.sql
+```
+
+**3. Frontend** (optional, for exercising the API through the UI) — from the
+sibling `beyondSavingUI` repo:
+
+```
+cd ../beyondSavingUI
+npm install
+npm run dev
+```
 
 ## Structure
 
 ```
 app/
-  main.py         # FastAPI app instance, routes
+  main.py         # FastAPI app instance, routes, lifespan (ensures MinIO bucket exists)
   core/
     config.py     # Settings (pydantic-settings) — reads env vars / .env
+    redis.py      # Redis client (cache + future job queue)
+    storage.py    # S3-compatible (MinIO) client for uploaded files
 ```
 
 Config is centralized in `app.core.config.Settings`, loaded once via
