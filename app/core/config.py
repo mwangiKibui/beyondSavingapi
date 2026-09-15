@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     jwt_secret: str
     jwt_algorithm: str = "HS256"
     jwt_expires_minutes: int = 60 * 24
+    # Comma-separated list of origins allowed to call this API from a browser.
+    cors_origins: str = "http://localhost:3000"
 
 
 @lru_cache
