@@ -9,6 +9,11 @@ from app.core.config import get_settings
 from app.core.redis import get_redis
 from app.core.storage import ensure_bucket, get_storage_client
 
+# Root logger defaults to WARNING, which would silently swallow the app's
+# own logger.info() calls (e.g. the password-reset dev-mode log) even
+# though uvicorn's request logs still show up.
+logging.basicConfig(level=logging.INFO)
+
 logger = logging.getLogger(__name__)
 
 

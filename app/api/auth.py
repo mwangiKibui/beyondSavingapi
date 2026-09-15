@@ -1,3 +1,5 @@
+import logging
+import secrets
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
@@ -9,7 +11,10 @@ from pydantic import BaseModel, EmailStr, Field
 
 from app.core.config import get_settings
 from app.core.db import get_pool
+from app.repositories.password_reset_tokens import create_password_reset_token
 from app.repositories.users import EmailAlreadyExists, create_user, get_user_by_email
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -99,3 +104,44 @@ async def login(
     )
 
     return TokenResponse(access_token=token)
+
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetResponse(BaseModel):
+    message: str
+
+
+RESET_MESSAGE = "If an account exists for that email, a password reset link has been sent."
+
+
+@router.post("/password-reset", response_model=PasswordResetResponse)
+async def request_password_reset(
+    payload: PasswordResetRequest, pool: asyncpg.Pool | None = Depends(get_pool)
+) -> PasswordResetResponse:
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+        )
+
+    # Same response either way - never reveal whether the email is registered.
+    user = await get_user_by_email(pool, payload.email)
+    if user is not None:
+        token = secrets.token_urlsafe(32)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+        await create_password_reset_token(
+            pool, user_id=user["id"], token=token, expires_at=expires_at
+        )
+        # No email-sending infra exists yet - log it as a dev-mode stand-in.
+        # The row itself (app.repositories.password_reset_tokens) is also
+        # queryable directly for manual testing in the meantime.
+        logger.info(
+            "Password reset requested for user %s: token=%s (expires %s)",
+            user["id"],
+            token,
+            expires_at.isoformat(),
+        )
+
+    return PasswordResetResponse(message=RESET_MESSAGE)
