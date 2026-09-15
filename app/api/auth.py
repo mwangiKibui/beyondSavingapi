@@ -13,7 +13,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 class SignUpRequest(BaseModel):
-    name: str = Field(min_length=1)
+    first_name: str = Field(min_length=1)
+    last_name: str = Field(min_length=1)
     email: EmailStr
     # bcrypt silently truncates beyond 72 bytes, so reject anything longer
     # up front rather than let it silently misbehave.
@@ -23,7 +24,8 @@ class SignUpRequest(BaseModel):
 class UserResponse(BaseModel):
     id: UUID
     email: str
-    name: str | None
+    first_name: str
+    last_name: str
     default_currency: str
     near_threshold: float
     created_at: datetime
@@ -42,7 +44,11 @@ async def signup(
 
     try:
         user = await create_user(
-            pool, email=payload.email, name=payload.name, password_hash=password_hash
+            pool,
+            email=payload.email,
+            first_name=payload.first_name,
+            last_name=payload.last_name,
+            password_hash=password_hash,
         )
     except EmailAlreadyExists as exc:
         raise HTTPException(

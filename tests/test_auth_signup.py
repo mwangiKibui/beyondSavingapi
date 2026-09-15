@@ -27,7 +27,28 @@ def fake_pool():
 def test_signup_rejects_invalid_email(client):
     response = client.post(
         "/auth/signup",
-        json={"name": "Demo User", "email": "not-an-email", "password": "password123"},
+        json={
+            "first_name": "Demo",
+            "last_name": "User",
+            "email": "not-an-email",
+            "password": "password123",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_signup_rejects_missing_first_name(client):
+    response = client.post(
+        "/auth/signup",
+        json={"first_name": "", "last_name": "User", "email": "demo@example.com", "password": "password123"},
+    )
+    assert response.status_code == 422
+
+
+def test_signup_rejects_missing_last_name(client):
+    response = client.post(
+        "/auth/signup",
+        json={"first_name": "Demo", "last_name": "", "email": "demo@example.com", "password": "password123"},
     )
     assert response.status_code == 422
 
@@ -35,7 +56,12 @@ def test_signup_rejects_invalid_email(client):
 def test_signup_rejects_short_password(client):
     response = client.post(
         "/auth/signup",
-        json={"name": "Demo User", "email": "demo@example.com", "password": "short"},
+        json={
+            "first_name": "Demo",
+            "last_name": "User",
+            "email": "demo@example.com",
+            "password": "short",
+        },
     )
     assert response.status_code == 422
 
@@ -44,7 +70,8 @@ def test_signup_rejects_password_over_72_bytes(client):
     response = client.post(
         "/auth/signup",
         json={
-            "name": "Demo User",
+            "first_name": "Demo",
+            "last_name": "User",
             "email": "demo@example.com",
             "password": "x" * 73,
         },
@@ -59,7 +86,8 @@ def test_signup_returns_503_when_db_unreachable(client):
     response = client.post(
         "/auth/signup",
         json={
-            "name": "Demo User",
+            "first_name": "Demo",
+            "last_name": "User",
             "email": "demo@example.com",
             "password": "password123",
         },
@@ -71,7 +99,8 @@ def test_signup_success(client, monkeypatch, fake_pool):
     created = {
         "id": "11111111-1111-1111-1111-111111111111",
         "email": "demo@example.com",
-        "name": "Demo User",
+        "first_name": "Demo",
+        "last_name": "User",
         "default_currency": "KES",
         "near_threshold": 0.80,
         "created_at": "2026-01-01T00:00:00+00:00",
@@ -82,7 +111,8 @@ def test_signup_success(client, monkeypatch, fake_pool):
     response = client.post(
         "/auth/signup",
         json={
-            "name": "Demo User",
+            "first_name": "Demo",
+            "last_name": "User",
             "email": "demo@example.com",
             "password": "password123",
         },
@@ -91,7 +121,8 @@ def test_signup_success(client, monkeypatch, fake_pool):
     assert response.status_code == 201
     body = response.json()
     assert body["email"] == "demo@example.com"
-    assert body["name"] == "Demo User"
+    assert body["first_name"] == "Demo"
+    assert body["last_name"] == "User"
 
     # Password must be hashed before reaching the repository, never passed as plaintext.
     _, kwargs = mock_create_user.call_args
@@ -106,7 +137,8 @@ def test_signup_duplicate_email_returns_409(client, monkeypatch, fake_pool):
     response = client.post(
         "/auth/signup",
         json={
-            "name": "Demo User",
+            "first_name": "Demo",
+            "last_name": "User",
             "email": "demo@example.com",
             "password": "password123",
         },
