@@ -23,3 +23,11 @@ async def create_user(
     except asyncpg.UniqueViolationError as exc:
         raise EmailAlreadyExists(email) from exc
     return dict(row)
+
+
+async def get_user_by_email(pool: asyncpg.Pool, email: str) -> dict | None:
+    row = await pool.fetchrow(
+        "SELECT id, email, password_hash FROM users WHERE email = $1",
+        email,
+    )
+    return dict(row) if row else None
