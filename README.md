@@ -13,29 +13,34 @@ These three repos are expected to be cloned as siblings (e.g. all under one
 `beyondSaving/` folder) — this repo owns the docker-compose stack that the
 other two connect to.
 
-**1. Infra + API** (this repo) — Postgres, Redis, MinIO, and the FastAPI app:
+**1. Infra + API** (this repo) — Postgres, Redis, MinIO, the schema
+migrations (run automatically, see below), and the FastAPI app:
 
 ```
 cp .env.example .env
 docker compose up -d --build
 curl http://localhost:8000/health
-# -> {"status":"ok","env":"development","redis":"ok","storage":"ok"}
+# -> {"status":"ok","env":"development","redis":"ok","storage":"ok","db":"ok"}
 ```
 
 - API: http://localhost:8000
 - MinIO console: http://localhost:9001 (default `minioadmin` / `minioadmin`)
 - Postgres: `localhost:5432` (default `beyondsaving` / `beyondsaving`)
 
+Migrations run via a one-shot `migrate` container (official
+`migrate/migrate` image, reading the sibling `beyondSavingdb/migrations`
+folder) that `app` waits on before starting — every `docker compose up`
+brings the schema fully up to date with no manual step. It's idempotent,
+safe to run on every startup.
+
 Stop with `docker compose down` (add `-v` to also drop volumes and start
 from an empty database next time).
 
-**2. Schema + sample data** — from the sibling `beyondSavingdb` repo (see
+**2. Sample data** (optional) — from the sibling `beyondSavingdb` repo (see
 its README for full details):
 
 ```
 cd ../beyondSavingdb
-cp .env.example .env
-migrate -database "$(source .env && echo "$DATABASE_URL")" -path migrations up
 docker exec -i beyondsavingapi-postgres-1 psql -U beyondsaving -d beyondsaving < seed.sql
 ```
 
