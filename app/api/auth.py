@@ -11,7 +11,10 @@ from pydantic import BaseModel, EmailStr, Field
 
 from app.core.config import get_settings
 from app.core.db import get_pool
-from app.repositories.password_reset_tokens import create_password_reset_token
+from app.repositories.password_reset_tokens import (
+    consume_password_reset_token,
+    create_password_reset_token,
+)
 from app.repositories.users import EmailAlreadyExists, create_user, get_user_by_email
 
 logger = logging.getLogger(__name__)
@@ -129,6 +132,7 @@ async def request_password_reset(
     # Same response either way - never reveal whether the email is registered.
     user = await get_user_by_email(pool, payload.email)
     if user is not None:
+        settings = get_settings()
         token = secrets.token_urlsafe(32)
         expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
         await create_password_reset_token(
@@ -137,11 +141,40 @@ async def request_password_reset(
         # No email-sending infra exists yet - log it as a dev-mode stand-in.
         # The row itself (app.repositories.password_reset_tokens) is also
         # queryable directly for manual testing in the meantime.
+        reset_link = f"{settings.frontend_url}/reset-password?token={token}"
         logger.info(
-            "Password reset requested for user %s: token=%s (expires %s)",
+            "Password reset requested for user %s: %s (expires %s)",
             user["id"],
-            token,
+            reset_link,
             expires_at.isoformat(),
         )
 
     return PasswordResetResponse(message=RESET_MESSAGE)
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    token: str = Field(min_length=1)
+    # Same length bounds as sign-up - required, and capped at bcrypt's
+    # 72-byte limit.
+    new_password: str = Field(min_length=8, max_length=72)
+
+
+@router.post("/password-reset/confirm", response_model=PasswordResetResponse)
+async def confirm_password_reset(
+    payload: PasswordResetConfirmRequest, pool: asyncpg.Pool | None = Depends(get_pool)
+) -> PasswordResetResponse:
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+        )
+
+    new_password_hash = bcrypt.hashpw(payload.new_password.encode(), bcrypt.gensalt()).decode()
+    valid = await consume_password_reset_token(
+        pool, token=payload.token, new_password_hash=new_password_hash
+    )
+    if not valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired reset link"
+        )
+
+    return PasswordResetResponse(message="Your password has been reset. You can now log in.")
