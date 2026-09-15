@@ -19,6 +19,20 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  migrate:
+    image: migrate/migrate:v4.18.1
+    volumes:
+      - ../beyondSavingdb/migrations:/migrations:ro
+    command:
+      - -path=/migrations
+      - -database=postgresql://${POSTGRES_USER:-beyondsaving}:${POSTGRES_PASSWORD:-beyondsaving}@postgres:5432/${POSTGRES_DB:-beyondsaving}?sslmode=disable
+      - up
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   postgres:
     image: postgres:16-alpine
