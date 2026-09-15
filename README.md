@@ -24,6 +24,7 @@ curl http://localhost:8000/health
 ```
 
 - API: http://localhost:8000
+- Interactive API docs (Swagger UI): http://localhost:8000/docs — also available as ReDoc at `/redoc`, or the raw schema at `/openapi.json`. Built into FastAPI, no setup needed.
 - MinIO console: http://localhost:9001 (default `minioadmin` / `minioadmin`)
 - Postgres: `localhost:5432` (default `beyondsaving` / `beyondsaving`)
 
