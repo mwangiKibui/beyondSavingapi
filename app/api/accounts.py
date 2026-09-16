@@ -4,12 +4,12 @@ from typing import Literal
 from uuid import UUID
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from app.core.db import get_pool
 from app.core.security import get_current_user_id
-from app.repositories.accounts import DuplicateAccount, create_account
+from app.repositories.accounts import DuplicateAccount, create_account, list_accounts
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,30 @@ class AccountResponse(BaseModel):
     is_active: bool
     created_at: datetime
     updated_at: datetime
+
+
+ALLOWED_PAGE_SIZES = (5, 10, 20, 30)
+SortBy = Literal["nickname", "provider", "currency", "balance", "unreconciled_count"]
+SortDir = Literal["asc", "desc"]
+ReconciliationStatus = Literal["reconciled", "unreconciled"]
+
+
+class AccountListItem(BaseModel):
+    id: UUID
+    nickname: str
+    account_type: str
+    provider: str
+    account_number: str
+    currency: str
+    balance: float
+    unreconciled_count: int
+
+
+class AccountListResponse(BaseModel):
+    items: list[AccountListItem]
+    total: int
+    page: int
+    page_size: int
 
 
 def _validate_provider(account_type: str, provider: str) -> None:
@@ -117,3 +141,54 @@ async def create_account_endpoint(
         ) from None
 
     return account
+
+
+@router.get("", response_model=AccountListResponse)
+async def list_accounts_endpoint(
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10),
+    search: str | None = Query(default=None, min_length=1),
+    sort_by: SortBy = "nickname",
+    sort_dir: SortDir = "asc",
+    account_type: AccountType | None = None,
+    currency: Currency | None = None,
+    reconciliation_status: ReconciliationStatus | None = None,
+) -> dict:
+    # Literal[5, 10, 20, 30] doesn't reliably coerce a query string ("20")
+    # against int literals in Pydantic v2, so this is validated manually
+    # rather than via the type annotation - matches this endpoint's own
+    # provider/account_number checks (ab-23), not a one-off exception.
+    if page_size not in ALLOWED_PAGE_SIZES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"page_size must be one of {ALLOWED_PAGE_SIZES}",
+        )
+
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+        )
+
+    try:
+        items, total = await list_accounts(
+            pool,
+            user_id=user_id,
+            page=page,
+            page_size=page_size,
+            search=search,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            account_type=account_type,
+            currency=currency,
+            reconciliation_status=reconciliation_status,
+        )
+    except Exception:
+        logger.error("Unexpected error listing accounts for user %s", user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Something went wrong. Please try again.",
+        ) from None
+
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
