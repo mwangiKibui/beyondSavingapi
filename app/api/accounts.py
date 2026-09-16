@@ -12,8 +12,10 @@ from app.core.security import get_current_user_id
 from app.repositories.accounts import (
     DuplicateAccount,
     create_account,
+    get_account,
     get_currency_summary,
     list_accounts,
+    update_account,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,6 +89,18 @@ class CurrencySubtotal(BaseModel):
 
 class AccountsSummaryResponse(BaseModel):
     subtotals: list[CurrencySubtotal]
+
+
+class UpdateAccountRequest(BaseModel):
+    # All optional - a genuine partial update. Currency and balance stay
+    # out of scope (ab-25): currency is fixed at creation, balance derives
+    # from transactions. account_number IS editable (broadened per ab-114
+    # follow-up) - a bank/SACCO account number, or a mobile money number
+    # for mobile_money accounts.
+    nickname: str | None = Field(default=None, min_length=1)
+    account_type: AccountType | None = None
+    provider: str | None = Field(default=None, min_length=1)
+    account_number: str | None = Field(default=None, min_length=1)
 
 
 def _validate_provider(account_type: str, provider: str) -> None:
@@ -229,3 +243,73 @@ async def accounts_summary_endpoint(
         ) from None
 
     return {"subtotals": subtotals}
+
+
+@router.patch("/{account_id}", response_model=AccountResponse)
+async def update_account_endpoint(
+    account_id: UUID,
+    payload: UpdateAccountRequest,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+        )
+
+    try:
+        if (
+            payload.nickname is None
+            and payload.account_type is None
+            and payload.provider is None
+            and payload.account_number is None
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="At least one of nickname, account_type, provider, or account_number must be provided",
+            )
+
+        if payload.account_type is not None and (payload.provider is None or payload.account_number is None):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="provider and account_number are required when changing account_type",
+            )
+
+        existing = await get_account(pool, account_id=account_id, user_id=user_id)
+        if existing is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+
+        effective_type = payload.account_type or existing["account_type"]
+
+        if payload.provider is not None:
+            _validate_provider(effective_type, payload.provider)
+
+        if payload.account_number is not None:
+            _validate_account_number(effective_type, payload.account_number)
+
+        account = await update_account(
+            pool,
+            account_id=account_id,
+            user_id=user_id,
+            nickname=payload.nickname,
+            account_type=payload.account_type,
+            provider=payload.provider,
+            account_number=payload.account_number,
+        )
+        if account is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+    except HTTPException:
+        raise
+    except DuplicateAccount as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An account with that number already exists",
+        ) from exc
+    except Exception:
+        logger.error("Unexpected error updating account %s for user %s", account_id, user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Something went wrong. Please try again.",
+        ) from None
+
+    return account
