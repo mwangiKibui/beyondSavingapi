@@ -9,7 +9,12 @@ from pydantic import BaseModel, Field
 
 from app.core.db import get_pool
 from app.core.security import get_current_user_id
-from app.repositories.categories import DuplicateCategory, create_category, list_categories
+from app.repositories.categories import (
+    DuplicateCategory,
+    create_category,
+    list_categories,
+    update_category,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +53,10 @@ class CategoryListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class UpdateCategoryRequest(BaseModel):
+    name: str = Field(min_length=1)
 
 
 @router.post("", response_model=CategoryResponse, status_code=status.HTTP_201_CREATED)
@@ -123,3 +132,36 @@ async def list_categories_endpoint(
         ) from None
 
     return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@router.patch("/{category_id}", response_model=CategoryResponse)
+async def update_category_endpoint(
+    category_id: UUID,
+    payload: UpdateCategoryRequest,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+        )
+
+    try:
+        category = await update_category(pool, category_id=category_id, user_id=user_id, name=payload.name)
+        if category is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
+    except HTTPException:
+        raise
+    except DuplicateCategory as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A category with that name already exists",
+        ) from exc
+    except Exception:
+        logger.error("Unexpected error updating category %s for user %s", category_id, user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Something went wrong. Please try again.",
+        ) from None
+
+    return category

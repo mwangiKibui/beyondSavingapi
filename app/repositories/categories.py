@@ -39,6 +39,30 @@ async def create_category(
     return dict(row)
 
 
+async def update_category(
+    pool: asyncpg.Pool,
+    *,
+    category_id: UUID,
+    user_id: UUID,
+    name: str,
+) -> dict | None:
+    try:
+        row = await pool.fetchrow(
+            """
+            UPDATE categories
+            SET name = $1
+            WHERE id = $2 AND user_id = $3
+            RETURNING id, name, type, is_default, created_at
+            """,
+            name,
+            category_id,
+            user_id,
+        )
+    except asyncpg.UniqueViolationError as exc:
+        raise DuplicateCategory() from exc
+    return dict(row) if row else None
+
+
 async def list_categories(
     pool: asyncpg.Pool,
     *,
