@@ -9,7 +9,12 @@ from pydantic import BaseModel, Field
 
 from app.core.db import get_pool
 from app.core.security import get_current_user_id
-from app.repositories.accounts import DuplicateAccount, create_account, list_accounts
+from app.repositories.accounts import (
+    DuplicateAccount,
+    create_account,
+    get_currency_summary,
+    list_accounts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +77,16 @@ class AccountListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class CurrencySubtotal(BaseModel):
+    currency: str
+    account_count: int
+    total: float
+
+
+class AccountsSummaryResponse(BaseModel):
+    subtotals: list[CurrencySubtotal]
 
 
 def _validate_provider(account_type: str, provider: str) -> None:
@@ -192,3 +207,25 @@ async def list_accounts_endpoint(
         ) from None
 
     return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@router.get("/summary", response_model=AccountsSummaryResponse)
+async def accounts_summary_endpoint(
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+        )
+
+    try:
+        subtotals = await get_currency_summary(pool, user_id=user_id)
+    except Exception:
+        logger.error("Unexpected error summarizing accounts for user %s", user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Something went wrong. Please try again.",
+        ) from None
+
+    return {"subtotals": subtotals}

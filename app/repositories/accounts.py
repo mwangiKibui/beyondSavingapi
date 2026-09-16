@@ -117,3 +117,30 @@ async def list_accounts(
     )
 
     return [dict(row) for row in rows], total
+
+
+async def get_currency_summary(pool: asyncpg.Pool, *, user_id: UUID) -> list[dict]:
+    # Same balance derivation as list_accounts (most recent transaction's
+    # balance_after, 0 if none), summed per currency. Unfiltered - a
+    # dashboard summary reflects the user's whole account list, not
+    # whatever search/filter state the accounts table happens to be in.
+    rows = await pool.fetch(
+        """
+        SELECT
+            a.currency,
+            COUNT(*) AS account_count,
+            COALESCE(SUM(COALESCE(latest_txn.balance_after, 0)), 0) AS total
+        FROM accounts a
+        LEFT JOIN LATERAL (
+            SELECT balance_after FROM transactions t
+            WHERE t.account_id = a.id
+            ORDER BY t.txn_date DESC, t.created_at DESC
+            LIMIT 1
+        ) latest_txn ON true
+        WHERE a.user_id = $1
+        GROUP BY a.currency
+        ORDER BY a.currency
+        """,
+        user_id,
+    )
+    return [dict(row) for row in rows]
