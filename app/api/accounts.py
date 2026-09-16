@@ -12,6 +12,7 @@ from app.core.security import get_current_user_id
 from app.repositories.accounts import (
     DuplicateAccount,
     create_account,
+    deactivate_account,
     get_account,
     get_currency_summary,
     list_accounts,
@@ -70,6 +71,7 @@ class AccountListItem(BaseModel):
     provider: str
     account_number: str
     currency: str
+    is_active: bool
     balance: float
     unreconciled_count: int
 
@@ -307,6 +309,36 @@ async def update_account_endpoint(
         ) from exc
     except Exception:
         logger.error("Unexpected error updating account %s for user %s", account_id, user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Something went wrong. Please try again.",
+        ) from None
+
+    return account
+
+
+@router.post("/{account_id}/deactivate", response_model=AccountResponse)
+async def deactivate_account_endpoint(
+    account_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+        )
+
+    try:
+        # Idempotent - deactivating an already-inactive account just
+        # re-returns it as-is rather than erroring, so a UI double-fire
+        # (or retry) isn't a special case.
+        account = await deactivate_account(pool, account_id=account_id, user_id=user_id)
+        if account is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error deactivating account %s for user %s", account_id, user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Something went wrong. Please try again.",

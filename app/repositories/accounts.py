@@ -113,6 +113,21 @@ async def update_account(
     return dict(row) if row else None
 
 
+async def deactivate_account(pool: asyncpg.Pool, *, account_id: UUID, user_id: UUID) -> dict | None:
+    row = await pool.fetchrow(
+        """
+        UPDATE accounts
+        SET is_active = false, updated_at = now()
+        WHERE id = $1 AND user_id = $2
+        RETURNING id, nickname, account_type, provider, account_number, currency,
+                  is_active, created_at, updated_at
+        """,
+        account_id,
+        user_id,
+    )
+    return dict(row) if row else None
+
+
 async def list_accounts(
     pool: asyncpg.Pool,
     *,
@@ -135,6 +150,7 @@ async def list_accounts(
         WITH account_data AS (
             SELECT
                 a.id, a.nickname, a.account_type, a.provider, a.account_number, a.currency,
+                a.is_active,
                 COALESCE(latest_txn.balance_after, 0) AS balance,
                 COALESCE(unreconciled.count, 0) AS unreconciled_count
             FROM accounts a
@@ -150,6 +166,7 @@ async def list_accounts(
                 AND NOT EXISTS (SELECT 1 FROM allocations al WHERE al.transaction_id = t.id)
             ) unreconciled ON true
             WHERE a.user_id = $1
+              AND a.is_active = true
               AND ($2::text IS NULL OR a.nickname ILIKE '%' || $2 || '%')
               AND ($3::text IS NULL OR a.account_type = $3)
               AND ($4::text IS NULL OR a.currency = $4)
@@ -200,6 +217,7 @@ async def get_currency_summary(pool: asyncpg.Pool, *, user_id: UUID) -> list[dic
             LIMIT 1
         ) latest_txn ON true
         WHERE a.user_id = $1
+          AND a.is_active = true
         GROUP BY a.currency
         ORDER BY a.currency
         """,

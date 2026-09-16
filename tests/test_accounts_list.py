@@ -16,6 +16,7 @@ SAMPLE_ITEM = {
     "provider": "Equity Bank",
     "account_number": "1100234501",
     "currency": "KES",
+    "is_active": True,
     "balance": 30000.0,
     "unreconciled_count": 3,
 }
