@@ -5,7 +5,7 @@ import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import accounts, auth
+from app.api import accounts, auth, categories
 from app.core.config import get_settings
 from app.core.redis import get_redis
 from app.core.storage import ensure_bucket, get_storage_client
@@ -51,6 +51,7 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(accounts.router)
+app.include_router(categories.router)
 
 
 @app.get("/health")
