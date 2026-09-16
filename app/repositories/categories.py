@@ -15,6 +15,39 @@ _SORT_COLUMNS = {
     "name": "name",
 }
 
+# Seeded for every new user on signup (ab-33) - a minimal MVP1 starting
+# point for Kenyan household/personal finances; users add their own from
+# here via the Add-category form (ab-29).
+DEFAULT_CATEGORIES: list[tuple[str, str]] = [
+    ("Rent", "expense"),
+    ("Groceries", "expense"),
+    ("Transport", "expense"),
+    ("Airtime", "expense"),
+    ("Utilities", "expense"),
+    ("Dining Out", "expense"),
+    ("Loan Repayment", "expense"),
+    ("Family Support", "expense"),
+    ("School Fees", "expense"),
+    ("Medical", "expense"),
+    ("Entertainment", "expense"),
+    ("Subscriptions", "expense"),
+    ("Clothing", "expense"),
+    ("Household", "expense"),
+    ("Salary", "income"),
+    ("Gig Income", "income"),
+    ("Business Income", "income"),
+    ("Freelance", "income"),
+    ("Rental Income", "income"),
+    ("Gifts Received", "income"),
+]
+
+
+async def seed_default_categories(conn: asyncpg.Connection, *, user_id: UUID) -> None:
+    await conn.executemany(
+        "INSERT INTO categories (user_id, name, type, is_default) VALUES ($1, $2, $3, TRUE)",
+        [(user_id, name, category_type) for name, category_type in DEFAULT_CATEGORIES],
+    )
+
 
 async def create_category(
     pool: asyncpg.Pool,
