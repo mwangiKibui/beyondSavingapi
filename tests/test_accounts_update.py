@@ -61,8 +61,15 @@ def test_update_account_rejects_empty_payload(client, fake_user, fake_pool):
     assert response.status_code == 422
 
 
-def test_update_account_rejects_account_type_without_provider(client, fake_user, fake_pool):
+def test_update_account_rejects_account_type_without_provider_and_number(client, fake_user, fake_pool):
     response = client.patch(f"/accounts/{ACCOUNT_ID}", json={"account_type": "sacco"})
+    assert response.status_code == 422
+
+
+def test_update_account_rejects_account_type_without_account_number(client, fake_user, fake_pool):
+    response = client.patch(
+        f"/accounts/{ACCOUNT_ID}", json={"account_type": "sacco", "provider": "Mentor Sacco"}
+    )
     assert response.status_code == 422
 
 
@@ -95,6 +102,7 @@ def test_update_nickname_only_does_not_require_provider_revalidation(
     assert kwargs["nickname"] == "New name"
     assert kwargs["account_type"] is None
     assert kwargs["provider"] is None
+    assert kwargs["account_number"] is None
 
 
 def test_update_provider_only_validates_against_existing_account_type(
@@ -109,29 +117,79 @@ def test_update_provider_only_validates_against_existing_account_type(
     assert response.status_code == 422
 
 
-def test_update_account_type_and_provider_together(client, fake_user, fake_pool, monkeypatch):
+def test_update_account_number_only_validates_against_existing_account_type(
+    client, fake_user, fake_pool, monkeypatch
+):
+    monkeypatch.setattr("app.api.accounts.get_account", AsyncMock(return_value=EXISTING_ACCOUNT))  # bank
+
+    # 5 digits isn't a valid mobile number length, but this account is a
+    # bank account (1-20 digits allowed) - existing type governs.
+    monkeypatch.setattr("app.api.accounts.update_account", AsyncMock(return_value=EXISTING_ACCOUNT))
+    response = client.patch(f"/accounts/{ACCOUNT_ID}", json={"account_number": "12345"})
+    assert response.status_code == 200
+
+
+def test_update_account_number_rejects_non_digits(client, fake_user, fake_pool, monkeypatch):
+    monkeypatch.setattr("app.api.accounts.get_account", AsyncMock(return_value=EXISTING_ACCOUNT))
+
+    response = client.patch(f"/accounts/{ACCOUNT_ID}", json={"account_number": "abc123"})
+    assert response.status_code == 422
+
+
+def test_update_account_number_rejects_over_20_digits_for_bank(client, fake_user, fake_pool, monkeypatch):
+    monkeypatch.setattr("app.api.accounts.get_account", AsyncMock(return_value=EXISTING_ACCOUNT))
+
+    response = client.patch(f"/accounts/{ACCOUNT_ID}", json={"account_number": "1" * 21})
+    assert response.status_code == 422
+
+
+def test_update_account_type_provider_and_number_together(client, fake_user, fake_pool, monkeypatch):
     mock_get_account = AsyncMock(return_value=EXISTING_ACCOUNT)
     mock_update_account = AsyncMock(
-        return_value={**EXISTING_ACCOUNT, "account_type": "sacco", "provider": "Mentor Sacco"}
+        return_value={
+            **EXISTING_ACCOUNT,
+            "account_type": "mobile_money",
+            "provider": "M-Pesa",
+            "account_number": "712345678",
+        }
     )
     monkeypatch.setattr("app.api.accounts.get_account", mock_get_account)
     monkeypatch.setattr("app.api.accounts.update_account", mock_update_account)
 
     response = client.patch(
-        f"/accounts/{ACCOUNT_ID}", json={"account_type": "sacco", "provider": "Mentor Sacco"}
+        f"/accounts/{ACCOUNT_ID}",
+        json={"account_type": "mobile_money", "provider": "M-Pesa", "account_number": "712345678"},
     )
 
     assert response.status_code == 200
     body = response.json()
-    assert body["account_type"] == "sacco"
-    assert body["provider"] == "Mentor Sacco"
+    assert body["account_type"] == "mobile_money"
+    assert body["provider"] == "M-Pesa"
+    assert body["account_number"] == "712345678"
+
+    _, kwargs = mock_update_account.call_args
+    assert kwargs["account_number"] == "712345678"
+
+
+def test_update_account_rejects_mobile_number_wrong_length_for_new_type(
+    client, fake_user, fake_pool, monkeypatch
+):
+    monkeypatch.setattr("app.api.accounts.get_account", AsyncMock(return_value=EXISTING_ACCOUNT))
+
+    response = client.patch(
+        f"/accounts/{ACCOUNT_ID}",
+        json={"account_type": "mobile_money", "provider": "M-Pesa", "account_number": "12345"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_update_account_rejects_provider_not_valid_for_new_type(client, fake_user, fake_pool, monkeypatch):
     monkeypatch.setattr("app.api.accounts.get_account", AsyncMock(return_value=EXISTING_ACCOUNT))
 
     response = client.patch(
-        f"/accounts/{ACCOUNT_ID}", json={"account_type": "sacco", "provider": "Equity Bank"}
+        f"/accounts/{ACCOUNT_ID}",
+        json={"account_type": "sacco", "provider": "Equity Bank", "account_number": "1100234501"},
     )
 
     assert response.status_code == 422
@@ -144,7 +202,8 @@ def test_update_account_duplicate_returns_409(client, fake_user, fake_pool, monk
     )
 
     response = client.patch(
-        f"/accounts/{ACCOUNT_ID}", json={"account_type": "sacco", "provider": "Mentor Sacco"}
+        f"/accounts/{ACCOUNT_ID}",
+        json={"account_type": "sacco", "provider": "Mentor Sacco", "account_number": "3300123456"},
     )
 
     assert response.status_code == 409

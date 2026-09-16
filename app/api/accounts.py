@@ -92,13 +92,15 @@ class AccountsSummaryResponse(BaseModel):
 
 
 class UpdateAccountRequest(BaseModel):
-    # All optional - a genuine partial update. Currency, balance, and
-    # account_number are out of scope (ab-25): currency is fixed at
-    # creation, balance derives from transactions, and account_number
-    # isn't part of ab-114's edit form.
+    # All optional - a genuine partial update. Currency and balance stay
+    # out of scope (ab-25): currency is fixed at creation, balance derives
+    # from transactions. account_number IS editable (broadened per ab-114
+    # follow-up) - a bank/SACCO account number, or a mobile money number
+    # for mobile_money accounts.
     nickname: str | None = Field(default=None, min_length=1)
     account_type: AccountType | None = None
     provider: str | None = Field(default=None, min_length=1)
+    account_number: str | None = Field(default=None, min_length=1)
 
 
 def _validate_provider(account_type: str, provider: str) -> None:
@@ -256,25 +258,34 @@ async def update_account_endpoint(
         )
 
     try:
-        if payload.nickname is None and payload.account_type is None and payload.provider is None:
+        if (
+            payload.nickname is None
+            and payload.account_type is None
+            and payload.provider is None
+            and payload.account_number is None
+        ):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="At least one of nickname, account_type, or provider must be provided",
+                detail="At least one of nickname, account_type, provider, or account_number must be provided",
             )
 
-        if payload.account_type is not None and payload.provider is None:
+        if payload.account_type is not None and (payload.provider is None or payload.account_number is None):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="provider is required when changing account_type",
+                detail="provider and account_number are required when changing account_type",
             )
 
         existing = await get_account(pool, account_id=account_id, user_id=user_id)
         if existing is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
 
+        effective_type = payload.account_type or existing["account_type"]
+
         if payload.provider is not None:
-            effective_type = payload.account_type or existing["account_type"]
             _validate_provider(effective_type, payload.provider)
+
+        if payload.account_number is not None:
+            _validate_account_number(effective_type, payload.account_number)
 
         account = await update_account(
             pool,
@@ -283,6 +294,7 @@ async def update_account_endpoint(
             nickname=payload.nickname,
             account_type=payload.account_type,
             provider=payload.provider,
+            account_number=payload.account_number,
         )
         if account is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")

@@ -73,6 +73,7 @@ async def update_account(
     nickname: str | None,
     account_type: str | None,
     provider: str | None,
+    account_number: str | None,
 ) -> dict | None:
     # Column names below are hardcoded, not user input - only the values are
     # parameterized - so building the SET clause per which fields were
@@ -89,6 +90,9 @@ async def update_account(
     if provider is not None:
         values.append(provider)
         set_clauses.append(f"provider = ${len(values)}")
+    if account_number is not None:
+        values.append(account_number)
+        set_clauses.append(f"account_number = ${len(values)}")
 
     values.append(str(account_id))
     values.append(str(user_id))
