@@ -173,15 +173,68 @@ Copy this block for each new provider.
 
 ### Mentor Sacco (sacco)
 
-- **Status:** not started
-- **File format:** assumed PDF or Word (`.doc`/`.docx`) — TBD which,
-  pending a sample statement
-- **Password-protected:** assumed yes — TBD exactly what the password is
-  derived from, pending a sample statement
-- **Sample files:** none yet — see the "collect sample statements" ticket
-- **Field mapping:** TBD — pending a sample statement to analyze
-- **Dedupe strategy:** TBD
-- **Known quirks:** TBD
+- **Status:** samples collected (ab-35)
+- **File format:** PDF — "MEMBER STATEMENT" from Mentor Sacco Society Ltd
+- **Password-protected:** no (contrary to the general MVP1 assumption —
+  the sample opened directly, no password prompt)
+- **Sample files:** `tests/fixtures/statements/mentor_sacco/member_statement_sample.pdf`
+  (PII redacted — member name, phone numbers, member no., and account no.
+  are replaced with placeholders; transaction rows, amounts, and running
+  balances are the real values from the source statement)
+- **Field mapping:**
+  | Source column/position | Maps to | Notes |
+  |---|---|---|
+  | `Date` | `txn_date` | `DD-MM-YYYY` |
+  | `Document No` | not directly mapped | used for dedupe (see below) — repeats across related postings, not a unique row ID by itself |
+  | `Transaction Details` | `description` | raw line text, kept verbatim |
+  | `Debit` / `Credit` | `amount` + `direction` | which column is populated decides `direction` — see quirks below for the CR/DR-section caveat |
+  | `Balance` | `balance_after` | running balance for that sub-ledger only, not the whole statement |
+- **Dedupe strategy:** `Document No` is **not** unique per row — the same
+  code (e.g. `ATRC-07315`) appears on multiple rows across different
+  sub-ledgers because one real-world event (e.g. a loan repayment) posts
+  simultaneously to several sub-ledgers. Use a composite hash of
+  `Document No + sub-ledger name + Transaction Details + amount` instead
+  of `Document No` alone. Rows with a genuinely unique per-row code (the
+  `Balance Enquiry Charges-SSPSP...` lines) are unambiguous either way.
+- **Known quirks:**
+  - **One statement, four sub-ledgers.** A single Mentor Sacco member
+    statement bundles four independent accounts, each with its own
+    "Opening Balance" and running balance: **Ordinary Deposit**,
+    **Savings Account**, **Share Capital**, and **Instant Loan**. These
+    are not sections of one ledger — they're four separate balance
+    sequences that happen to share one PDF.
+  - **Design decision (2026-09-16):** beyondSaving models one `account` =
+    one nickname/provider/currency, so one Mentor Sacco statement maps to
+    **multiple beyondSaving accounts**, one per sub-ledger (e.g. "Mentor
+    Sacco - Savings", "Mentor Sacco - Instant Loan"). The upload flow
+    needs to handle "this one file produced transactions for N accounts,"
+    not just one — this is a real scoping requirement for the Statement
+    upload API (ab-37) and the Mentor Sacco parser ticket, not an edge
+    case to special-case away.
+  - **"Instant Loan" appears twice.** A new loan disbursement shows up as
+    its own one-row "Instant Loan" section (opening balance = the
+    disbursed amount), immediately followed by a second "Instant Loan"
+    section that carries the running amortization ledger (interest and
+    principal recovery postings) down to zero. Both share the same
+    section header text — distinguish them by opening balance/position,
+    not by name alone.
+  - **Section header rows and "Opening Balance" rows are not
+    transactions.** Lines like "Savings Account" (a bare sub-ledger
+    label) and "Opening Balance: 31-Jul-2025" must be skipped when
+    extracting transactions — the opening balance seeds that sub-ledger's
+    running-balance validation (step 6) rather than being transaction #1.
+  - **Negative balances are parenthesized**, e.g. `(100.00) CR` — standard
+    accounting notation for a negative number, not a formatting error.
+    The sub-ledger legitimately went negative there; strip the
+    parentheses and treat as negative when validating the running
+    balance.
+  - **CR/DR marks the sub-ledger's normal balance side, not the
+    transaction's direction on its own.** Ordinary Deposit, Savings
+    Account, and Share Capital are CR-normal (Credit = money in, Debit =
+    money out, matching a member's savings). Instant Loan is DR-normal
+    (Debit = loan disbursed/liability increases, Credit = repayment).
+    Map `direction` per sub-ledger accordingly rather than assuming
+    Debit always means "out."
 
 ### Biashara Sacco (sacco)
 
