@@ -13,16 +13,19 @@ MVP1 covers **upload only**: a user downloads a statement themselves and
 uploads it. Live API sync (connecting directly to a provider) is MVP2 and
 will extend this runbook with the API-connection side when it lands.
 
-MVP1 ships parsing support for exactly two providers:
+MVP1 ships parsing support for every provider a user can already create
+an account for today (see `PROVIDERS_BY_TYPE` in `app/api/accounts.py`):
 
 - **M-Pesa** (mobile money) — password-protected PDF.
+- **Airtel Money** (mobile money).
 - **Equity Bank** (bank).
+- **NCBA Bank** (bank).
+- **Mentor Sacco** (sacco).
+- **Biashara Sacco** (sacco).
 
-Every other provider a user can already create an account for today
-(Airtel Money, NCBA Bank, Mentor Sacco, Biashara Sacco — see
-`PROVIDERS_BY_TYPE` in `app/api/accounts.py`) supports manual transaction
-entry now, but has no statement parser yet. Adding one follows this same
-process, starting from its own "collect sample statements" ticket.
+Each one goes through the same process below, starting from its own
+"collect sample statements" ticket - they don't have to land together,
+but all six are in scope for MVP1, not just a first pair.
 
 ## Process
 
@@ -36,7 +39,7 @@ go rather than after the fact.
    zero-activity period, a password-protected file). No parser should be
    written without real examples in hand: they anchor the field mapping
    and become the parser's test fixtures. This is its own ticket per
-   provider (e.g. ab-35 for M-Pesa + Equity Bank) — don't start the parser
+   provider (e.g. ab-35 starts this for M-Pesa) — don't start the parser
    itself until sample files exist.
 2. **Analyze the format.** File type (PDF, CSV, Excel), whether it's
    password-protected (and what the password is derived from — e.g.
@@ -119,7 +122,49 @@ Copy this block for each new provider.
   back to the date+amount+direction+description hash
 - **Known quirks:** TBD
 
+### Airtel Money (mobile_money)
+
+- **Status:** not started
+- **File format:** TBD — pending a sample statement to analyze (likely
+  PDF, possibly password-protected like M-Pesa — to be confirmed)
+- **Password-protected:** TBD
+- **Sample files:** none yet — see the "collect sample statements" ticket
+- **Field mapping:** TBD — pending a sample statement to analyze
+- **Dedupe strategy:** TBD — check for a per-line transaction/receipt
+  code first, same approach as M-Pesa
+- **Known quirks:** TBD
+
 ### Equity Bank (bank)
+
+- **Status:** not started
+- **File format:** TBD — pending a sample statement to analyze
+- **Password-protected:** TBD
+- **Sample files:** none yet — see the "collect sample statements" ticket
+- **Field mapping:** TBD — pending a sample statement to analyze
+- **Dedupe strategy:** TBD
+- **Known quirks:** TBD
+
+### NCBA Bank (bank)
+
+- **Status:** not started
+- **File format:** TBD — pending a sample statement to analyze
+- **Password-protected:** TBD
+- **Sample files:** none yet — see the "collect sample statements" ticket
+- **Field mapping:** TBD — pending a sample statement to analyze
+- **Dedupe strategy:** TBD
+- **Known quirks:** TBD
+
+### Mentor Sacco (sacco)
+
+- **Status:** not started
+- **File format:** TBD — pending a sample statement to analyze
+- **Password-protected:** TBD
+- **Sample files:** none yet — see the "collect sample statements" ticket
+- **Field mapping:** TBD — pending a sample statement to analyze
+- **Dedupe strategy:** TBD
+- **Known quirks:** TBD
+
+### Biashara Sacco (sacco)
 
 - **Status:** not started
 - **File format:** TBD — pending a sample statement to analyze
