@@ -51,6 +51,64 @@ async def create_account(
     return dict(row)
 
 
+async def get_account(pool: asyncpg.Pool, *, account_id: UUID, user_id: UUID) -> dict | None:
+    row = await pool.fetchrow(
+        """
+        SELECT id, nickname, account_type, provider, account_number, currency,
+               is_active, created_at, updated_at
+        FROM accounts
+        WHERE id = $1 AND user_id = $2
+        """,
+        account_id,
+        user_id,
+    )
+    return dict(row) if row else None
+
+
+async def update_account(
+    pool: asyncpg.Pool,
+    *,
+    account_id: UUID,
+    user_id: UUID,
+    nickname: str | None,
+    account_type: str | None,
+    provider: str | None,
+) -> dict | None:
+    # Column names below are hardcoded, not user input - only the values are
+    # parameterized - so building the SET clause per which fields were
+    # actually given is safe.
+    set_clauses = ["updated_at = now()"]
+    values: list[str] = []
+
+    if nickname is not None:
+        values.append(nickname)
+        set_clauses.append(f"nickname = ${len(values)}")
+    if account_type is not None:
+        values.append(account_type)
+        set_clauses.append(f"account_type = ${len(values)}")
+    if provider is not None:
+        values.append(provider)
+        set_clauses.append(f"provider = ${len(values)}")
+
+    values.append(str(account_id))
+    values.append(str(user_id))
+
+    query = f"""
+        UPDATE accounts
+        SET {", ".join(set_clauses)}
+        WHERE id = ${len(values) - 1} AND user_id = ${len(values)}
+        RETURNING id, nickname, account_type, provider, account_number, currency,
+                  is_active, created_at, updated_at
+    """
+
+    try:
+        row = await pool.fetchrow(query, *values)
+    except asyncpg.UniqueViolationError as exc:
+        raise DuplicateAccount() from exc
+
+    return dict(row) if row else None
+
+
 async def list_accounts(
     pool: asyncpg.Pool,
     *,
