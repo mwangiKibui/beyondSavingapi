@@ -16,12 +16,18 @@ will extend this runbook with the API-connection side when it lands.
 MVP1 ships parsing support for every provider a user can already create
 an account for today (see `PROVIDERS_BY_TYPE` in `app/api/accounts.py`):
 
-- **M-Pesa** (mobile money) — password-protected PDF.
-- **Airtel Money** (mobile money).
-- **Equity Bank** (bank).
-- **NCBA Bank** (bank).
-- **Mentor Sacco** (sacco).
-- **Biashara Sacco** (sacco).
+- **M-Pesa** (mobile money)
+- **Airtel Money** (mobile money)
+- **Equity Bank** (bank)
+- **NCBA Bank** (bank)
+- **Mentor Sacco** (sacco)
+- **Biashara Sacco** (sacco)
+
+**Working assumption until real samples say otherwise:** every
+provider's statement is password-protected, and the file is either a
+PDF or a Word document (`.doc`/`.docx`) - both need to be unlocked
+before parsing, so step 2 below should confirm which format and
+password scheme actually apply once a real sample is in hand.
 
 Each one goes through the same process below, starting from its own
 "collect sample statements" ticket - they don't have to land together,
@@ -41,11 +47,13 @@ go rather than after the fact.
    and become the parser's test fixtures. This is its own ticket per
    provider (e.g. ab-35 starts this for M-Pesa) — don't start the parser
    itself until sample files exist.
-2. **Analyze the format.** File type (PDF, CSV, Excel), whether it's
-   password-protected (and what the password is derived from — e.g.
-   M-Pesa PDFs are typically locked with the account holder's ID number
-   or a PIN they set), how the statement is laid out (a single table, one
-   section per day, a running balance column, etc.), and any header/footer
+2. **Analyze the format.** Confirm the file type (working assumption is
+   PDF or Word for every MVP1 provider, until a real sample says
+   otherwise) and how it's password-protected (and what the password is
+   derived from — e.g. M-Pesa PDFs are typically locked with the account
+   holder's ID number or a PIN they set) — both need unlocking before
+   parsing. Then note how the statement is laid out (a single table, one
+   section per day, a running balance column, etc.) and any header/footer
    noise to strip.
 3. **Map fields to the transaction schema.** Every source column/position
    needs an explicit mapping to the `transactions` table (see
@@ -88,7 +96,9 @@ Copy this block for each new provider.
 ### <Provider name> (<account type: bank | mobile_money | sacco>)
 
 - **Status:** not started | samples collected | parser in progress | parser shipped
-- **File format:** e.g. PDF, CSV, Excel
+- **File format:** e.g. PDF, Word (`.doc`/`.docx`) — MVP1's working
+  assumption is that every provider's statement is one of these two,
+  password-protected, until a real sample says otherwise
 - **Password-protected:** yes/no — if yes, how the password is derived
 - **Sample files:** where they live (e.g. `tests/fixtures/statements/<provider>/`)
 - **Field mapping:**
@@ -110,11 +120,13 @@ Copy this block for each new provider.
 ### M-Pesa (mobile_money)
 
 - **Status:** not started
-- **File format:** PDF (per the product brief — password-protected)
-- **Password-protected:** yes — TBD exactly what the password is derived
-  from until a real sample statement is in hand (typically the account
-  holder's ID number or a self-set PIN for M-Pesa statements, to be
-  confirmed against an actual file)
+- **File format:** assumed PDF or Word (`.doc`/`.docx`) — TBD which,
+  pending a sample statement (product brief calls out PDF specifically
+  for M-Pesa, so PDF is the stronger guess here)
+- **Password-protected:** assumed yes — TBD exactly what the password is
+  derived from until a real sample statement is in hand (typically the
+  account holder's ID number or a self-set PIN for M-Pesa statements, to
+  be confirmed against an actual file)
 - **Sample files:** none yet — see the "collect sample statements" ticket
 - **Field mapping:** TBD — pending a sample statement to analyze
 - **Dedupe strategy:** TBD — M-Pesa statements typically include a
@@ -125,9 +137,10 @@ Copy this block for each new provider.
 ### Airtel Money (mobile_money)
 
 - **Status:** not started
-- **File format:** TBD — pending a sample statement to analyze (likely
-  PDF, possibly password-protected like M-Pesa — to be confirmed)
-- **Password-protected:** TBD
+- **File format:** assumed PDF or Word (`.doc`/`.docx`) — TBD which,
+  pending a sample statement
+- **Password-protected:** assumed yes — TBD exactly what the password is
+  derived from, pending a sample statement
 - **Sample files:** none yet — see the "collect sample statements" ticket
 - **Field mapping:** TBD — pending a sample statement to analyze
 - **Dedupe strategy:** TBD — check for a per-line transaction/receipt
@@ -137,8 +150,10 @@ Copy this block for each new provider.
 ### Equity Bank (bank)
 
 - **Status:** not started
-- **File format:** TBD — pending a sample statement to analyze
-- **Password-protected:** TBD
+- **File format:** assumed PDF or Word (`.doc`/`.docx`) — TBD which,
+  pending a sample statement
+- **Password-protected:** assumed yes — TBD exactly what the password is
+  derived from, pending a sample statement
 - **Sample files:** none yet — see the "collect sample statements" ticket
 - **Field mapping:** TBD — pending a sample statement to analyze
 - **Dedupe strategy:** TBD
@@ -147,8 +162,10 @@ Copy this block for each new provider.
 ### NCBA Bank (bank)
 
 - **Status:** not started
-- **File format:** TBD — pending a sample statement to analyze
-- **Password-protected:** TBD
+- **File format:** assumed PDF or Word (`.doc`/`.docx`) — TBD which,
+  pending a sample statement
+- **Password-protected:** assumed yes — TBD exactly what the password is
+  derived from, pending a sample statement
 - **Sample files:** none yet — see the "collect sample statements" ticket
 - **Field mapping:** TBD — pending a sample statement to analyze
 - **Dedupe strategy:** TBD
@@ -157,8 +174,10 @@ Copy this block for each new provider.
 ### Mentor Sacco (sacco)
 
 - **Status:** not started
-- **File format:** TBD — pending a sample statement to analyze
-- **Password-protected:** TBD
+- **File format:** assumed PDF or Word (`.doc`/`.docx`) — TBD which,
+  pending a sample statement
+- **Password-protected:** assumed yes — TBD exactly what the password is
+  derived from, pending a sample statement
 - **Sample files:** none yet — see the "collect sample statements" ticket
 - **Field mapping:** TBD — pending a sample statement to analyze
 - **Dedupe strategy:** TBD
@@ -167,8 +186,10 @@ Copy this block for each new provider.
 ### Biashara Sacco (sacco)
 
 - **Status:** not started
-- **File format:** TBD — pending a sample statement to analyze
-- **Password-protected:** TBD
+- **File format:** assumed PDF or Word (`.doc`/`.docx`) — TBD which,
+  pending a sample statement
+- **Password-protected:** assumed yes — TBD exactly what the password is
+  derived from, pending a sample statement
 - **Sample files:** none yet — see the "collect sample statements" ticket
 - **Field mapping:** TBD — pending a sample statement to analyze
 - **Dedupe strategy:** TBD
