@@ -69,10 +69,17 @@ go rather than after the fact.
      the statement provides one.
 4. **Decide the `dedupe_hash` strategy.** Deduplication is scoped per
    account (`UNIQUE (account_id, dedupe_hash)`) and applies to imports
-   only. Prefer a stable identifier the provider includes on each line
-   (a transaction reference/receipt number) when one exists; fall back to
-   a hash of `txn_date + amount + direction + description` when it
-   doesn't. Document which one this provider uses and why.
+   only. Prefer a stable identifier the provider includes on each line (a
+   transaction reference/receipt number) when one exists; fall back to a
+   hash of `txn_date + amount + direction + description` when it doesn't.
+   **Don't assume a reference number is unique per row without checking —
+   confirmed on two providers so far (Mentor Sacco, NCBA), one real-world
+   event routinely fans out to several related postings (a fee, the main
+   entry, an excise duty line) that all share the exact same reference
+   code.** Combine the reference with the amount (and description, if two
+   related postings can share both reference and amount) rather than
+   trusting the reference alone. Document which one this provider uses
+   and why.
 5. **Build and test the parser** against the sample files from step 1.
    Cover the edge cases collected there, not just the happy path.
 6. **Validate against the running balance.** Replay the parsed
@@ -161,15 +168,59 @@ Copy this block for each new provider.
 
 ### NCBA Bank (bank)
 
-- **Status:** not started
-- **File format:** assumed PDF or Word (`.doc`/`.docx`) — TBD which,
-  pending a sample statement
-- **Password-protected:** assumed yes — TBD exactly what the password is
-  derived from, pending a sample statement
-- **Sample files:** none yet — see the "collect sample statements" ticket
-- **Field mapping:** TBD — pending a sample statement to analyze
-- **Dedupe strategy:** TBD
-- **Known quirks:** TBD
+- **Status:** samples collected (ab-35)
+- **File format:** PDF — "e-Statement of Account", "GO BANKING - PAY AS
+  YOU GO CURRENT" account type
+- **Password-protected:** yes, confirmed. Not derivable from any field
+  visible in the statement itself (checked against the account number
+  and every counterparty phone number in the sample — none match); likely
+  the account holder's ID number or a self-set PIN. TBD until confirmed
+  with NCBA directly or against a second sample.
+- **Sample files:**
+  `tests/fixtures/statements/ncba_bank/e_statement_sample.pdf` (PII
+  redacted — account holder name, account number, and 11 distinct
+  counterparty phone numbers replaced with placeholders via exact
+  word-level PDF redaction; transaction rows, amounts, references, and
+  running balances are the real values from the source statement).
+  **Re-locked with a placeholder password (`0000000`), not the real
+  one** — the real password may itself be derived from real personal
+  info (e.g. an ID number) not otherwise visible in the document, so it
+  isn't committed even though the visible content is now anonymized.
+- **Field mapping:**
+  | Source column/position | Maps to | Notes |
+  |---|---|---|
+  | `Date` | `txn_date` | `DD/MM/YYYY` |
+  | `Value Date` | not directly mapped | equalled `Date` on every row in this sample — likely redundant for this account type, but map it in case a future sample shows it differing (e.g. a cheque clearing after the transaction date) |
+  | `Transaction Type and Details` (2 lines: a type line, then a reference/counterparty line below it) | `description` | keep both lines — the reference line often carries the only counterparty info (phone number, PayBill/BuyGoods till, MPESA name) |
+  | `Debit` / `Credit` | `amount` + `direction` | genuine separate table columns here (unlike a same-cell CR/DR suffix) — only one is populated per row |
+  | `Balance` | `balance_after` | one running balance for the whole account — no sub-ledgers, unlike Mentor Sacco |
+- **Dedupe strategy:** the reference code in the detail line (e.g.
+  `FT26216QCX1Y`) is stable but **not unique per row** — confirmed in
+  this sample: `1009866765 AA261354HDCY FT26216QCX1Y` appears identically
+  on three consecutive rows (a commission fee, the main clearing entry,
+  and an excise duty line, all one real-world event). Use a composite of
+  `reference + amount` (add `description` too if two related postings
+  ever share both).
+- **Known quirks:**
+  - **No "Opening Balance" row in the table.** Unlike Mentor Sacco, the
+    starting balance comes only from the statement's summary header
+    ("Opening Balance: 107,374.39"), not from a row inside the
+    transaction table. Running-balance validation (step 6) needs to seed
+    from that header field.
+  - **Header/summary repeats identically on every page** (account
+    number, holder name, Opening/Payments In/Payments Out/Available/
+    Closing Balance) — these are the whole statement period's totals,
+    not per-page figures. Don't re-parse them as new data each page.
+  - **The header disclaimer and "Page N" footer appear twice in a
+    naive linear text extraction** even though each renders once,
+    visually at the bottom of the page — a PDF content-stream ordering
+    artifact, not duplicated content. Don't assume linear extraction
+    order matches visual top-to-bottom order for header/footer text;
+    rely on the transaction table's own row structure instead.
+  - **One statement = one account here**, unlike Mentor Sacco — no
+    sub-ledger split needed for this provider.
+  - Card numbers appear pre-masked by the bank itself (e.g.
+    `425199......9399`) — pass through as-is, don't attempt to unmask.
 
 ### Mentor Sacco (sacco)
 
