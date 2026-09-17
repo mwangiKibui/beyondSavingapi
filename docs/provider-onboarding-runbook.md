@@ -126,20 +126,59 @@ Copy this block for each new provider.
 
 ### M-Pesa (mobile_money)
 
-- **Status:** not started
-- **File format:** assumed PDF or Word (`.doc`/`.docx`) — TBD which,
-  pending a sample statement (product brief calls out PDF specifically
-  for M-Pesa, so PDF is the stronger guess here)
-- **Password-protected:** assumed yes — TBD exactly what the password is
-  derived from until a real sample statement is in hand (typically the
-  account holder's ID number or a self-set PIN for M-Pesa statements, to
-  be confirmed against an actual file)
-- **Sample files:** none yet — see the "collect sample statements" ticket
-- **Field mapping:** TBD — pending a sample statement to analyze
-- **Dedupe strategy:** TBD — M-Pesa statements typically include a
-  transaction/receipt code per line; use that if present, otherwise fall
-  back to the date+amount+direction+description hash
-- **Known quirks:** TBD
+- **Status:** samples collected (ab-35)
+- **File format:** PDF — official "M-PESA STATEMENT" from Safaricom,
+  with a SUMMARY section (totals per transaction type) followed by a
+  DETAILED STATEMENT section (the actual transaction table)
+- **Password-protected:** yes, confirmed. Not derivable from anything
+  visible in the statement itself (checked against the mobile number —
+  no match); likely the account holder's ID number or a self-set PIN,
+  matching the general MVP1 assumption. TBD until confirmed directly or
+  against a second sample.
+- **Sample files:** `tests/fixtures/statements/mpesa/statement_sample.pdf`
+  (PII redacted — customer name, mobile number, email address, and
+  every counterparty name attached to a masked phone number replaced
+  with placeholders via exact word-level PDF redaction. Safaricom's own
+  partial phone masking, e.g. `254791***999`, is left as-is — realistic
+  test data for how the provider already obscures numbers itself).
+  **Re-locked with a placeholder password (`0000000`), not the real
+  one** — same reasoning as NCBA: the real password isn't derivable from
+  the document and may be tied to real personal info.
+- **Field mapping:**
+  | Source column/position | Maps to | Notes |
+  |---|---|---|
+  | `Receipt No.` | not directly mapped | used for dedupe (see below) — not unique per row |
+  | `Completion Time` | `txn_date` | `YYYY-MM-DD HH:MM:SS` |
+  | `Details` | `description` | often wraps across 2-4 lines — keep the full multi-line text as one field |
+  | `Transaction Status` | not mapped for MVP1 | every row in this sample was `Completed`; a `Failed`/`Reversed` status (if a future sample shows one) should probably exclude that row rather than post it as a real transaction — needs confirming against a sample that actually has one |
+  | `Paid In` / `Withdrawn` | `amount` + `direction` | separate columns, only one populated per row |
+  | `Balance` | `balance_after` | one running balance for the whole account — no sub-ledgers |
+- **Dedupe strategy:** same pattern as Mentor Sacco and NCBA — `Receipt
+  No.` is stable but **not unique per row**. M-Pesa's Fuliza (overdraft)
+  mechanic is the clearest example yet: a single real-world payment
+  routinely posts as 2-3 rows sharing one receipt (the actual payment, an
+  "OverDraft of Credit Party" credit covering the shortfall, and
+  sometimes a separate charge line) — e.g. receipt `UIFJH6C7O7` covers
+  an overdraft credit, the Pay Bill payment itself, and its charge, all
+  as three distinct rows. Use `Receipt No. + Details + amount`.
+- **Known quirks:**
+  - **Rows are newest-first, not chronological.** The detailed
+    statement lists the most recent transaction at the top and the
+    oldest at the bottom — the opposite order from Mentor Sacco and
+    NCBA. Running-balance validation (step 6) needs to process this
+    provider's rows bottom-to-top, or explicitly sort by
+    `Completion Time` ascending first.
+  - **Fuliza (overdraft) transactions always split into multiple rows**
+    sharing one receipt number — see the dedupe strategy above. Don't
+    treat the "OverDraft of Credit Party" line as a separate real
+    transaction from the payment it's covering; both need to be
+    understood together to make sense of the balance movement, even
+    though they're stored as separate `transactions` rows.
+  - **Counterparty phone numbers are pre-masked by Safaricom itself**
+    (e.g. `254791***999`), unlike NCBA/Mentor Sacco which show full
+    numbers. Pass through as-is.
+  - **One statement = one account here**, same as NCBA — no sub-ledger
+    split needed for this provider.
 
 ### Airtel Money (mobile_money)
 
