@@ -195,15 +195,40 @@ Copy this block for each new provider.
 
 ### Equity Bank (bank)
 
-- **Status:** not started
-- **File format:** assumed PDF or Word (`.doc`/`.docx`) — TBD which,
-  pending a sample statement
-- **Password-protected:** assumed yes — TBD exactly what the password is
-  derived from, pending a sample statement
-- **Sample files:** none yet — see the "collect sample statements" ticket
-- **Field mapping:** TBD — pending a sample statement to analyze
-- **Dedupe strategy:** TBD
-- **Known quirks:** TBD
+- **Status:** samples collected (ab-35)
+- **File format:** PDF — "Account Statement"
+- **Password-protected:** yes, confirmed. **Derivation confirmed on this
+  sample**: the password is the last 4 digits of the account number
+  (account `...1195`, password `1195`). Worth double-checking against a
+  second sample before fully trusting it as the general rule, but this
+  is the first provider where the derivation is actually confirmed
+  rather than guessed.
+- **Sample files:**
+  `tests/fixtures/statements/equity_bank/account_statement_sample.pdf`
+  (PII redacted — customer name, phone numbers, email, and account
+  number replaced with placeholders via exact word-level PDF redaction).
+  **Re-locked with a placeholder password (`0000`)**, not the real one —
+  even though this provider's derivation is now known, the real value is
+  still tied to this specific real account number, so it isn't reused.
+- **Field mapping:**
+  | Source column/position | Maps to | Notes |
+  |---|---|---|
+  | `Transaction Details` | `description` | multi-line; often packs a phone number, an M-Pesa-style transaction code, a counterparty name, and a fragment of the account number into one wrapped block - keep the whole block as `description` for MVP1 rather than trying to parse out the counterparty separately |
+  | `Payment reference` | not directly mapped | used for dedupe (see below) — not unique per row |
+  | `Value Date` | `txn_date` | `DD/MM/YYYY` |
+  | `Credit (Money In)` / `Debit (Money Out)` | `amount` + `direction` | genuine separate columns, like NCBA — only one populated per row |
+  | `Balance` | `balance_after` | one running balance for the whole account |
+- **Dedupe strategy:** same pattern as every other provider so far —
+  `Payment reference` is stable but **not unique per row** (e.g.
+  reference `5492302` covers both a debit and its own SMS charge as two
+  separate rows in this sample). Use `Payment reference + amount`.
+- **Known quirks:**
+  - Small amounts render oddly zero-padded (e.g. `02.26` for KES 2.26) —
+    strip leading zeros rather than treating them as a formatting error.
+  - A `Total` row closes out the transaction table (total credits, total
+    debits, closing balance) — not a transaction, must be skipped, same
+    as Mentor Sacco/NCBA's non-transaction rows.
+  - One account = one statement, no sub-ledger split needed.
 
 ### NCBA Bank (bank)
 
