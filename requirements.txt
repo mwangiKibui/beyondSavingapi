@@ -10,3 +10,4 @@ PyJWT==2.9.0
 python-multipart==0.0.12
 pypdf==5.0.1
 cryptography==50.0.1
+pdfplumber==0.11.10

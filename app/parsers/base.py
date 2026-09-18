@@ -18,6 +18,13 @@ class ParsedTransaction(TypedDict):
     counterparty: str | None
     description: str | None
     balance_after: float | None
+    # Not a transactions column itself - written into the dedupe_hash
+    # column by ab-44/ab-43. Only the parser understands its own
+    # provider's reference-number format well enough to build a stable
+    # fingerprint (see docs/provider-onboarding-runbook.md's per-provider
+    # "Dedupe strategy" entries), so it's computed here rather than
+    # downstream from generic fields alone.
+    dedupe_hash: str
 
 
 class StatementParser(Protocol):

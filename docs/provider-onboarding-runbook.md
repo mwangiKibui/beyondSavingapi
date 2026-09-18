@@ -126,10 +126,16 @@ Copy this block for each new provider.
 
 ### M-Pesa (mobile_money)
 
-- **Status:** samples collected (ab-35)
+- **Status:** parser built (ab-39) — `app/parsers/mpesa.py`, registered
+  in `app/parsers/PARSERS`. Not yet wired to actually write transactions
+  or flip the import to `parsed` — that's ab-44.
 - **File format:** PDF — official "M-PESA STATEMENT" from Safaricom,
   with a SUMMARY section (totals per transaction type) followed by a
-  DETAILED STATEMENT section (the actual transaction table)
+  DETAILED STATEMENT section (the actual transaction table). Extracted
+  via `pdfplumber`'s table detection, not `pypdf`'s raw text — the raw
+  text interleaves columns unpredictably (e.g. a page number merging
+  into the next cell's word) in a way that makes reliable column-based
+  parsing impractical.
 - **Password-protected:** yes, confirmed. Not derivable from anything
   visible in the statement itself (checked against the mobile number —
   no match); likely the account holder's ID number or a self-set PIN,
@@ -150,7 +156,7 @@ Copy this block for each new provider.
   | `Receipt No.` | not directly mapped | used for dedupe (see below) — not unique per row |
   | `Completion Time` | `txn_date` | `YYYY-MM-DD HH:MM:SS` |
   | `Details` | `description` | often wraps across 2-4 lines — keep the full multi-line text as one field |
-  | `Transaction Status` | not mapped for MVP1 | every row in this sample was `Completed`; a `Failed`/`Reversed` status (if a future sample shows one) should probably exclude that row rather than post it as a real transaction — needs confirming against a sample that actually has one |
+  | `Transaction Status` | not mapped for MVP1 | every row in this sample was `Completed`; the parser defensively excludes any row whose status isn't exactly `Completed` rather than posting it, though this is still untested against a real sample that actually has one |
   | `Paid In` / `Withdrawn` | `amount` + `direction` | separate columns, only one populated per row |
   | `Balance` | `balance_after` | one running balance for the whole account — no sub-ledgers |
 - **Dedupe strategy:** same pattern as Mentor Sacco and NCBA — `Receipt
@@ -179,6 +185,27 @@ Copy this block for each new provider.
     numbers. Pass through as-is.
   - **One statement = one account here**, same as NCBA — no sub-ledger
     split needed for this provider.
+  - **`pdfplumber`'s table detection isn't consistent page to page on
+    this document** — one page's transaction table has 2 extra empty
+    columns splitting "Details" from the rest, the other doesn't. The
+    parser locates columns by the header row's own text rather than a
+    fixed index to handle both shapes.
+  - **A wrapped counterparty name at the end of a multi-line "Details"
+    cell sometimes spills into a phantom extra table row** with no
+    Receipt No./Completion Time of its own (occasionally the name is
+    even truncated by a character in that phantom row). The real text
+    is already part of the row above's cell, so the parser discards any
+    row missing both a Receipt No. and a Completion Time rather than
+    merging it in and risking a duplicated/garbled name.
+  - **A bare page number occasionally bleeds into the last row's
+    "Details" cell on a page** (e.g. a trailing `"4"` on its own line).
+    The parser strips any line that's only digits before joining a
+    cell's wrapped lines into the final `description`.
+  - **The uploaded file must be stored decrypted, not as originally
+    uploaded** — ab-37's endpoint now runs a password-protected PDF
+    through `decrypt_if_needed()` before it ever reaches MinIO, since
+    the password itself is intentionally never persisted and a parser
+    has no other way to read the file later.
 
 ### Airtel Money (mobile_money)
 
