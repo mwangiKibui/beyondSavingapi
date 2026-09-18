@@ -47,6 +47,27 @@ async def list_statement_imports(
     return [dict(row) for row in rows], total
 
 
+async def get_import_for_processing(pool: asyncpg.Pool, *, import_id: UUID) -> dict | None:
+    row = await pool.fetchrow(
+        """
+        SELECT si.id, si.account_id, si.storage_key, si.file_name, a.provider
+        FROM statement_imports si
+        JOIN accounts a ON a.id = si.account_id
+        WHERE si.id = $1
+        """,
+        import_id,
+    )
+    return dict(row) if row else None
+
+
+async def mark_import_failed(pool: asyncpg.Pool, *, import_id: UUID, error_detail: str) -> None:
+    await pool.execute(
+        "UPDATE statement_imports SET status = 'failed', error_detail = $1 WHERE id = $2",
+        error_detail,
+        import_id,
+    )
+
+
 async def create_statement_import(
     pool: asyncpg.Pool,
     *,

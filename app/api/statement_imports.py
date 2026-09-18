@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.core.config import get_settings
 from app.core.db import get_pool
+from app.core.queues import PARSE_JOBS_QUEUE
 from app.core.redis import get_redis
 from app.core.security import get_current_user_id
 from app.core.storage import get_storage_client
@@ -22,9 +23,6 @@ router = APIRouter(prefix="/statement-imports", tags=["statement-imports"])
 
 ALLOWED_EXTENSIONS = (".pdf", ".doc", ".docx")
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10MB
-
-# ab-38 owns the consumer/worker side of this list.
-PARSE_JOBS_QUEUE = "parse_jobs"
 
 ALLOWED_PAGE_SIZES = (5, 10, 20, 30)
 ImportStatus = Literal["pending", "parsed", "failed"]
