@@ -1,10 +1,23 @@
 import io
+import warnings
 
-import pypdf
+import pikepdf
 
 
 class IncorrectStatementPassword(Exception):
     pass
+
+
+def _open_pdf(content: bytes, password: str | None) -> pikepdf.Pdf:
+    # pikepdf (backed by qpdf), not pypdf: pypdf 5.0.1 fails to validate a
+    # genuinely correct password against at least one real-world Equity
+    # Bank statement (AES-128, /V 4 /R 4) - confirmed by hand, pikepdf
+    # opens the same file with the same password without issue. A
+    # password harmlessly passed to an unencrypted PDF just warns, so
+    # that's silenced rather than treated as a problem.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        return pikepdf.open(io.BytesIO(content), password=password or "")
 
 
 def check_password(*, content: bytes, filename: str, password: str | None) -> None:
@@ -20,17 +33,10 @@ def check_password(*, content: bytes, filename: str, password: str | None) -> No
     if not filename.lower().endswith(".pdf"):
         return
 
-    reader = pypdf.PdfReader(io.BytesIO(content))
-    if not reader.is_encrypted:
-        return
-
-    if not password:
-        raise IncorrectStatementPassword()
-
-    # decrypt() returns a PasswordType: 0 (falsy) if the password didn't
-    # work, 1 or 2 (truthy) if it matched the user or owner password.
-    if not reader.decrypt(password):
-        raise IncorrectStatementPassword()
+    try:
+        _open_pdf(content, password).close()
+    except pikepdf.PasswordError as exc:
+        raise IncorrectStatementPassword() from exc
 
 
 def decrypt_if_needed(*, content: bytes, filename: str, password: str | None) -> bytes:
@@ -47,16 +53,13 @@ def decrypt_if_needed(*, content: bytes, filename: str, password: str | None) ->
     if not filename.lower().endswith(".pdf"):
         return content
 
-    reader = pypdf.PdfReader(io.BytesIO(content))
-    if not reader.is_encrypted:
-        return content
+    pdf = _open_pdf(content, password)
+    try:
+        if not pdf.is_encrypted:
+            return content
 
-    reader.decrypt(password or "")
-
-    writer = pypdf.PdfWriter()
-    for page in reader.pages:
-        writer.add_page(page)
-
-    buffer = io.BytesIO()
-    writer.write(buffer)
-    return buffer.getvalue()
+        buffer = io.BytesIO()
+        pdf.save(buffer)
+        return buffer.getvalue()
+    finally:
+        pdf.close()
