@@ -355,8 +355,17 @@ Copy this block for each new provider.
 
 ### Mentor Sacco (sacco)
 
-- **Status:** samples collected (ab-35)
-- **File format:** PDF — "MEMBER STATEMENT" from Mentor Sacco Society Ltd
+- **Status:** parser built (ab-115) — `app/parsers/mentor_sacco.py`.
+  **Not registered in `app/parsers.PARSERS`** - its output
+  (`list[SubLedgerStatement]`, one entry per sub-ledger *instance*) is
+  fundamentally multi-account and doesn't fit `StatementParser`'s
+  single-list interface. Standalone for now, ready for ab-116 to wire
+  in once it resolves how a multi-account import actually maps to
+  beyondSaving accounts.
+- **File format:** PDF — "MEMBER STATEMENT" from Mentor Sacco Society Ltd.
+  Parsed from raw `pdfplumber` text (not table extraction) - same
+  fragmentation problem as Equity Bank (`extract_tables()` found real
+  transaction rows on only 1 of the sample's 2 pages).
 - **Password-protected:** no (contrary to the general MVP1 assumption —
   the sample opened directly, no password prompt)
 - **Sample files:** `tests/fixtures/statements/mentor_sacco/member_statement_sample.pdf`
@@ -369,15 +378,18 @@ Copy this block for each new provider.
   | `Date` | `txn_date` | `DD-MM-YYYY` |
   | `Document No` | not directly mapped | used for dedupe (see below) — repeats across related postings, not a unique row ID by itself |
   | `Transaction Details` | `description` | raw line text, kept verbatim |
-  | `Debit` / `Credit` | `amount` + `direction` | which column is populated decides `direction` — see quirks below for the CR/DR-section caveat |
+  | `Debit` / `Credit` | `amount` + `direction` | **not extracted positionally** - same as every bank provider, only one column is ever populated per row and it renders as a single bare number in text. Derived instead from the **balance delta** against the previous row within that same sub-ledger, seeded from the sub-ledger's own opening balance (explicit where stated, otherwise backed out from the first real row - see quirks). |
   | `Balance` | `balance_after` | running balance for that sub-ledger only, not the whole statement |
 - **Dedupe strategy:** `Document No` is **not** unique per row — the same
   code (e.g. `ATRC-07315`) appears on multiple rows across different
   sub-ledgers because one real-world event (e.g. a loan repayment) posts
-  simultaneously to several sub-ledgers. Use a composite hash of
-  `Document No + sub-ledger name + Transaction Details + amount` instead
-  of `Document No` alone. Rows with a genuinely unique per-row code (the
-  `Balance Enquiry Charges-SSPSP...` lines) are unambiguous either way.
+  simultaneously to several sub-ledgers (confirmed: 5 rows share this
+  exact code across 3 different sub-ledgers in the real sample, two of
+  them even sharing identical description text and amount). Since
+  `Document No` isn't cleanly isolated from the rest of the line's text
+  either (it's just the first word), the actual implementation hashes
+  `sub-ledger name + full description + amount` - achieving the same
+  practical uniqueness without needing to extract it separately.
 - **Known quirks:**
   - **One statement, four sub-ledgers.** A single Mentor Sacco member
     statement bundles four independent accounts, each with its own
@@ -410,13 +422,25 @@ Copy this block for each new provider.
     The sub-ledger legitimately went negative there; strip the
     parentheses and treat as negative when validating the running
     balance.
-  - **CR/DR marks the sub-ledger's normal balance side, not the
-    transaction's direction on its own.** Ordinary Deposit, Savings
-    Account, and Share Capital are CR-normal (Credit = money in, Debit =
-    money out, matching a member's savings). Instant Loan is DR-normal
-    (Debit = loan disbursed/liability increases, Credit = repayment).
-    Map `direction` per sub-ledger accordingly rather than assuming
-    Debit always means "out."
+  - **CR/DR marks whether the *resulting balance* sits in a credit or
+    debit position, not that specific transaction's own direction.**
+    Confirmed against the real sample: a row that clearly *decreases* a
+    CR-normal sub-ledger's balance (e.g. a loan repayment deducted from
+    Savings) still carries a "CR" suffix, because the balance is still
+    positive/in-credit after it - not because that transaction was
+    itself a credit. Since direction is derived from the balance delta
+    (not from Debit/Credit column position, which isn't reliably
+    extractable anyway), the CR/DR mark ends up not being needed for
+    computing `direction` at all - only the parenthesization matters,
+    for the balance's numeric sign.
+  - **Two of the four sub-ledger instances have no explicit "Opening
+    Balance" line at all** - Savings Account, and a fresh Instant Loan
+    disbursement (as opposed to the separate, pre-existing Instant Loan
+    amortization ledger, which does state one). For these, the opening
+    balance is backed out from the first real row instead, assuming
+    that row is an increase (e.g. `0.00` balance after a `100.00`
+    deposit implies an opening of `-100.00`) - confirmed correct by
+    hand against the real sample.
 
 ### Biashara Sacco (sacco)
 
