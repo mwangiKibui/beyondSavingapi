@@ -126,6 +126,78 @@ def test_create_account_rejects_account_number_over_20_digits(client, fake_user,
     assert response.status_code == 422
 
 
+def test_create_account_requires_sub_ledger_for_mentor_sacco(client, fake_user, fake_pool):
+    response = client.post(
+        "/accounts",
+        json={
+            "nickname": "Mentor Sacco Ordinary",
+            "account_type": "sacco",
+            "provider": "Mentor Sacco",
+            "account_number": "90000001",
+            "currency": "KES",
+        },
+    )
+    assert response.status_code == 422
+    assert "sub_ledger" in response.json()["detail"]
+
+
+def test_create_account_rejects_invalid_sub_ledger_value(client, fake_user, fake_pool):
+    response = client.post(
+        "/accounts",
+        json={
+            "nickname": "Mentor Sacco Ordinary",
+            "account_type": "sacco",
+            "provider": "Mentor Sacco",
+            "account_number": "90000001",
+            "currency": "KES",
+            "sub_ledger": "Not A Real Sub-Ledger",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_create_account_rejects_sub_ledger_for_non_mentor_sacco_provider(client, fake_user, fake_pool):
+    response = client.post(
+        "/accounts", json={**VALID_PAYLOAD, "sub_ledger": "Ordinary Deposit"}
+    )
+    assert response.status_code == 422
+    assert "sub_ledger" in response.json()["detail"]
+
+
+def test_create_account_accepts_valid_mentor_sacco_sub_ledger(client, fake_user, fake_pool, monkeypatch):
+    created = {
+        "id": str(uuid4()),
+        "nickname": "Mentor Sacco Ordinary",
+        "account_type": "sacco",
+        "provider": "Mentor Sacco",
+        "account_number": "90000001",
+        "currency": "KES",
+        "is_active": True,
+        "sub_ledger": "Ordinary Deposit",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    mock_create_account = AsyncMock(return_value=created)
+    monkeypatch.setattr("app.api.accounts.create_account", mock_create_account)
+
+    response = client.post(
+        "/accounts",
+        json={
+            "nickname": "Mentor Sacco Ordinary",
+            "account_type": "sacco",
+            "provider": "Mentor Sacco",
+            "account_number": "90000001",
+            "currency": "KES",
+            "sub_ledger": "Ordinary Deposit",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["sub_ledger"] == "Ordinary Deposit"
+    _, kwargs = mock_create_account.call_args
+    assert kwargs["sub_ledger"] == "Ordinary Deposit"
+
+
 def test_create_account_returns_503_when_db_unreachable(client, fake_user):
     # No fake_pool override: in this test environment there's no real
     # Postgres, so app.state.db_pool is genuinely None.

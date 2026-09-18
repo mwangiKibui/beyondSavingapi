@@ -17,6 +17,7 @@ SAMPLE_ITEM = {
     "account_number": "1100234501",
     "currency": "KES",
     "is_active": True,
+    "sub_ledger": None,
     "balance": 30000.0,
     "unreconciled_count": 3,
 }
