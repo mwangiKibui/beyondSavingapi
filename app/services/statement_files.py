@@ -31,3 +31,32 @@ def check_password(*, content: bytes, filename: str, password: str | None) -> No
     # work, 1 or 2 (truthy) if it matched the user or owner password.
     if not reader.decrypt(password):
         raise IncorrectStatementPassword()
+
+
+def decrypt_if_needed(*, content: bytes, filename: str, password: str | None) -> bytes:
+    """Strips PDF encryption from content before it's stored, so nothing
+    downstream (a parser, weeks from now) ever needs the password again -
+    we already said "we do not save the password," and this is what makes
+    that true without also making the file unreadable forever after.
+
+    Assumes check_password() has already been called and passed - this
+    doesn't re-validate the password, just re-applies it to produce a
+    plain copy. Passes non-PDFs and already-unencrypted PDFs through
+    unchanged.
+    """
+    if not filename.lower().endswith(".pdf"):
+        return content
+
+    reader = pypdf.PdfReader(io.BytesIO(content))
+    if not reader.is_encrypted:
+        return content
+
+    reader.decrypt(password or "")
+
+    writer = pypdf.PdfWriter()
+    for page in reader.pages:
+        writer.add_page(page)
+
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()

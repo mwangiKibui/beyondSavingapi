@@ -1,7 +1,10 @@
+import io
 import logging
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
+import pypdf
 import pytest
 from fastapi.testclient import TestClient
 
@@ -127,6 +130,9 @@ def test_upload_statement_success(client, fake_user, fake_pool, monkeypatch):
         "app.api.statement_imports.get_account", AsyncMock(return_value=FAKE_ACCOUNT)
     )
     monkeypatch.setattr("app.api.statement_imports.check_password", MagicMock(return_value=None))
+    monkeypatch.setattr(
+        "app.api.statement_imports.decrypt_if_needed", MagicMock(return_value=PDF_CONTENT)
+    )
     mock_create = AsyncMock(return_value=created_row)
     monkeypatch.setattr("app.api.statement_imports.create_statement_import", mock_create)
     mock_storage_client = MagicMock()
@@ -160,6 +166,42 @@ def test_upload_statement_success(client, fake_user, fake_pool, monkeypatch):
     lpush_args = mock_redis.lpush.call_args.args
     assert lpush_args[0] == "parse_jobs"
     assert lpush_args[1] == str(create_kwargs["import_id"])
+
+
+def test_upload_statement_stores_the_decrypted_content_not_the_original(client, fake_user, fake_pool, monkeypatch):
+    # An end-to-end check against the real fixture (rather than a mock)
+    # that a password-protected upload's stored bytes are genuinely
+    # decrypted - the password itself is never persisted, so nothing
+    # downstream could ever unlock the original encrypted bytes again.
+    fixture_path = (
+        Path(__file__).parent / "fixtures" / "statements" / "mpesa" / "statement_sample.pdf"
+    )
+    encrypted_content = fixture_path.read_bytes()
+
+    monkeypatch.setattr(
+        "app.api.statement_imports.get_account", AsyncMock(return_value=FAKE_ACCOUNT)
+    )
+    monkeypatch.setattr(
+        "app.api.statement_imports.create_statement_import",
+        AsyncMock(return_value={"id": uuid4(), "account_id": ACCOUNT_ID, "file_name": "statement_sample.pdf",
+                                 "status": "pending", "period_start": None, "period_end": None,
+                                 "row_count": None, "error_detail": None, "created_at": "2026-01-01T00:00:00+00:00"}),
+    )
+    mock_storage_client = MagicMock()
+    monkeypatch.setattr("app.api.statement_imports.get_storage_client", lambda: mock_storage_client)
+    mock_redis = MagicMock()
+    mock_redis.lpush = AsyncMock()
+    monkeypatch.setattr("app.api.statement_imports.get_redis", lambda: mock_redis)
+
+    response = _upload(
+        client, password="0000000", filename="statement_sample.pdf", content=encrypted_content
+    )
+
+    assert response.status_code == 201
+    stored_content = mock_storage_client.put_object.call_args.kwargs["Body"]
+    assert stored_content != encrypted_content
+    reader = pypdf.PdfReader(io.BytesIO(stored_content))
+    assert not reader.is_encrypted
 
 
 def test_upload_statement_logs_and_returns_generic_500_on_unexpected_error(

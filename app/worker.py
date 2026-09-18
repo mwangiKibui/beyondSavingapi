@@ -8,7 +8,7 @@ from app.core.config import get_settings
 from app.core.queues import PARSE_JOBS_QUEUE
 from app.core.redis import get_redis
 from app.core.storage import get_storage_client
-from app.parsers.base import PARSERS
+from app.parsers import PARSERS
 from app.repositories.statement_imports import get_import_for_processing, mark_import_failed
 
 logging.basicConfig(level=logging.INFO)
@@ -54,10 +54,17 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
             .get_object(Bucket=settings.minio_bucket, Key=record["storage_key"])["Body"]
             .read()
         )
-        parser(content)
+        transactions = parser(content)
         # ab-44 (write parsed transactions + update import status to
         # "parsed") owns turning the parser's output into rows - nothing
-        # further to do here once a provider actually has one.
+        # further to do here once a provider actually has one, beyond
+        # this log line so a real parse run is at least visible for now.
+        logger.info(
+            "Parsed %d transaction(s) for import %s (provider %s) - not yet persisted, ab-44 isn't built",
+            len(transactions),
+            import_id,
+            record["provider"],
+        )
     except Exception:
         logger.error("Unexpected error processing parse job %s", import_id, exc_info=True)
         try:

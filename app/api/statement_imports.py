@@ -15,7 +15,11 @@ from app.core.security import get_current_user_id
 from app.core.storage import get_storage_client
 from app.repositories.accounts import get_account
 from app.repositories.statement_imports import create_statement_import, list_statement_imports
-from app.services.statement_files import IncorrectStatementPassword, check_password
+from app.services.statement_files import (
+    IncorrectStatementPassword,
+    check_password,
+    decrypt_if_needed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +155,11 @@ async def upload_statement_endpoint(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Incorrect statement password",
             ) from exc
+
+        # Strips PDF encryption before storing - the password itself is
+        # never persisted (see check_password's docstring), but the file
+        # still needs to be readable later without it (ab-39's parser).
+        content = decrypt_if_needed(content=content, filename=file_name, password=password)
 
         import_id = uuid4()
         storage_key = f"statements/{import_id}/{file_name}"
