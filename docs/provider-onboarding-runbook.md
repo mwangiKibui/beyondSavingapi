@@ -222,8 +222,14 @@ Copy this block for each new provider.
 
 ### Equity Bank (bank)
 
-- **Status:** samples collected (ab-35)
-- **File format:** PDF — "Account Statement"
+- **Status:** parser built (ab-40) — `app/parsers/equity_bank.py`,
+  registered in `app/parsers.PARSERS`. Not yet wired to write
+  transactions or flip the import to `parsed` — that's ab-44.
+- **File format:** PDF — "Account Statement". Parsed from raw
+  `pdfplumber` text (not table extraction) - `extract_tables()`
+  fragments this document into inconsistent single-row tables that
+  miss several real transaction rows entirely, unlike M-Pesa's cleaner
+  table structure.
 - **Password-protected:** yes, confirmed. **Derivation confirmed on this
   sample**: the password is the last 4 digits of the account number
   (account `...1195`, password `1195`). Worth double-checking against a
@@ -240,10 +246,10 @@ Copy this block for each new provider.
 - **Field mapping:**
   | Source column/position | Maps to | Notes |
   |---|---|---|
-  | `Transaction Details` | `description` | multi-line; often packs a phone number, an M-Pesa-style transaction code, a counterparty name, and a fragment of the account number into one wrapped block - keep the whole block as `description` for MVP1 rather than trying to parse out the counterparty separately |
+  | `Transaction Details` | `description` | multi-line; often packs a phone number, an M-Pesa-style transaction code, a counterparty name, and a fragment of the account number into one wrapped block - keep the whole block as `description` for MVP1 rather than trying to parse out the counterparty separately. The parser's line-boundary heuristic occasionally attaches a transaction's trailing wrapped fragment to the *next* transaction's description instead of its own - an accepted MVP1 imprecision, doesn't affect amount/direction/balance/dedupe |
   | `Payment reference` | not directly mapped | used for dedupe (see below) — not unique per row |
   | `Value Date` | `txn_date` | `DD/MM/YYYY` |
-  | `Credit (Money In)` / `Debit (Money Out)` | `amount` + `direction` | genuine separate columns, like NCBA — only one populated per row |
+  | `Credit (Money In)` / `Debit (Money Out)` | `amount` + `direction` | **not extracted positionally** - only one column is ever populated per row, and it renders in text as a single bare number with no way to tell which column it came from. Derived instead from the **balance delta** against the previous row (seeded from an opening balance computed from the closing `Total` row - see below). Verified by hand against every transaction in the real sample. |
   | `Balance` | `balance_after` | one running balance for the whole account |
 - **Dedupe strategy:** same pattern as every other provider so far —
   `Payment reference` is stable but **not unique per row** (e.g.
@@ -254,14 +260,35 @@ Copy this block for each new provider.
     strip leading zeros rather than treating them as a formatting error.
   - A `Total` row closes out the transaction table (total credits, total
     debits, closing balance) — not a transaction, must be skipped, same
-    as Mentor Sacco/NCBA's non-transaction rows.
+    as Mentor Sacco/NCBA's non-transaction rows. **This statement has no
+    explicit opening balance anywhere** - derive it from this same Total
+    row instead: `opening = closing_balance - total_credit + total_debit`
+    (verified: gives exactly 340.99, which correctly reconstructs every
+    transaction's balance delta from the first row onward).
+  - **Some template text (headers, this Total row) renders with every
+    character doubled** - a faux-bold trick (e.g. `"TToottaall"` for
+    "Total", `"4422,,666600..0000"` for "42,660.00"). Actual transaction
+    data rows are never affected, only certain label/total text. Undo it
+    per-word (split on whitespace, collapse a word back down if every
+    adjacent character pair matches) rather than treating it as
+    corruption - the same trick was later confirmed on NCBA's own
+    "IMPORTANT NOTICE" footer text too, so it's provider-agnostic.
+  - `pdfplumber`'s `extract_tables()` is unreliable on this document -
+    it detects each transaction row as its own separate single-row
+    "table" inconsistently, and misses some rows outright. Raw
+    `extract_text()` plus a regex matching each transaction's numeric
+    line (`reference date amount balance`) is what the actual parser
+    uses instead.
   - One account = one statement, no sub-ledger split needed.
 
 ### NCBA Bank (bank)
 
-- **Status:** samples collected (ab-35)
+- **Status:** parser built (ab-40) — `app/parsers/ncba_bank.py`,
+  registered in `app/parsers.PARSERS`. Not yet wired to write
+  transactions or flip the import to `parsed` — that's ab-44.
 - **File format:** PDF — "e-Statement of Account", "GO BANKING - PAY AS
-  YOU GO CURRENT" account type
+  YOU GO CURRENT" account type. Real sample spans 5 pages, all parsed
+  and verified (see below).
 - **Password-protected:** yes, confirmed. Not derivable from any field
   visible in the statement itself (checked against the account number
   and every counterparty phone number in the sample — none match); likely
@@ -282,16 +309,19 @@ Copy this block for each new provider.
   |---|---|---|
   | `Date` | `txn_date` | `DD/MM/YYYY` |
   | `Value Date` | not directly mapped | equalled `Date` on every row in this sample — likely redundant for this account type, but map it in case a future sample shows it differing (e.g. a cheque clearing after the transaction date) |
-  | `Transaction Type and Details` (2 lines: a type line, then a reference/counterparty line below it) | `description` | keep both lines — the reference line often carries the only counterparty info (phone number, PayBill/BuyGoods till, MPESA name) |
-  | `Debit` / `Credit` | `amount` + `direction` | genuine separate table columns here (unlike a same-cell CR/DR suffix) — only one is populated per row |
+  | `Transaction Type and Details` (2 lines: a type line, then a reference/counterparty line below it, though some wrap onto a 3rd) | `description` | keep all lines — the reference line often carries the only counterparty info (phone number, PayBill/BuyGoods till, MPESA name) |
+  | `Debit` / `Credit` | `amount` + `direction` | **not extracted positionally** - `pdfplumber`'s table detection merges every row on a page into one multi-line cell per column, losing per-row Debit/Credit alignment entirely (17 debit values and 2 credit values, no way to tell which of 19 transactions each belongs to). Derived instead from the **balance delta** against the previous row, seeded from the header's explicit "Opening Balance" - verified against every one of 79 transactions across all 5 pages, and the running total matches the statement's own "Payments In"/"Payments Out"/"Closing Balance" figures exactly. |
   | `Balance` | `balance_after` | one running balance for the whole account — no sub-ledgers, unlike Mentor Sacco |
 - **Dedupe strategy:** the reference code in the detail line (e.g.
   `FT26216QCX1Y`) is stable but **not unique per row** — confirmed in
   this sample: `1009866765 AA261354HDCY FT26216QCX1Y` appears identically
   on three consecutive rows (a commission fee, the main clearing entry,
-  and an excise duty line, all one real-world event). Use a composite of
-  `reference + amount` (add `description` too if two related postings
-  ever share both).
+  and an excise duty line, all one real-world event). Since there's no
+  separate reference column extracted for this provider (the reference
+  is embedded in the multi-line `description` text, not isolated), the
+  actual implementation hashes `description + amount` - achieving the
+  same "not reference alone" requirement without needing to isolate the
+  specific reference substring.
 - **Known quirks:**
   - **No "Opening Balance" row in the table.** Unlike Mentor Sacco, the
     starting balance comes only from the statement's summary header
@@ -312,6 +342,16 @@ Copy this block for each new provider.
     sub-ledger split needed for this provider.
   - Card numbers appear pre-masked by the bank itself (e.g.
     `425199......9399`) — pass through as-is, don't attempt to unmask.
+  - **`pdfplumber`'s table detection merges every transaction on a page
+    into one giant multi-line cell per column** - there are no
+    horizontal rules between individual rows, only the outer/column
+    borders. Real per-row boundaries are reconstructed from the `Date`
+    column's own word y-positions instead (a date renders on exactly
+    one line per transaction, unlike `description`, which can wrap onto
+    extras) - see `app/parsers/ncba_bank.py`'s geometry-based row
+    reconstruction. This is the same underlying limitation Equity Bank
+    hits, just manifesting differently (Equity fragments into too many
+    tables, NCBA collapses into too few).
 
 ### Mentor Sacco (sacco)
 
