@@ -30,15 +30,14 @@ async def create_account(
     provider: str,
     account_number: str,
     currency: str,
-    sub_ledger: str | None = None,
 ) -> dict:
     try:
         row = await pool.fetchrow(
             """
-            INSERT INTO accounts (user_id, nickname, account_type, provider, account_number, currency, sub_ledger)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO accounts (user_id, nickname, account_type, provider, account_number, currency)
+            VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING id, nickname, account_type, provider, account_number, currency,
-                      is_active, sub_ledger, created_at, updated_at
+                      is_active, created_at, updated_at
             """,
             user_id,
             nickname,
@@ -46,7 +45,6 @@ async def create_account(
             provider,
             account_number,
             currency,
-            sub_ledger,
         )
     except asyncpg.UniqueViolationError as exc:
         raise DuplicateAccount(account_number) from exc
@@ -57,7 +55,7 @@ async def get_account(pool: asyncpg.Pool, *, account_id: UUID, user_id: UUID) ->
     row = await pool.fetchrow(
         """
         SELECT id, nickname, account_type, provider, account_number, currency,
-               is_active, sub_ledger, created_at, updated_at
+               is_active, created_at, updated_at
         FROM accounts
         WHERE id = $1 AND user_id = $2
         """,
@@ -65,29 +63,6 @@ async def get_account(pool: asyncpg.Pool, *, account_id: UUID, user_id: UUID) ->
         user_id,
     )
     return dict(row) if row else None
-
-
-async def get_sibling_accounts(
-    pool: asyncpg.Pool, *, user_id: UUID, provider: str, account_number: str
-) -> list[dict]:
-    """Every account this user has for the same real-world provider
-    account, e.g. all four Mentor Sacco sub-ledger accounts sharing one
-    account_number. Used to route a multi-ledger statement's parsed
-    transactions to the right sibling account (matched by sub_ledger),
-    once ab-44 writes them.
-    """
-    rows = await pool.fetch(
-        """
-        SELECT id, nickname, account_type, provider, account_number, currency,
-               is_active, sub_ledger, created_at, updated_at
-        FROM accounts
-        WHERE user_id = $1 AND provider = $2 AND account_number = $3
-        """,
-        user_id,
-        provider,
-        account_number,
-    )
-    return [dict(row) for row in rows]
 
 
 async def update_account(
@@ -99,7 +74,6 @@ async def update_account(
     account_type: str | None,
     provider: str | None,
     account_number: str | None,
-    sub_ledger: str | None = None,
 ) -> dict | None:
     # Column names below are hardcoded, not user input - only the values are
     # parameterized - so building the SET clause per which fields were
@@ -119,9 +93,6 @@ async def update_account(
     if account_number is not None:
         values.append(account_number)
         set_clauses.append(f"account_number = ${len(values)}")
-    if sub_ledger is not None:
-        values.append(sub_ledger)
-        set_clauses.append(f"sub_ledger = ${len(values)}")
 
     values.append(str(account_id))
     values.append(str(user_id))
@@ -131,7 +102,7 @@ async def update_account(
         SET {", ".join(set_clauses)}
         WHERE id = ${len(values) - 1} AND user_id = ${len(values)}
         RETURNING id, nickname, account_type, provider, account_number, currency,
-                  is_active, sub_ledger, created_at, updated_at
+                  is_active, created_at, updated_at
     """
 
     try:
@@ -149,7 +120,7 @@ async def deactivate_account(pool: asyncpg.Pool, *, account_id: UUID, user_id: U
         SET is_active = false, updated_at = now()
         WHERE id = $1 AND user_id = $2
         RETURNING id, nickname, account_type, provider, account_number, currency,
-                  is_active, sub_ledger, created_at, updated_at
+                  is_active, created_at, updated_at
         """,
         account_id,
         user_id,
@@ -170,8 +141,16 @@ async def list_accounts(
     currency: str | None,
     reconciliation_status: str | None,
 ) -> tuple[list[dict], int]:
-    # balance: the most recent transaction's balance_after for the account,
-    # or 0 if it has none yet (no create-transaction API exists yet, ab-47/48).
+    # balance: for an account with no sub-ledgers (the vast majority),
+    # the most recent transaction's balance_after directly, or 0 if it
+    # has none yet. For an account WITH sub-ledgers (ab-119), each
+    # sub-ledger has its own independent running balance - combined by
+    # taking each one's own latest balance_after and summing them per
+    # their stored balance_treatment ('addition' adds, 'deduction'
+    # subtracts). sub_ledger_balance.total is non-NULL (even when it's
+    # exactly 0) whenever the account has ANY sub_ledgers rows, which is
+    # what lets the COALESCE below prefer it over the direct-balance
+    # fallback only for accounts that actually have sub-ledgers.
     # unreconciled_count: transactions with zero allocation rows - a
     # placeholder proxy until ab-61 owns the real reconciled/partial/
     # unreconciled state machine.
@@ -179,16 +158,32 @@ async def list_accounts(
         WITH account_data AS (
             SELECT
                 a.id, a.nickname, a.account_type, a.provider, a.account_number, a.currency,
-                a.is_active, a.sub_ledger,
-                COALESCE(latest_txn.balance_after, 0) AS balance,
+                a.is_active,
+                COALESCE(sub_ledger_balance.total, direct_txn.balance_after, 0) AS balance,
                 COALESCE(unreconciled.count, 0) AS unreconciled_count
             FROM accounts a
             LEFT JOIN LATERAL (
                 SELECT balance_after FROM transactions t
-                WHERE t.account_id = a.id
+                WHERE t.account_id = a.id AND t.sub_ledger_id IS NULL
                 ORDER BY t.txn_date DESC, t.created_at DESC
                 LIMIT 1
-            ) latest_txn ON true
+            ) direct_txn ON true
+            LEFT JOIN LATERAL (
+                SELECT SUM(
+                    CASE sl.balance_treatment
+                        WHEN 'addition' THEN COALESCE(sl_txn.balance_after, 0)
+                        ELSE -COALESCE(sl_txn.balance_after, 0)
+                    END
+                ) AS total
+                FROM sub_ledgers sl
+                LEFT JOIN LATERAL (
+                    SELECT balance_after FROM transactions t
+                    WHERE t.sub_ledger_id = sl.id
+                    ORDER BY t.txn_date DESC, t.created_at DESC
+                    LIMIT 1
+                ) sl_txn ON true
+                WHERE sl.account_id = a.id
+            ) sub_ledger_balance ON true
             LEFT JOIN LATERAL (
                 SELECT COUNT(*) AS count FROM transactions t
                 WHERE t.account_id = a.id
@@ -228,8 +223,8 @@ async def list_accounts(
 
 
 async def get_currency_summary(pool: asyncpg.Pool, *, user_id: UUID) -> list[dict]:
-    # Same balance derivation as list_accounts (most recent transaction's
-    # balance_after, 0 if none), summed per currency. Unfiltered - a
+    # Same balance derivation as list_accounts (see its own comment for
+    # the sub-ledger rollup logic), summed per currency. Unfiltered - a
     # dashboard summary reflects the user's whole account list, not
     # whatever search/filter state the accounts table happens to be in.
     rows = await pool.fetch(
@@ -237,14 +232,30 @@ async def get_currency_summary(pool: asyncpg.Pool, *, user_id: UUID) -> list[dic
         SELECT
             a.currency,
             COUNT(*) AS account_count,
-            COALESCE(SUM(COALESCE(latest_txn.balance_after, 0)), 0) AS total
+            COALESCE(SUM(COALESCE(sub_ledger_balance.total, direct_txn.balance_after, 0)), 0) AS total
         FROM accounts a
         LEFT JOIN LATERAL (
             SELECT balance_after FROM transactions t
-            WHERE t.account_id = a.id
+            WHERE t.account_id = a.id AND t.sub_ledger_id IS NULL
             ORDER BY t.txn_date DESC, t.created_at DESC
             LIMIT 1
-        ) latest_txn ON true
+        ) direct_txn ON true
+        LEFT JOIN LATERAL (
+            SELECT SUM(
+                CASE sl.balance_treatment
+                    WHEN 'addition' THEN COALESCE(sl_txn.balance_after, 0)
+                    ELSE -COALESCE(sl_txn.balance_after, 0)
+                END
+            ) AS total
+            FROM sub_ledgers sl
+            LEFT JOIN LATERAL (
+                SELECT balance_after FROM transactions t
+                WHERE t.sub_ledger_id = sl.id
+                ORDER BY t.txn_date DESC, t.created_at DESC
+                LIMIT 1
+            ) sl_txn ON true
+            WHERE sl.account_id = a.id
+        ) sub_ledger_balance ON true
         WHERE a.user_id = $1
           AND a.is_active = true
         GROUP BY a.currency

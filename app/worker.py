@@ -11,9 +11,9 @@ from app.core.storage import get_storage_client
 from app.parsers import PARSERS
 from app.parsers.base import ParsedTransaction, StatementParseError, statement_period
 from app.parsers.mentor_sacco import SubLedgerStatement, parse_mentor_sacco_statement
-from app.repositories.accounts import get_sibling_accounts
 from app.repositories.statement_imports import (
     get_import_for_processing,
+    get_import_sub_ledgers,
     mark_import_failed,
     mark_import_parsed,
 )
@@ -36,10 +36,10 @@ MENTOR_SACCO = "Mentor Sacco"
 
 class ImportWriteError(Exception):
     """The parser succeeded, but this import can't be safely written -
-    e.g. a Mentor Sacco sub-ledger has no matching account yet. Raised
-    instead of a partial/wrong write, so the import fails clearly with
-    a specific reason rather than silently dropping or mis-filing
-    transactions.
+    e.g. no sub-ledgers were selected, or a selected sub-ledger's name
+    has no matching section in the parsed statement. Raised instead of
+    a partial/wrong write, so the import fails clearly with a specific
+    reason rather than silently dropping or mis-filing transactions.
     """
 
 
@@ -65,45 +65,55 @@ async def _write_single_account_import(
     )
 
 
-async def _write_mentor_sacco_import(
+async def _write_sub_ledger_import(
     pool: asyncpg.Pool,
     *,
     import_id: UUID,
-    user_id: UUID,
-    account_number: str,
+    account_id: UUID,
     sections: list[SubLedgerStatement],
 ) -> None:
-    # Resolve every sub-ledger's destination account before writing
-    # anything, so a statement whose accounts aren't all set up yet
-    # fails cleanly with nothing written, rather than partially
-    # importing (developer's explicit call on ab-44's open question).
-    siblings = await get_sibling_accounts(
-        pool, user_id=user_id, provider=MENTOR_SACCO, account_number=account_number
-    )
-    siblings_by_sub_ledger = {sibling["sub_ledger"]: sibling for sibling in siblings}
+    # Which of the account's sub-ledgers the uploader actually selected
+    # for this file (ab-119) - persisted at upload time, since the
+    # worker picks the job up later in a separate process. A section in
+    # the parsed statement that wasn't selected is ignored entirely,
+    # even though it's present in the file (developer's explicit call).
+    selected = await get_import_sub_ledgers(pool, import_id=import_id)
+    if not selected:
+        raise ImportWriteError(
+            "No sub-ledgers were selected for this upload - choose at least one to import."
+        )
 
     resolved: list[tuple[UUID, list[ParsedTransaction]]] = []
-    for section in sections:
-        sibling = siblings_by_sub_ledger.get(section["name"])
-        if sibling is None:
+    for sub_ledger in selected:
+        # "Instant Loan" can appear twice as two genuinely separate
+        # balance sequences (see ab-115) but there's only ever one
+        # "Instant Loan" sub-ledger - every matching section's
+        # transactions insert against that one sub_ledger_id.
+        matching_sections = [s for s in sections if s["name"] == sub_ledger["name"]]
+        if not matching_sections:
             raise ImportWriteError(
-                f"No account found for Mentor Sacco sub-ledger '{section['name']}' - "
-                "create that account before this statement can be processed."
+                f"No section named '{sub_ledger['name']}' was found in this statement - "
+                "check the sub-ledger's name matches the statement exactly."
             )
-        resolved.append((sibling["id"], section["transactions"]))
+        transactions = [txn for section in matching_sections for txn in section["transactions"]]
+        resolved.append((sub_ledger["id"], transactions))
 
     all_transactions: list[ParsedTransaction] = []
     total_inserted = 0
-    for account_id, transactions in resolved:
+    for sub_ledger_id, transactions in resolved:
         total_inserted += await insert_transactions(
-            pool, account_id=account_id, import_id=import_id, transactions=transactions
+            pool,
+            account_id=account_id,
+            import_id=import_id,
+            transactions=transactions,
+            sub_ledger_id=sub_ledger_id,
         )
         all_transactions.extend(transactions)
 
     skipped = len(all_transactions) - total_inserted
     if skipped:
         logger.info(
-            "Import %s: skipped %d duplicate transaction(s) across Mentor Sacco sub-ledgers",
+            "Import %s: skipped %d duplicate transaction(s) across selected sub-ledgers",
             import_id,
             skipped,
         )
@@ -157,11 +167,10 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
         try:
             if is_mentor_sacco:
                 sections = parser(content)
-                await _write_mentor_sacco_import(
+                await _write_sub_ledger_import(
                     pool,
                     import_id=parsed_import_id,
-                    user_id=record["user_id"],
-                    account_number=record["account_number"],
+                    account_id=record["account_id"],
                     sections=sections,
                 )
             else:

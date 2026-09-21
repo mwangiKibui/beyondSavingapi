@@ -181,10 +181,9 @@ async def test_process_job_writes_transactions_and_marks_parsed_with_real_period
     )
 
 
-async def test_process_job_routes_mentor_sacco_sections_to_their_sibling_accounts(fake_pool, monkeypatch):
+async def test_process_job_routes_mentor_sacco_sections_to_their_selected_sub_ledgers(fake_pool, monkeypatch):
     import_id = uuid4()
-    user_id = uuid4()
-    account_id = uuid4()  # the import's own account - just one of the four siblings
+    account_id = uuid4()  # ONE account - both sub-ledgers attach to it (ab-119)
     ordinary_deposit_id = uuid4()
     savings_account_id = uuid4()
     monkeypatch.setattr(
@@ -196,8 +195,6 @@ async def test_process_job_routes_mentor_sacco_sections_to_their_sibling_account
                 "storage_key": "statements/x/statement.pdf",
                 "file_name": "statement.pdf",
                 "provider": "Mentor Sacco",
-                "user_id": user_id,
-                "account_number": "90000001",
             }
         ),
     )
@@ -215,11 +212,11 @@ async def test_process_job_routes_mentor_sacco_sections_to_their_sibling_account
     ]
     monkeypatch.setattr("app.worker.parse_mentor_sacco_statement", MagicMock(return_value=sections))
     monkeypatch.setattr(
-        "app.worker.get_sibling_accounts",
+        "app.worker.get_import_sub_ledgers",
         AsyncMock(
             return_value=[
-                {"id": ordinary_deposit_id, "sub_ledger": "Ordinary Deposit"},
-                {"id": savings_account_id, "sub_ledger": "Savings Account"},
+                {"id": ordinary_deposit_id, "name": "Ordinary Deposit"},
+                {"id": savings_account_id, "name": "Savings Account"},
             ]
         ),
     )
@@ -240,11 +237,21 @@ async def test_process_job_routes_mentor_sacco_sections_to_their_sibling_account
     assert mock_insert.call_args_list == [
         (
             (fake_pool,),
-            {"account_id": ordinary_deposit_id, "import_id": import_id, "transactions": sections[0]["transactions"]},
+            {
+                "account_id": account_id,
+                "import_id": import_id,
+                "transactions": sections[0]["transactions"],
+                "sub_ledger_id": ordinary_deposit_id,
+            },
         ),
         (
             (fake_pool,),
-            {"account_id": savings_account_id, "import_id": import_id, "transactions": sections[1]["transactions"]},
+            {
+                "account_id": account_id,
+                "import_id": import_id,
+                "transactions": sections[1]["transactions"],
+                "sub_ledger_id": savings_account_id,
+            },
         ),
     ]
     mock_mark_parsed.assert_called_once_with(
@@ -256,7 +263,58 @@ async def test_process_job_routes_mentor_sacco_sections_to_their_sibling_account
     )
 
 
-async def test_process_job_fails_cleanly_when_a_mentor_sacco_sub_ledger_has_no_account(fake_pool, monkeypatch):
+async def test_process_job_merges_both_instant_loan_instances_into_one_sub_ledger(fake_pool, monkeypatch):
+    # "Instant Loan" can appear twice in one statement as two genuinely
+    # separate balance sequences (ab-115) but there's only ever one
+    # "Instant Loan" sub-ledger - both instances' transactions must
+    # insert against that same sub_ledger_id.
+    import_id = uuid4()
+    account_id = uuid4()
+    instant_loan_id = uuid4()
+    monkeypatch.setattr(
+        "app.worker.get_import_for_processing",
+        AsyncMock(
+            return_value={
+                "id": import_id,
+                "account_id": account_id,
+                "storage_key": "statements/x/statement.pdf",
+                "file_name": "statement.pdf",
+                "provider": "Mentor Sacco",
+            }
+        ),
+    )
+    sections = [
+        {"name": "Instant Loan", "opening_balance": 0.0, "transactions": [_txn(description="loan-a")]},
+        {"name": "Instant Loan", "opening_balance": 0.0, "transactions": [_txn(description="loan-b")]},
+    ]
+    monkeypatch.setattr("app.worker.parse_mentor_sacco_statement", MagicMock(return_value=sections))
+    monkeypatch.setattr(
+        "app.worker.get_import_sub_ledgers",
+        AsyncMock(return_value=[{"id": instant_loan_id, "name": "Instant Loan"}]),
+    )
+    mock_insert = AsyncMock(return_value=2)
+    monkeypatch.setattr("app.worker.insert_transactions", mock_insert)
+    monkeypatch.setattr("app.worker.mark_import_parsed", AsyncMock())
+    monkeypatch.setattr("app.worker.mark_import_failed", AsyncMock())
+
+    mock_body = MagicMock()
+    mock_body.read.return_value = b"file content"
+    mock_storage_client = MagicMock()
+    mock_storage_client.get_object.return_value = {"Body": mock_body}
+    monkeypatch.setattr("app.worker.get_storage_client", lambda: mock_storage_client)
+
+    await process_job(fake_pool, str(import_id))
+
+    mock_insert.assert_called_once_with(
+        fake_pool,
+        account_id=account_id,
+        import_id=import_id,
+        transactions=sections[0]["transactions"] + sections[1]["transactions"],
+        sub_ledger_id=instant_loan_id,
+    )
+
+
+async def test_process_job_fails_cleanly_when_no_sub_ledgers_were_selected(fake_pool, monkeypatch):
     import_id = uuid4()
     monkeypatch.setattr(
         "app.worker.get_import_for_processing",
@@ -267,20 +325,65 @@ async def test_process_job_fails_cleanly_when_a_mentor_sacco_sub_ledger_has_no_a
                 "storage_key": "statements/x/statement.pdf",
                 "file_name": "statement.pdf",
                 "provider": "Mentor Sacco",
-                "user_id": uuid4(),
-                "account_number": "90000001",
             }
         ),
     )
-    sections = [
-        {"name": "Ordinary Deposit", "opening_balance": 0.0, "transactions": [_txn()]},
-        {"name": "Share Capital", "opening_balance": 0.0, "transactions": [_txn()]},
-    ]
-    monkeypatch.setattr("app.worker.parse_mentor_sacco_statement", MagicMock(return_value=sections))
-    # Only Ordinary Deposit's account exists - Share Capital's is missing.
     monkeypatch.setattr(
-        "app.worker.get_sibling_accounts",
-        AsyncMock(return_value=[{"id": uuid4(), "sub_ledger": "Ordinary Deposit"}]),
+        "app.worker.parse_mentor_sacco_statement",
+        MagicMock(return_value=[{"name": "Ordinary Deposit", "opening_balance": 0.0, "transactions": [_txn()]}]),
+    )
+    monkeypatch.setattr("app.worker.get_import_sub_ledgers", AsyncMock(return_value=[]))
+    mock_insert = AsyncMock()
+    monkeypatch.setattr("app.worker.insert_transactions", mock_insert)
+    mock_mark_failed = AsyncMock()
+    monkeypatch.setattr("app.worker.mark_import_failed", mock_mark_failed)
+
+    mock_body = MagicMock()
+    mock_body.read.return_value = b"file content"
+    mock_storage_client = MagicMock()
+    mock_storage_client.get_object.return_value = {"Body": mock_body}
+    monkeypatch.setattr("app.worker.get_storage_client", lambda: mock_storage_client)
+
+    await process_job(fake_pool, str(import_id))
+
+    mock_insert.assert_not_called()
+    mock_mark_failed.assert_called_once_with(
+        fake_pool,
+        import_id=import_id,
+        error_detail="No sub-ledgers were selected for this upload - choose at least one to import.",
+    )
+
+
+async def test_process_job_fails_cleanly_when_a_selected_sub_ledger_has_no_matching_section(
+    fake_pool, monkeypatch
+):
+    import_id = uuid4()
+    monkeypatch.setattr(
+        "app.worker.get_import_for_processing",
+        AsyncMock(
+            return_value={
+                "id": import_id,
+                "account_id": uuid4(),
+                "storage_key": "statements/x/statement.pdf",
+                "file_name": "statement.pdf",
+                "provider": "Mentor Sacco",
+            }
+        ),
+    )
+    # Statement only has Ordinary Deposit, but the user selected Share
+    # Capital too (e.g. a typo'd sub-ledger name).
+    monkeypatch.setattr(
+        "app.worker.parse_mentor_sacco_statement",
+        MagicMock(return_value=[{"name": "Ordinary Deposit", "opening_balance": 0.0, "transactions": [_txn()]}]),
+    )
+    monkeypatch.setattr(
+        "app.worker.get_import_sub_ledgers",
+        AsyncMock(
+            return_value=[
+                {"id": uuid4(), "name": "Ordinary Deposit"},
+                {"id": uuid4(), "name": "Share Capital"},
+            ]
+        ),
     )
     mock_insert = AsyncMock()
     monkeypatch.setattr("app.worker.insert_transactions", mock_insert)
@@ -295,14 +398,15 @@ async def test_process_job_fails_cleanly_when_a_mentor_sacco_sub_ledger_has_no_a
 
     await process_job(fake_pool, str(import_id))
 
-    # Nothing written at all - not even Ordinary Deposit, whose account
-    # does exist - since every sibling is resolved before any insert.
+    # Nothing written at all - not even Ordinary Deposit, whose section
+    # does exist - since every selected sub-ledger is resolved before
+    # any insert.
     mock_insert.assert_not_called()
     mock_mark_failed.assert_called_once_with(
         fake_pool,
         import_id=import_id,
-        error_detail="No account found for Mentor Sacco sub-ledger 'Share Capital' - "
-        "create that account before this statement can be processed.",
+        error_detail="No section named 'Share Capital' was found in this statement - "
+        "check the sub-ledger's name matches the statement exactly.",
     )
 
 

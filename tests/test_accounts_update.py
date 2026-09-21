@@ -171,65 +171,6 @@ def test_update_account_type_provider_and_number_together(client, fake_user, fak
     assert kwargs["account_number"] == "712345678"
 
 
-def test_update_account_rejects_switching_to_mentor_sacco_without_sub_ledger(
-    client, fake_user, fake_pool, monkeypatch
-):
-    monkeypatch.setattr("app.api.accounts.get_account", AsyncMock(return_value=EXISTING_ACCOUNT))
-
-    response = client.patch(
-        f"/accounts/{ACCOUNT_ID}",
-        json={"account_type": "sacco", "provider": "Mentor Sacco", "account_number": "90000001"},
-    )
-
-    assert response.status_code == 422
-    assert "sub_ledger" in response.json()["detail"]
-
-
-def test_update_account_accepts_switching_to_mentor_sacco_with_sub_ledger(
-    client, fake_user, fake_pool, monkeypatch
-):
-    monkeypatch.setattr("app.api.accounts.get_account", AsyncMock(return_value=EXISTING_ACCOUNT))
-    mock_update_account = AsyncMock(
-        return_value={
-            **EXISTING_ACCOUNT,
-            "account_type": "sacco",
-            "provider": "Mentor Sacco",
-            "account_number": "90000001",
-            "sub_ledger": "Savings Account",
-        }
-    )
-    monkeypatch.setattr("app.api.accounts.update_account", mock_update_account)
-
-    response = client.patch(
-        f"/accounts/{ACCOUNT_ID}",
-        json={
-            "account_type": "sacco",
-            "provider": "Mentor Sacco",
-            "account_number": "90000001",
-            "sub_ledger": "Savings Account",
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json()["sub_ledger"] == "Savings Account"
-    _, kwargs = mock_update_account.call_args
-    assert kwargs["sub_ledger"] == "Savings Account"
-
-
-def test_update_account_rejects_sub_ledger_for_non_mentor_sacco_account(
-    client, fake_user, fake_pool, monkeypatch
-):
-    monkeypatch.setattr("app.api.accounts.get_account", AsyncMock(return_value=EXISTING_ACCOUNT))
-
-    response = client.patch(
-        f"/accounts/{ACCOUNT_ID}",
-        json={"sub_ledger": "Ordinary Deposit"},
-    )
-
-    assert response.status_code == 422
-    assert "sub_ledger" in response.json()["detail"]
-
-
 def test_update_account_rejects_mobile_number_wrong_length_for_new_type(
     client, fake_user, fake_pool, monkeypatch
 ):
