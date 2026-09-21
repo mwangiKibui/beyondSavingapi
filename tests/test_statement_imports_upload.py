@@ -89,6 +89,7 @@ def test_upload_statement_rejects_wrong_password_without_side_effects(
     monkeypatch.setattr(
         "app.api.statement_imports.get_account", AsyncMock(return_value=FAKE_ACCOUNT)
     )
+    monkeypatch.setattr("app.api.statement_imports.list_sub_ledgers", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         "app.api.statement_imports.check_password",
         MagicMock(side_effect=IncorrectStatementPassword()),
@@ -129,12 +130,14 @@ def test_upload_statement_success(client, fake_user, fake_pool, monkeypatch):
     monkeypatch.setattr(
         "app.api.statement_imports.get_account", AsyncMock(return_value=FAKE_ACCOUNT)
     )
+    monkeypatch.setattr("app.api.statement_imports.list_sub_ledgers", AsyncMock(return_value=[]))
     monkeypatch.setattr("app.api.statement_imports.check_password", MagicMock(return_value=None))
     monkeypatch.setattr(
         "app.api.statement_imports.decrypt_if_needed", MagicMock(return_value=PDF_CONTENT)
     )
     mock_create = AsyncMock(return_value=created_row)
     monkeypatch.setattr("app.api.statement_imports.create_statement_import", mock_create)
+    monkeypatch.setattr("app.api.statement_imports.add_import_sub_ledgers", AsyncMock())
     mock_storage_client = MagicMock()
     monkeypatch.setattr(
         "app.api.statement_imports.get_storage_client", lambda: mock_storage_client
@@ -168,6 +171,110 @@ def test_upload_statement_success(client, fake_user, fake_pool, monkeypatch):
     assert lpush_args[1] == str(create_kwargs["import_id"])
 
 
+def test_upload_statement_rejects_sub_ledger_ids_for_an_account_with_none(
+    client, fake_user, fake_pool, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.api.statement_imports.get_account", AsyncMock(return_value=FAKE_ACCOUNT)
+    )
+    monkeypatch.setattr("app.api.statement_imports.list_sub_ledgers", AsyncMock(return_value=[]))
+
+    response = client.post(
+        "/statement-imports",
+        data={"account_id": str(ACCOUNT_ID), "sub_ledger_ids": str(uuid4())},
+        files={"file": ("statement.pdf", PDF_CONTENT, "application/pdf")},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "This account has no sub-ledgers"
+
+
+def test_upload_statement_requires_at_least_one_selected_sub_ledger(
+    client, fake_user, fake_pool, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.api.statement_imports.get_account", AsyncMock(return_value=FAKE_ACCOUNT)
+    )
+    monkeypatch.setattr(
+        "app.api.statement_imports.list_sub_ledgers",
+        AsyncMock(return_value=[{"id": uuid4(), "name": "Ordinary Deposit"}]),
+    )
+
+    response = _upload(client)
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Select at least one sub-ledger to import from this statement"
+
+
+def test_upload_statement_rejects_a_sub_ledger_id_not_on_the_account(
+    client, fake_user, fake_pool, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.api.statement_imports.get_account", AsyncMock(return_value=FAKE_ACCOUNT)
+    )
+    monkeypatch.setattr(
+        "app.api.statement_imports.list_sub_ledgers",
+        AsyncMock(return_value=[{"id": uuid4(), "name": "Ordinary Deposit"}]),
+    )
+
+    response = client.post(
+        "/statement-imports",
+        data={"account_id": str(ACCOUNT_ID), "sub_ledger_ids": str(uuid4())},
+        files={"file": ("statement.pdf", PDF_CONTENT, "application/pdf")},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "One or more selected sub-ledgers don't belong to this account"
+
+
+def test_upload_statement_persists_selected_sub_ledgers(client, fake_user, fake_pool, monkeypatch):
+    sub_ledger_id = uuid4()
+    import_id = uuid4()
+    monkeypatch.setattr(
+        "app.api.statement_imports.get_account", AsyncMock(return_value=FAKE_ACCOUNT)
+    )
+    monkeypatch.setattr(
+        "app.api.statement_imports.list_sub_ledgers",
+        AsyncMock(return_value=[{"id": sub_ledger_id, "name": "Instant Loan"}]),
+    )
+    monkeypatch.setattr("app.api.statement_imports.check_password", MagicMock(return_value=None))
+    monkeypatch.setattr(
+        "app.api.statement_imports.decrypt_if_needed", MagicMock(return_value=PDF_CONTENT)
+    )
+    monkeypatch.setattr(
+        "app.api.statement_imports.create_statement_import",
+        AsyncMock(
+            return_value={
+                "id": import_id,
+                "account_id": ACCOUNT_ID,
+                "file_name": "statement.pdf",
+                "status": "pending",
+                "period_start": None,
+                "period_end": None,
+                "row_count": None,
+                "error_detail": None,
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        ),
+    )
+    mock_add_import_sub_ledgers = AsyncMock()
+    monkeypatch.setattr("app.api.statement_imports.add_import_sub_ledgers", mock_add_import_sub_ledgers)
+    monkeypatch.setattr("app.api.statement_imports.get_storage_client", lambda: MagicMock())
+    mock_redis = MagicMock()
+    mock_redis.lpush = AsyncMock()
+    monkeypatch.setattr("app.api.statement_imports.get_redis", lambda: mock_redis)
+
+    response = client.post(
+        "/statement-imports",
+        data={"account_id": str(ACCOUNT_ID), "sub_ledger_ids": str(sub_ledger_id)},
+        files={"file": ("statement.pdf", PDF_CONTENT, "application/pdf")},
+    )
+
+    assert response.status_code == 201
+    _, kwargs = mock_add_import_sub_ledgers.call_args
+    assert kwargs["sub_ledger_ids"] == [sub_ledger_id]
+
+
 def test_upload_statement_stores_the_decrypted_content_not_the_original(client, fake_user, fake_pool, monkeypatch):
     # An end-to-end check against the real fixture (rather than a mock)
     # that a password-protected upload's stored bytes are genuinely
@@ -181,12 +288,14 @@ def test_upload_statement_stores_the_decrypted_content_not_the_original(client, 
     monkeypatch.setattr(
         "app.api.statement_imports.get_account", AsyncMock(return_value=FAKE_ACCOUNT)
     )
+    monkeypatch.setattr("app.api.statement_imports.list_sub_ledgers", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         "app.api.statement_imports.create_statement_import",
         AsyncMock(return_value={"id": uuid4(), "account_id": ACCOUNT_ID, "file_name": "statement_sample.pdf",
                                  "status": "pending", "period_start": None, "period_end": None,
                                  "row_count": None, "error_detail": None, "created_at": "2026-01-01T00:00:00+00:00"}),
     )
+    monkeypatch.setattr("app.api.statement_imports.add_import_sub_ledgers", AsyncMock())
     mock_storage_client = MagicMock()
     monkeypatch.setattr("app.api.statement_imports.get_storage_client", lambda: mock_storage_client)
     mock_redis = MagicMock()

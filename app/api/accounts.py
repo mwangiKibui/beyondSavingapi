@@ -37,12 +37,6 @@ PROVIDERS_BY_TYPE: dict[str, list[str]] = {
 MOBILE_NUMBER_LENGTH = 9
 MAX_ACCOUNT_NUMBER_LENGTH = 20
 
-# Mentor Sacco bundles four independent sub-ledgers into one statement,
-# each needing its own beyondSaving account (see ab-115/ab-116 and
-# docs/provider-onboarding-runbook.md's Mentor Sacco entry). No other
-# provider has this split yet.
-MENTOR_SACCO_SUB_LEDGERS = ("Ordinary Deposit", "Savings Account", "Share Capital", "Instant Loan")
-
 
 class CreateAccountRequest(BaseModel):
     nickname: str = Field(min_length=1)
@@ -50,7 +44,6 @@ class CreateAccountRequest(BaseModel):
     provider: str = Field(min_length=1)
     account_number: str = Field(min_length=1)
     currency: Currency
-    sub_ledger: str | None = None
 
 
 class AccountResponse(BaseModel):
@@ -61,7 +54,6 @@ class AccountResponse(BaseModel):
     account_number: str
     currency: str
     is_active: bool
-    sub_ledger: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -80,7 +72,6 @@ class AccountListItem(BaseModel):
     account_number: str
     currency: str
     is_active: bool
-    sub_ledger: str | None = None
     balance: float
     unreconciled_count: int
 
@@ -112,7 +103,6 @@ class UpdateAccountRequest(BaseModel):
     account_type: AccountType | None = None
     provider: str | None = Field(default=None, min_length=1)
     account_number: str | None = Field(default=None, min_length=1)
-    sub_ledger: str | None = None
 
 
 def _validate_provider(account_type: str, provider: str) -> None:
@@ -120,20 +110,6 @@ def _validate_provider(account_type: str, provider: str) -> None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"'{provider}' is not a supported provider for {account_type} accounts",
-        )
-
-
-def _validate_sub_ledger(provider: str, sub_ledger: str | None) -> None:
-    if provider == "Mentor Sacco":
-        if sub_ledger not in MENTOR_SACCO_SUB_LEDGERS:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"sub_ledger is required for Mentor Sacco accounts and must be one of {MENTOR_SACCO_SUB_LEDGERS}",
-            )
-    elif sub_ledger is not None:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="sub_ledger is only supported for Mentor Sacco accounts",
         )
 
 
@@ -171,7 +147,6 @@ async def create_account_endpoint(
     try:
         _validate_provider(payload.account_type, payload.provider)
         _validate_account_number(payload.account_type, payload.account_number)
-        _validate_sub_ledger(payload.provider, payload.sub_ledger)
 
         account = await create_account(
             pool,
@@ -181,7 +156,6 @@ async def create_account_endpoint(
             provider=payload.provider,
             account_number=payload.account_number,
             currency=payload.currency,
-            sub_ledger=payload.sub_ledger,
         )
     except HTTPException:
         raise
@@ -291,11 +265,10 @@ async def update_account_endpoint(
             and payload.account_type is None
             and payload.provider is None
             and payload.account_number is None
-            and payload.sub_ledger is None
         ):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="At least one of nickname, account_type, provider, account_number, or sub_ledger must be provided",
+                detail="At least one of nickname, account_type, provider, or account_number must be provided",
             )
 
         if payload.account_type is not None and (payload.provider is None or payload.account_number is None):
@@ -316,13 +289,6 @@ async def update_account_endpoint(
         if payload.account_number is not None:
             _validate_account_number(effective_type, payload.account_number)
 
-        if payload.sub_ledger is not None or payload.provider is not None:
-            effective_provider = payload.provider or existing["provider"]
-            effective_sub_ledger = (
-                payload.sub_ledger if payload.sub_ledger is not None else existing.get("sub_ledger")
-            )
-            _validate_sub_ledger(effective_provider, effective_sub_ledger)
-
         account = await update_account(
             pool,
             account_id=account_id,
@@ -331,7 +297,6 @@ async def update_account_endpoint(
             account_type=payload.account_type,
             provider=payload.provider,
             account_number=payload.account_number,
-            sub_ledger=payload.sub_ledger,
         )
         if account is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")

@@ -51,8 +51,7 @@ async def list_statement_imports(
 async def get_import_for_processing(pool: asyncpg.Pool, *, import_id: UUID) -> dict | None:
     row = await pool.fetchrow(
         """
-        SELECT si.id, si.account_id, si.storage_key, si.file_name,
-               a.provider, a.user_id, a.account_number
+        SELECT si.id, si.account_id, si.storage_key, si.file_name, a.provider
         FROM statement_imports si
         JOIN accounts a ON a.id = si.account_id
         WHERE si.id = $1
@@ -60,6 +59,31 @@ async def get_import_for_processing(pool: asyncpg.Pool, *, import_id: UUID) -> d
         import_id,
     )
     return dict(row) if row else None
+
+
+async def get_import_sub_ledgers(pool: asyncpg.Pool, *, import_id: UUID) -> list[dict]:
+    """The sub-ledgers the uploader selected for this import (ab-119) -
+    empty for every import against an account with no sub-ledgers.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT sl.id, sl.name
+        FROM statement_import_sub_ledgers sis
+        JOIN sub_ledgers sl ON sl.id = sis.sub_ledger_id
+        WHERE sis.import_id = $1
+        """,
+        import_id,
+    )
+    return [dict(row) for row in rows]
+
+
+async def add_import_sub_ledgers(pool: asyncpg.Pool, *, import_id: UUID, sub_ledger_ids: list[UUID]) -> None:
+    if not sub_ledger_ids:
+        return
+    await pool.executemany(
+        "INSERT INTO statement_import_sub_ledgers (import_id, sub_ledger_id) VALUES ($1, $2)",
+        [(import_id, sub_ledger_id) for sub_ledger_id in sub_ledger_ids],
+    )
 
 
 async def mark_import_failed(pool: asyncpg.Pool, *, import_id: UUID, error_detail: str) -> None:

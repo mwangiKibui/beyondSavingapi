@@ -14,7 +14,12 @@ from app.core.redis import get_redis
 from app.core.security import get_current_user_id
 from app.core.storage import get_storage_client
 from app.repositories.accounts import get_account
-from app.repositories.statement_imports import create_statement_import, list_statement_imports
+from app.repositories.statement_imports import (
+    add_import_sub_ledgers,
+    create_statement_import,
+    list_statement_imports,
+)
+from app.repositories.sub_ledgers import list_sub_ledgers
 from app.services.statement_files import (
     IncorrectStatementPassword,
     check_password,
@@ -116,6 +121,11 @@ async def list_statement_imports_endpoint(
 async def upload_statement_endpoint(
     account_id: UUID = Form(...),
     password: str | None = Form(default=None),
+    # Which of the account's sub-ledgers to import from this file (ab-119) -
+    # must be empty for an account with none, and non-empty (naming only
+    # this account's own sub-ledgers) for one that has them. Repeated
+    # multipart fields, e.g. sub_ledger_ids=<id1>&sub_ledger_ids=<id2>.
+    sub_ledger_ids: list[UUID] = Form(default=[]),
     file: UploadFile = File(...),
     user_id: UUID = Depends(get_current_user_id),
     pool: asyncpg.Pool | None = Depends(get_pool),
@@ -143,6 +153,25 @@ async def upload_statement_endpoint(
         account = await get_account(pool, account_id=account_id, user_id=user_id)
         if account is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+
+        account_sub_ledgers = await list_sub_ledgers(pool, account_id=account_id)
+        if account_sub_ledgers:
+            valid_ids = {sub_ledger["id"] for sub_ledger in account_sub_ledgers}
+            if not sub_ledger_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Select at least one sub-ledger to import from this statement",
+                )
+            if not set(sub_ledger_ids).issubset(valid_ids):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="One or more selected sub-ledgers don't belong to this account",
+                )
+        elif sub_ledger_ids:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="This account has no sub-ledgers",
+            )
 
         # Own try/except, distinct from the whole-operation catch-all below -
         # a wrong/missing password is an expected rejection that must return
@@ -176,6 +205,11 @@ async def upload_statement_endpoint(
             file_name=file_name,
             storage_key=storage_key,
         )
+
+        # Persisted before enqueueing - the worker picks the job up in a
+        # separate process and needs a durable record of which
+        # sub-ledgers were selected, not just the transient job message.
+        await add_import_sub_ledgers(pool, import_id=import_id, sub_ledger_ids=sub_ledger_ids)
 
         await get_redis().lpush(PARSE_JOBS_QUEUE, str(import_id))
     except HTTPException:
