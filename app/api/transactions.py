@@ -5,13 +5,14 @@ from uuid import UUID
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.db import get_pool
 from app.core.security import get_current_user_id
 from app.repositories.accounts import get_account
 from app.repositories.statement_imports import get_import_owned_by_user
-from app.repositories.transactions import list_transactions
+from app.repositories.sub_ledgers import list_sub_ledgers
+from app.repositories.transactions import insert_manual_transactions, list_transactions
 
 logger = logging.getLogger(__name__)
 
@@ -114,3 +115,123 @@ async def list_transactions_endpoint(
         ) from None
 
     return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+class TransactionCreateItem(BaseModel):
+    account_id: UUID
+    sub_ledger_id: UUID | None = None
+    txn_date: date
+    # Validated manually against ("in", "out") below rather than typed as
+    # Literal - every business-rule failure in this batch (this included)
+    # reports as the same "Row N: ..." string, matching ManualEntryTable's
+    # (ab-45/ab-46) own client-side messages, rather than mixing that with
+    # Pydantic's structured per-field error shape for some checks only.
+    direction: str
+    amount: float
+    description: str | None = None
+
+
+class CreateTransactionsRequest(BaseModel):
+    transactions: list[TransactionCreateItem] = Field(min_length=1)
+
+
+class CreateTransactionsResponse(BaseModel):
+    items: list[TransactionListItem]
+
+
+@router.post("/batch", response_model=CreateTransactionsResponse, status_code=status.HTTP_201_CREATED)
+async def create_transactions_endpoint(
+    body: CreateTransactionsRequest,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    if pool is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable")
+
+    try:
+        accounts_by_id: dict[UUID, dict] = {}
+        sub_ledgers_by_account: dict[UUID, list[dict]] = {}
+
+        for index, item in enumerate(body.transactions, start=1):
+            row_label = f"Row {index}"
+
+            if item.account_id not in accounts_by_id:
+                account = await get_account(pool, account_id=item.account_id, user_id=user_id)
+                if account is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND, detail=f"{row_label}: Account not found"
+                    )
+                accounts_by_id[item.account_id] = account
+                sub_ledgers_by_account[item.account_id] = await list_sub_ledgers(
+                    pool, account_id=item.account_id
+                )
+
+            sub_ledgers = sub_ledgers_by_account[item.account_id]
+            if sub_ledgers:
+                if item.sub_ledger_id is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"{row_label}: Sub-ledger is required",
+                    )
+                if not any(sl["id"] == item.sub_ledger_id for sl in sub_ledgers):
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"{row_label}: Sub-ledger does not belong to this account",
+                    )
+            elif item.sub_ledger_id is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"{row_label}: This account has no sub-ledgers",
+                )
+
+            if item.txn_date > date.today():
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"{row_label}: Date cannot be in the future",
+                )
+            if item.direction not in ("in", "out"):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"{row_label}: Direction must be 'in' or 'out'",
+                )
+            if item.amount <= 0:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"{row_label}: Amount must be greater than zero",
+                )
+
+        created = await insert_manual_transactions(
+            pool,
+            account_ids=[item.account_id for item in body.transactions],
+            sub_ledger_ids=[item.sub_ledger_id for item in body.transactions],
+            txn_dates=[item.txn_date for item in body.transactions],
+            amounts=[item.amount for item in body.transactions],
+            currencies=[accounts_by_id[item.account_id]["currency"] for item in body.transactions],
+            directions=[item.direction for item in body.transactions],
+            descriptions=[item.description for item in body.transactions],
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error creating manual transactions for user %s", user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Something went wrong. Please try again.",
+        ) from None
+
+    sub_ledger_names = {
+        sub_ledger["id"]: sub_ledger["name"]
+        for sub_ledgers in sub_ledgers_by_account.values()
+        for sub_ledger in sub_ledgers
+    }
+    items = [
+        {
+            **row,
+            "sub_ledger_name": sub_ledger_names.get(row["sub_ledger_id"]),
+            # A transaction this endpoint just created can't already have
+            # an allocation - always unreconciled, no need to query.
+            "status": "unreconciled",
+        }
+        for row in created
+    ]
+    return {"items": items}

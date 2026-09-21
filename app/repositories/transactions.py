@@ -65,6 +65,46 @@ async def insert_transactions(
     return len(rows)
 
 
+async def insert_manual_transactions(
+    pool: asyncpg.Pool,
+    *,
+    account_ids: list[UUID],
+    sub_ledger_ids: list[UUID | None],
+    txn_dates: list[date],
+    amounts: list[float],
+    currencies: list[str],
+    directions: list[str],
+    descriptions: list[str | None],
+) -> list[dict]:
+    """Bulk-inserts manual entries (ab-48) - source='manual', with
+    import_id, dedupe_hash, and balance_after all NULL per
+    beyondSavingdb's own schema comment on the transactions table.
+    Unlike insert_transactions' statement path, manual entries are never
+    deduplicated, so there's no ON CONFLICT clause here.
+    """
+    rows = await pool.fetch(
+        """
+        INSERT INTO transactions (
+            account_id, sub_ledger_id, source, txn_date, amount, currency, direction, description
+        )
+        SELECT account_id, sub_ledger_id, 'manual', txn_date, amount, currency, direction, description
+        FROM UNNEST(
+            $1::uuid[], $2::uuid[], $3::date[], $4::numeric[], $5::text[], $6::text[], $7::text[]
+        ) AS t(account_id, sub_ledger_id, txn_date, amount, currency, direction, description)
+        RETURNING id, account_id, txn_date, amount, currency, direction, counterparty, description,
+                  balance_after, import_id, sub_ledger_id
+        """,
+        account_ids,
+        sub_ledger_ids,
+        txn_dates,
+        amounts,
+        currencies,
+        directions,
+        descriptions,
+    )
+    return [dict(row) for row in rows]
+
+
 async def list_transactions(
     pool: asyncpg.Pool,
     *,
@@ -81,16 +121,12 @@ async def list_transactions(
     sort_by: str,
     sort_dir: str,
 ) -> tuple[list[dict], int]:
-    # balance_after: returned as-is, never NULL in practice today - every
-    # real transaction currently comes from ab-44's write path, which
-    # always populates it. No manual-entry creation exists yet (ab-47/
-    # ab-48 are still Backlog), so a computed running-balance fallback
-    # for a genuinely NULL balance_after would be untested against any
-    # real data - left for whichever ticket first builds manual entries
-    # to implement (and it must group by sub_ledger_id first when it
-    # does - see ab-119's note on this ticket - a fallback replayed
-    # across a whole sub-ledger account's mixed sequences would be
-    # wrong).
+    # balance_after: returned as-is, genuinely NULL for a manual entry
+    # (ab-48) since there's no parsed statement to derive it from. No
+    # computed running-balance fallback exists for that case - whoever
+    # builds one must group by sub_ledger_id first (see ab-119's note on
+    # this ticket - a fallback replayed across a whole sub-ledger
+    # account's mixed sequences would be wrong).
     #
     # import_id, when given, is the ONLY filter that applies (besides
     # user ownership) - "show me everything this one upload produced,"
