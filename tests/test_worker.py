@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import pytest
 
+from app.parsers.base import StatementParseError
 from app.worker import process_job, run_worker
 
 
@@ -101,6 +102,43 @@ async def test_process_job_fetches_content_and_calls_a_registered_parser(fake_po
     )
     mock_parser.assert_called_once_with(b"file content")
     mock_mark_failed.assert_not_called()
+
+
+async def test_process_job_marks_failed_with_the_parsers_own_message_on_statement_parse_error(
+    fake_pool, monkeypatch, caplog
+):
+    import_id = uuid4()
+    monkeypatch.setattr(
+        "app.worker.get_import_for_processing",
+        AsyncMock(
+            return_value={
+                "id": import_id,
+                "account_id": uuid4(),
+                "storage_key": "statements/x/statement.pdf",
+                "file_name": "statement.pdf",
+                "provider": "Test Provider",
+            }
+        ),
+    )
+    mock_mark_failed = AsyncMock()
+    monkeypatch.setattr("app.worker.mark_import_failed", mock_mark_failed)
+
+    mock_parser = MagicMock(side_effect=StatementParseError("Running balance mismatch at transaction 3"))
+    monkeypatch.setattr("app.worker.PARSERS", {"Test Provider": mock_parser})
+
+    mock_body = MagicMock()
+    mock_body.read.return_value = b"file content"
+    mock_storage_client = MagicMock()
+    mock_storage_client.get_object.return_value = {"Body": mock_body}
+    monkeypatch.setattr("app.worker.get_storage_client", lambda: mock_storage_client)
+
+    with caplog.at_level(logging.INFO):
+        await process_job(fake_pool, str(import_id))
+
+    mock_mark_failed.assert_called_once_with(
+        fake_pool, import_id=import_id, error_detail="Running balance mismatch at transaction 3"
+    )
+    assert any("Parser rejected import" in r.message for r in caplog.records)
 
 
 async def test_process_job_marks_failed_with_generic_message_on_unexpected_error(fake_pool, monkeypatch, caplog):

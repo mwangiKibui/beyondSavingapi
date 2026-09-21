@@ -5,7 +5,7 @@ from datetime import datetime
 
 import pdfplumber
 
-from app.parsers.base import ParsedTransaction
+from app.parsers.base import ParsedTransaction, StatementParseError, validate_running_balance
 
 DEFAULT_CURRENCY = "KES"
 
@@ -22,6 +22,15 @@ _MIN_MERGED_ROW_HEIGHT = 40
 
 def _parse_number(value: str) -> float:
     return float(value.replace(",", ""))
+
+
+def _find_opening_balance(first_page_text: str) -> float:
+    match = _OPENING_BALANCE_RE.search(first_page_text)
+    if match is None:
+        raise StatementParseError(
+            "Could not find NCBA Bank's 'Opening Balance' field on the statement's first page"
+        )
+    return _parse_number(match.group(1))
 
 
 def _dedupe_hash(*, description: str, amount: float) -> str:
@@ -110,16 +119,12 @@ def _parse_page(page) -> list[dict]:
 
 def parse_ncba_bank_statement(content: bytes) -> list[ParsedTransaction]:
     with pdfplumber.open(io.BytesIO(content)) as pdf:
-        opening_balance_match = _OPENING_BALANCE_RE.search(pdf.pages[0].extract_text() or "")
+        opening_balance = _find_opening_balance(pdf.pages[0].extract_text() or "")
         raw_rows: list[dict] = []
         for page in pdf.pages:
             raw_rows.extend(_parse_page(page))
 
-    previous_balance = (
-        _parse_number(opening_balance_match.group(1))
-        if opening_balance_match
-        else (raw_rows[0]["balance"] if raw_rows else 0.0)
-    )
+    previous_balance = opening_balance
 
     transactions: list[ParsedTransaction] = []
     # Already chronological (oldest first) in the source - no reversal needed.
@@ -141,4 +146,5 @@ def parse_ncba_bank_statement(content: bytes) -> list[ParsedTransaction]:
             }
         )
 
+    validate_running_balance(transactions, opening_balance=opening_balance)
     return transactions

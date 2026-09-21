@@ -1,6 +1,7 @@
 import hashlib
 import io
 from datetime import datetime
+from itertools import permutations
 from typing import Literal
 
 import pdfplumber
@@ -98,6 +99,78 @@ def _dedupe_hash(*, receipt_no: str, details: str, amount: float) -> str:
     return hashlib.sha256(fingerprint.encode()).hexdigest()
 
 
+def _self_consistent_order(
+    cluster: list[ParsedTransaction],
+) -> list[ParsedTransaction] | None:
+    """Finds the one ordering of a same-timestamp cluster whose balance
+    chain is internally self-consistent, when the cluster sits at the
+    very start of the statement (no earlier row's balance to anchor to).
+
+    Since there's no known prior balance, each candidate order's own
+    first row is used to imply one (solving balance_after = implied +/-
+    amount) - trivially satisfiable by any order on its own, so it adds
+    no real signal for row 1. Every row after that must actually
+    reconcile against the *previous row in that same candidate order*,
+    which most permutations fail (confirmed against the real M-Pesa
+    fixture: 5 of the 6 orderings of its one genuine 3-row tie fail this
+    check, leaving exactly one - Disburse, Request, Repayment - matching
+    the hand-verified answer in ab-42's ticket).
+
+    Returns None (leave the original order alone) unless exactly one
+    ordering passes - either 0 or >1 valid orderings means this
+    technique can't distinguish the real order from noise here.
+    """
+    valid_orders = []
+    for candidate in permutations(cluster):
+        first = candidate[0]
+        current = round(
+            first["balance_after"] - first["amount"]
+            if first["direction"] == "in"
+            else first["balance_after"] + first["amount"],
+            2,
+        )
+        consistent = True
+        for txn in candidate:
+            expected = round(
+                current + txn["amount"] if txn["direction"] == "in" else current - txn["amount"], 2
+            )
+            if txn["balance_after"] is None or abs(expected - txn["balance_after"]) > 0.01:
+                consistent = False
+                break
+            current = txn["balance_after"]
+        if consistent:
+            valid_orders.append(list(candidate))
+
+    return valid_orders[0] if len(valid_orders) == 1 else None
+
+
+def _resolve_leading_tie(
+    parsed: list[tuple[datetime, ParsedTransaction]],
+) -> list[tuple[datetime, ParsedTransaction]]:
+    """Applies `_self_consistent_order` to the statement's very first
+    same-timestamp (full date+time, not just date) cluster only - see
+    that function's docstring for why the technique isn't trustworthy
+    for a cluster anywhere else in the file, since M-Pesa's Balance
+    column isn't one continuous ledger around Fuliza-related entries,
+    so an apparent match against some earlier row's balance is as
+    likely coincidental as real.
+    """
+    if len(parsed) < 2:
+        return parsed
+
+    first_time = parsed[0][0]
+    cluster_end = 1
+    while cluster_end < len(parsed) and parsed[cluster_end][0] == first_time:
+        cluster_end += 1
+    if cluster_end < 2:
+        return parsed
+
+    resolved = _self_consistent_order([txn for _, txn in parsed[:cluster_end]])
+    if resolved is None:
+        return parsed
+    return [(first_time, txn) for txn in resolved] + parsed[cluster_end:]
+
+
 def parse_mpesa_statement(content: bytes) -> list[ParsedTransaction]:
     parsed: list[tuple[datetime, ParsedTransaction]] = []
 
@@ -132,4 +205,5 @@ def parse_mpesa_statement(content: bytes) -> list[ParsedTransaction]:
     # same-timestamp rows like a Fuliza pair keep their original relative
     # order) to satisfy the oldest-first contract the worker relies on.
     parsed.sort(key=lambda item: item[0])
+    parsed = _resolve_leading_tie(parsed)
     return [transaction for _, transaction in parsed]

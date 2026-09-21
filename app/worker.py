@@ -9,6 +9,7 @@ from app.core.queues import PARSE_JOBS_QUEUE
 from app.core.redis import get_redis
 from app.core.storage import get_storage_client
 from app.parsers import PARSERS
+from app.parsers.base import StatementParseError
 from app.repositories.statement_imports import get_import_for_processing, mark_import_failed
 
 logging.basicConfig(level=logging.INFO)
@@ -54,7 +55,18 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
             .get_object(Bucket=settings.minio_bucket, Key=record["storage_key"])["Body"]
             .read()
         )
-        transactions = parser(content)
+        try:
+            transactions = parser(content)
+        except StatementParseError as e:
+            # A parser's own validation (ab-42's validate_running_balance,
+            # or a missing required anchor like Equity Bank/NCBA's opening
+            # balance) rejected this file - a clear, non-sensitive reason
+            # to show the user, not the generic fallback below.
+            logger.info(
+                "Parser rejected import %s (provider %s): %s", import_id, record["provider"], e
+            )
+            await mark_import_failed(pool, import_id=parsed_import_id, error_detail=str(e))
+            return
         # ab-44 (write parsed transactions + update import status to
         # "parsed") owns turning the parser's output into rows - nothing
         # further to do here once a provider actually has one, beyond

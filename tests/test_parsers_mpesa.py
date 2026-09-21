@@ -105,3 +105,31 @@ def test_parsing_is_deterministic(decrypted_content):
     first_run = parse_mpesa_statement(decrypted_content)
     second_run = parse_mpesa_statement(decrypted_content)
     assert first_run == second_run
+
+
+def test_resolves_the_leading_same_timestamp_cluster_into_a_reconciling_order(transactions):
+    # The statement's first three rows (Disburse/Request/Repayment) all
+    # share the exact timestamp 2026-08-17 12:42:43 - a naive stable sort
+    # keeps the file's own top-to-bottom order, which does not replay
+    # into a consistent balance chain (ab-42's finding). Only one of the
+    # six permutations does - verified by hand against the real fixture.
+    first_three = transactions[:3]
+    assert [t["description"] for t in first_three] == [
+        "M-Shwari Loan Disburse",
+        "M-Shwari Loan Request",
+        "OD Loan Repayment to 232323 - M-PESA Overdraw",
+    ]
+    assert [t["balance_after"] for t in first_three] == [2167.0, 2167.0, 1002.87]
+
+
+def test_does_not_reorder_an_ambiguous_interior_tie(transactions):
+    # Receipt UIGJH6FJWZ's Fuliza payment + OverDraft-of-Credit-Party
+    # credit share a timestamp later in the file - both orderings
+    # reconcile against neighboring rows equally well (M-Pesa's Balance
+    # column isn't one continuous ledger around Fuliza entries), so this
+    # must be left in the file's own original order rather than guessed.
+    descriptions = [t["description"] for t in transactions[-2:]]
+    assert descriptions == [
+        "Merchant Payment Fuliza M-Pesa to 7286859 - PETER OMONDI",
+        "OverDraft of Credit Party",
+    ]
