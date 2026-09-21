@@ -1,3 +1,4 @@
+from datetime import date
 from uuid import UUID
 
 import asyncpg
@@ -50,7 +51,8 @@ async def list_statement_imports(
 async def get_import_for_processing(pool: asyncpg.Pool, *, import_id: UUID) -> dict | None:
     row = await pool.fetchrow(
         """
-        SELECT si.id, si.account_id, si.storage_key, si.file_name, a.provider
+        SELECT si.id, si.account_id, si.storage_key, si.file_name,
+               a.provider, a.user_id, a.account_number
         FROM statement_imports si
         JOIN accounts a ON a.id = si.account_id
         WHERE si.id = $1
@@ -64,6 +66,27 @@ async def mark_import_failed(pool: asyncpg.Pool, *, import_id: UUID, error_detai
     await pool.execute(
         "UPDATE statement_imports SET status = 'failed', error_detail = $1 WHERE id = $2",
         error_detail,
+        import_id,
+    )
+
+
+async def mark_import_parsed(
+    pool: asyncpg.Pool,
+    *,
+    import_id: UUID,
+    period_start: date | None,
+    period_end: date | None,
+    row_count: int,
+) -> None:
+    await pool.execute(
+        """
+        UPDATE statement_imports
+        SET status = 'parsed', period_start = $1, period_end = $2, row_count = $3
+        WHERE id = $4
+        """,
+        period_start,
+        period_end,
+        row_count,
         import_id,
     )
 

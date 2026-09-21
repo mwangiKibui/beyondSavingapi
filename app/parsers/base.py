@@ -88,3 +88,14 @@ def validate_running_balance(transactions: list[ParsedTransaction], *, opening_b
                 f"expected {expected:.2f}, statement shows {txn['balance_after']:.2f}"
             )
         previous_balance = txn["balance_after"]
+
+
+def statement_period(transactions: list[ParsedTransaction]) -> tuple[date, date]:
+    """The date range a batch of parsed transactions covers - written
+    onto statement_imports.period_start/period_end once ab-44 flips an
+    import to 'parsed'. Callers only call this once they have at least
+    one transaction (an import with zero rows has nothing to derive a
+    period from, and isn't this function's job to special-case).
+    """
+    dates = [txn["txn_date"] for txn in transactions]
+    return min(dates), max(dates)
