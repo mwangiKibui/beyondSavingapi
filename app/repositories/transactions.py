@@ -1,8 +1,18 @@
+from datetime import date
 from uuid import UUID
 
 import asyncpg
 
 from app.parsers.base import ParsedTransaction
+
+# Whitelisted (not user-supplied directly - FastAPI/Pydantic Literal already
+# constrains sort_by/sort_dir before this is reached, but keeping the SQL
+# fragment itself off free-form user input is worth the belt-and-braces,
+# matching app/repositories/accounts.py's _SORT_COLUMNS convention).
+_SORT_COLUMNS = {
+    "txn_date": "txn_date",
+    "amount": "amount",
+}
 
 
 async def insert_transactions(
@@ -53,3 +63,91 @@ async def insert_transactions(
         [txn["dedupe_hash"] for txn in transactions],
     )
     return len(rows)
+
+
+async def list_transactions(
+    pool: asyncpg.Pool,
+    *,
+    user_id: UUID,
+    account_id: UUID | None,
+    from_date: date | None,
+    to_date: date | None,
+    direction: str | None,
+    status: str | None,
+    import_id: UUID | None,
+    search: str | None,
+    page: int,
+    page_size: int,
+    sort_by: str,
+    sort_dir: str,
+) -> tuple[list[dict], int]:
+    # balance_after: returned as-is, never NULL in practice today - every
+    # real transaction currently comes from ab-44's write path, which
+    # always populates it. No manual-entry creation exists yet (ab-47/
+    # ab-48 are still Backlog), so a computed running-balance fallback
+    # for a genuinely NULL balance_after would be untested against any
+    # real data - left for whichever ticket first builds manual entries
+    # to implement (and it must group by sub_ledger_id first when it
+    # does - see ab-119's note on this ticket - a fallback replayed
+    # across a whole sub-ledger account's mixed sequences would be
+    # wrong).
+    #
+    # import_id, when given, is the ONLY filter that applies (besides
+    # user ownership) - "show me everything this one upload produced,"
+    # not a narrower browse combined with whatever other filters happen
+    # to be set - matching ab-49's already-shipped UI behavior against
+    # mock data.
+    base_query = """
+        WITH transaction_data AS (
+            SELECT
+                t.id, t.account_id, t.txn_date, t.amount, t.currency, t.direction,
+                t.counterparty, t.description, t.balance_after, t.import_id,
+                t.sub_ledger_id, sl.name AS sub_ledger_name,
+                CASE
+                    WHEN EXISTS (SELECT 1 FROM allocations al WHERE al.transaction_id = t.id)
+                    THEN 'reconciled' ELSE 'unreconciled'
+                END AS status
+            FROM transactions t
+            JOIN accounts a ON a.id = t.account_id
+            LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
+            WHERE a.user_id = $1
+              AND (
+                ($8::uuid IS NOT NULL AND t.import_id = $8)
+                OR (
+                  $8::uuid IS NULL
+                  AND ($2::uuid IS NULL OR t.account_id = $2)
+                  AND ($3::date IS NULL OR t.txn_date >= $3)
+                  AND ($4::date IS NULL OR t.txn_date <= $4)
+                  AND ($5::text IS NULL OR t.direction = $5)
+                  AND (
+                    $6::text IS NULL
+                    OR ($6 = 'reconciled' AND EXISTS (SELECT 1 FROM allocations al WHERE al.transaction_id = t.id))
+                    OR ($6 = 'unreconciled' AND NOT EXISTS (SELECT 1 FROM allocations al WHERE al.transaction_id = t.id))
+                  )
+                  AND (
+                    $7::text IS NULL
+                    OR t.description ILIKE '%' || $7 || '%'
+                    OR t.counterparty ILIKE '%' || $7 || '%'
+                  )
+                )
+              )
+        )
+        SELECT * FROM transaction_data
+    """
+    params = [user_id, account_id, from_date, to_date, direction, status, search, import_id]
+
+    count_row = await pool.fetchrow(
+        f"SELECT COUNT(*) AS total FROM ({base_query}) counted", *params
+    )
+    total = count_row["total"]
+
+    sort_column = _SORT_COLUMNS[sort_by]
+    order_direction = "ASC" if sort_dir == "asc" else "DESC"
+    paged_query = f"""
+        {base_query}
+        ORDER BY {sort_column} {order_direction}
+        LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
+    """
+    rows = await pool.fetch(paged_query, *params, page_size, (page - 1) * page_size)
+
+    return [dict(row) for row in rows], total

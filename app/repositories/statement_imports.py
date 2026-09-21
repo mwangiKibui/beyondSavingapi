@@ -48,6 +48,24 @@ async def list_statement_imports(
     return [dict(row) for row in rows], total
 
 
+async def get_import_owned_by_user(pool: asyncpg.Pool, *, import_id: UUID, user_id: UUID) -> dict | None:
+    """Confirms an import_id both exists and belongs to this user, for
+    ab-51's List-transactions API to 404 on a guessed/foreign import_id
+    the same way it already does for account_id (via get_account).
+    """
+    row = await pool.fetchrow(
+        """
+        SELECT si.id
+        FROM statement_imports si
+        JOIN accounts a ON a.id = si.account_id
+        WHERE si.id = $1 AND a.user_id = $2
+        """,
+        import_id,
+        user_id,
+    )
+    return dict(row) if row else None
+
+
 async def get_import_for_processing(pool: asyncpg.Pool, *, import_id: UUID) -> dict | None:
     row = await pool.fetchrow(
         """
