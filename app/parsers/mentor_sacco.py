@@ -6,7 +6,7 @@ from typing import TypedDict
 
 import pdfplumber
 
-from app.parsers.base import ParsedTransaction
+from app.parsers.base import ParsedTransaction, validate_running_balance
 
 # Not stated anywhere in the statement - Mentor Sacco is Kenya-only.
 CURRENCY = "KES"
@@ -120,6 +120,12 @@ def parse_mentor_sacco_statement(content: bytes) -> list[SubLedgerStatement]:
             has_explicit_opening=has_explicit_opening,
             section=section_name,
         )
+        # Meaningful for every row when this section stated its own
+        # opening balance; when it didn't (back-derived above from the
+        # first row - a known, verified-correct pattern for this
+        # provider, not a parse failure), row 0 is tautological but
+        # every row after it still gets a real check.
+        validate_running_balance(transactions, opening_balance=effective_opening)
         sections.append(
             {
                 "name": section_name,

@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from app.parsers.ncba_bank import parse_ncba_bank_statement
+from app.parsers.base import StatementParseError
+from app.parsers.ncba_bank import _find_opening_balance, parse_ncba_bank_statement
 from app.services.statement_files import decrypt_if_needed
 
 FIXTURE = Path(__file__).parent / "fixtures" / "statements" / "ncba_bank" / "e_statement_sample.pdf"
@@ -79,3 +80,11 @@ def test_parsing_is_deterministic(decrypted_content):
     first_run = parse_ncba_bank_statement(decrypted_content)
     second_run = parse_ncba_bank_statement(decrypted_content)
     assert first_run == second_run
+
+
+def test_raises_when_the_opening_balance_field_is_missing():
+    # No opening balance can be derived without it (ab-42) - must fail
+    # loudly rather than silently treating the first row as an opening
+    # balance of 0.
+    with pytest.raises(StatementParseError, match="Opening Balance"):
+        _find_opening_balance("Statement of Account\nNo opening balance field here.")

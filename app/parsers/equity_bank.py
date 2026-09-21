@@ -5,7 +5,7 @@ from datetime import datetime
 
 import pdfplumber
 
-from app.parsers.base import ParsedTransaction
+from app.parsers.base import ParsedTransaction, StatementParseError, validate_running_balance
 
 DEFAULT_CURRENCY = "KES"
 
@@ -64,7 +64,10 @@ def _dedupe_hash(*, reference: str, description: str, amount: float) -> str:
 def parse_equity_bank_statement(content: bytes) -> list[ParsedTransaction]:
     with pdfplumber.open(io.BytesIO(content)) as pdf:
         full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+    return _parse_statement_text(full_text)
 
+
+def _parse_statement_text(full_text: str) -> list[ParsedTransaction]:
     currency_match = _CURRENCY_RE.search(full_text)
     currency = currency_match.group(1) if currency_match else DEFAULT_CURRENCY
 
@@ -98,16 +101,22 @@ def parse_equity_bank_statement(content: bytes) -> list[ParsedTransaction]:
     total_match = next(
         (m for line in lines if (m := _TOTAL_LINE_RE.match(_dedouble_line(line.strip())))), None
     )
+    if total_match is None:
+        raise StatementParseError(
+            "Could not find Equity Bank's closing 'Total' row - can't determine the statement's opening balance"
+        )
 
-    transactions: list[ParsedTransaction] = []
-    # Already chronological (oldest first) in the source - no reversal needed,
-    # matching Mentor Sacco/NCBA's row order (M-Pesa is the odd one out).
-    previous_balance = round(
+    opening_balance = round(
         _parse_number(total_match.group("closing_balance"))
         - _parse_number(total_match.group("total_credit"))
         + _parse_number(total_match.group("total_debit")),
         2,
-    ) if total_match else (raw_rows[0]["balance"] if raw_rows else 0.0)
+    )
+
+    transactions: list[ParsedTransaction] = []
+    # Already chronological (oldest first) in the source - no reversal needed,
+    # matching Mentor Sacco/NCBA's row order (M-Pesa is the odd one out).
+    previous_balance = opening_balance
 
     for row in raw_rows:
         # Rounded to 2dp at each step - subtracting two decimal floats
@@ -132,4 +141,5 @@ def parse_equity_bank_statement(content: bytes) -> list[ParsedTransaction]:
             }
         )
 
+    validate_running_balance(transactions, opening_balance=opening_balance)
     return transactions

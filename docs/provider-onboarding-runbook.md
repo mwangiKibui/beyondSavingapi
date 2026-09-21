@@ -129,6 +129,9 @@ Copy this block for each new provider.
 - **Status:** parser built (ab-39) — `app/parsers/mpesa.py`, registered
   in `app/parsers/PARSERS`. Not yet wired to actually write transactions
   or flip the import to `parsed` — that's ab-44.
+  **Running-balance validation (ab-42) is deliberately narrower here
+  than every other provider** — see the "Balance column isn't one
+  continuous ledger" quirk below.
 - **File format:** PDF — official "M-PESA STATEMENT" from Safaricom,
   with a SUMMARY section (totals per transaction type) followed by a
   DETAILED STATEMENT section (the actual transaction table). Extracted
@@ -206,6 +209,32 @@ Copy this block for each new provider.
     through `decrypt_if_needed()` before it ever reaches MinIO, since
     the password itself is intentionally never persisted and a parser
     has no other way to read the file later.
+  - **The "Balance" column isn't one continuous ledger — it branches
+    around Fuliza (overdraft) entries** (confirmed against the real
+    fixture while building ab-42's running-balance validation): an
+    "OverDraft of Credit Party" row tracks the outstanding Fuliza debt,
+    not the account's cash balance the surrounding rows use, so a
+    whole-statement balance replay produces ~15 false mismatches on an
+    entirely correctly-parsed real statement. Running-balance validation
+    is therefore **not** applied globally here the way it is for every
+    other provider.
+  - **Same-timestamp rows don't reliably sort into a valid balance
+    chain, and this can't be fixed in general.** The real fixture has
+    17 groups of rows sharing an identical `Completion Time` — for all
+    but one, chaining against a neighboring row's balance to search for
+    the "correct" order produces zero valid orderings (including the
+    file's own original order), which is really just the balance
+    non-continuity above showing up again, not evidence about tie
+    order. The **one exception** is the statement's very first cluster
+    (no earlier row's balance to depend on at all) — there, deriving an
+    implied opening balance from each candidate ordering's own first
+    row and checking forward consistency has a real signal: only 1 of
+    6 orderings for the real fixture's 3-row tie (M-Shwari Loan
+    Disburse/Request + an OD Loan Repayment) holds up, matching the
+    correct order verified by hand. `app/parsers/mpesa.py`'s
+    `_resolve_leading_tie()` applies this fix to that one leading
+    cluster only and leaves every other tie in the file's own original
+    order.
 
 ### Airtel Money (mobile_money)
 
@@ -264,7 +293,13 @@ Copy this block for each new provider.
     explicit opening balance anywhere** - derive it from this same Total
     row instead: `opening = closing_balance - total_credit + total_debit`
     (verified: gives exactly 340.99, which correctly reconstructs every
-    transaction's balance delta from the first row onward).
+    transaction's balance delta from the first row onward). **If this
+    Total row can't be found at all, the parser now raises
+    `StatementParseError` (ab-42)** rather than silently treating the
+    first row's own balance as if it were the opening balance - that
+    fallback would make running-balance validation tautological
+    (always passing, since the "opening balance" would be defined by
+    the first row itself).
   - **Some template text (headers, this Total row) renders with every
     character doubled** - a faux-bold trick (e.g. `"TToottaall"` for
     "Total", `"4422,,666600..0000"` for "42,660.00"). Actual transaction
@@ -327,7 +362,10 @@ Copy this block for each new provider.
     starting balance comes only from the statement's summary header
     ("Opening Balance: 107,374.39"), not from a row inside the
     transaction table. Running-balance validation (step 6) needs to seed
-    from that header field.
+    from that header field. **If that header field can't be found at
+    all, the parser now raises `StatementParseError` (ab-42)** rather
+    than silently falling back to the first row's own balance - same
+    reasoning as Equity Bank's Total-row requirement above.
   - **Header/summary repeats identically on every page** (account
     number, holder name, Opening/Payments In/Payments Out/Available/
     Closing Balance) — these are the whole statement period's totals,
