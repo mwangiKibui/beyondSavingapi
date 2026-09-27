@@ -12,7 +12,12 @@ from app.core.security import get_current_user_id
 from app.repositories.accounts import get_account
 from app.repositories.statement_imports import get_import_owned_by_user
 from app.repositories.sub_ledgers import list_sub_ledgers
-from app.repositories.transactions import insert_manual_transactions, list_transactions
+from app.repositories.transactions import (
+    get_allocations,
+    get_transaction,
+    insert_manual_transactions,
+    list_transactions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +120,48 @@ async def list_transactions_endpoint(
         ) from None
 
     return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+class AllocationItem(BaseModel):
+    id: UUID
+    category_id: UUID | None = None
+    category_name: str | None = None
+    amount: float
+    currency: str
+    note: str | None = None
+
+
+class TransactionDetailResponse(TransactionListItem):
+    allocations: list[AllocationItem]
+
+
+@router.get("/{transaction_id}", response_model=TransactionDetailResponse)
+async def get_transaction_endpoint(
+    transaction_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+        )
+
+    try:
+        transaction = await get_transaction(pool, transaction_id=transaction_id, user_id=user_id)
+        if transaction is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+
+        allocations = await get_allocations(pool, transaction_id=transaction_id)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error fetching transaction %s for user %s", transaction_id, user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Something went wrong. Please try again.",
+        ) from None
+
+    return {**transaction, "allocations": allocations}
 
 
 class TransactionCreateItem(BaseModel):

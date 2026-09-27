@@ -105,6 +105,55 @@ async def insert_manual_transactions(
     return [dict(row) for row in rows]
 
 
+async def get_transaction(pool: asyncpg.Pool, *, transaction_id: UUID, user_id: UUID) -> dict | None:
+    """Single-transaction detail (ab-52), scoped to the owning user via the
+    same accounts join as get_account. Same status derivation as
+    list_transactions - reconciled iff at least one allocation exists,
+    regardless of whether that allocation has a category (ab-124). Richer
+    reconciled/partial/unreconciled states are ab-61's concern, not this
+    endpoint's.
+    """
+    row = await pool.fetchrow(
+        """
+        SELECT
+            t.id, t.account_id, t.txn_date, t.amount, t.currency, t.direction,
+            t.counterparty, t.description, t.balance_after, t.import_id,
+            t.sub_ledger_id, sl.name AS sub_ledger_name,
+            CASE
+                WHEN EXISTS (SELECT 1 FROM allocations al WHERE al.transaction_id = t.id)
+                THEN 'reconciled' ELSE 'unreconciled'
+            END AS status
+        FROM transactions t
+        JOIN accounts a ON a.id = t.account_id
+        LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
+        WHERE t.id = $1 AND a.user_id = $2
+        """,
+        transaction_id,
+        user_id,
+    )
+    return dict(row) if row else None
+
+
+async def get_allocations(pool: asyncpg.Pool, *, transaction_id: UUID) -> list[dict]:
+    """A transaction's allocation breakdown (ab-52) - each split's category
+    (LEFT JOIN, since category_id is nullable per ab-124: a null-category
+    allocation is a deliberate "reconciled, no category" row, not a
+    missing one), amount, and optional note. Caller must already have
+    confirmed transaction ownership (see get_transaction).
+    """
+    rows = await pool.fetch(
+        """
+        SELECT al.id, al.category_id, c.name AS category_name, al.amount, al.currency, al.note
+        FROM allocations al
+        LEFT JOIN categories c ON c.id = al.category_id
+        WHERE al.transaction_id = $1
+        ORDER BY al.created_at
+        """,
+        transaction_id,
+    )
+    return [dict(row) for row in rows]
+
+
 async def list_transactions(
     pool: asyncpg.Pool,
     *,
