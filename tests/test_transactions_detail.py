@@ -87,7 +87,10 @@ def test_get_transaction_with_a_categorized_allocation(client, fake_user, fake_p
         "category_name": "Groceries",
         "amount": 1000.0,
         "currency": "KES",
+        "original_amount": 1000.0,
+        "original_currency": "KES",
         "note": None,
+        "created_at": "2026-09-01T12:00:00Z",
     }
     monkeypatch.setattr("app.api.transactions.get_transaction", AsyncMock(return_value=TRANSACTION_ROW))
     monkeypatch.setattr("app.api.transactions.get_allocations", AsyncMock(return_value=[allocation]))
@@ -107,7 +110,10 @@ def test_get_transaction_with_a_null_category_allocation(client, fake_user, fake
         "category_name": None,
         "amount": 1000.0,
         "currency": "KES",
+        "original_amount": 1000.0,
+        "original_currency": "KES",
         "note": "Sent to Sacco for loan repayment",
+        "created_at": "2026-09-01T12:00:00Z",
     }
     monkeypatch.setattr("app.api.transactions.get_transaction", AsyncMock(return_value=TRANSACTION_ROW))
     monkeypatch.setattr("app.api.transactions.get_allocations", AsyncMock(return_value=[allocation]))
@@ -120,6 +126,38 @@ def test_get_transaction_with_a_null_category_allocation(client, fake_user, fake
     assert body["allocations"] == [allocation]
 
 
+def test_get_transaction_allocation_keeps_original_amount_distinct_from_converted(
+    client, fake_user, fake_pool, monkeypatch
+):
+    # A KES transaction allocated onto a USD budget plan: `amount`/`currency`
+    # is the converted, plan-currency figure, while `original_amount`/
+    # `original_currency` is the transaction's own currency - the one
+    # reconciliation-complete is actually judged against (see
+    # product-brief.html's "Reconciliation vs. budget math use different
+    # amounts" decision), and what a reconciliation-history table should
+    # display instead of the converted figure.
+    allocation = {
+        "id": str(uuid4()),
+        "category_id": str(uuid4()),
+        "category_name": "Travel",
+        "amount": 7.69,
+        "currency": "USD",
+        "original_amount": 1000.0,
+        "original_currency": "KES",
+        "note": None,
+        "created_at": "2026-09-01T12:00:00Z",
+    }
+    monkeypatch.setattr("app.api.transactions.get_transaction", AsyncMock(return_value=TRANSACTION_ROW))
+    monkeypatch.setattr("app.api.transactions.get_allocations", AsyncMock(return_value=[allocation]))
+
+    response = client.get(f"/transactions/{TRANSACTION_ID}")
+
+    assert response.status_code == 200
+    body = response.json()["allocations"][0]
+    assert (body["amount"], body["currency"]) == (7.69, "USD")
+    assert (body["original_amount"], body["original_currency"]) == (1000.0, "KES")
+
+
 def test_get_transaction_with_a_hybrid_split(client, fake_user, fake_pool, monkeypatch):
     categorized = {
         "id": str(uuid4()),
@@ -127,7 +165,10 @@ def test_get_transaction_with_a_hybrid_split(client, fake_user, fake_pool, monke
         "category_name": "Transport",
         "amount": 600.0,
         "currency": "KES",
+        "original_amount": 600.0,
+        "original_currency": "KES",
         "note": None,
+        "created_at": "2026-09-01T12:00:00Z",
     }
     no_category = {
         "id": str(uuid4()),
@@ -135,7 +176,10 @@ def test_get_transaction_with_a_hybrid_split(client, fake_user, fake_pool, monke
         "category_name": None,
         "amount": 400.0,
         "currency": "KES",
+        "original_amount": 400.0,
+        "original_currency": "KES",
         "note": "Cash gift to mom",
+        "created_at": "2026-09-01T12:05:00Z",
     }
     monkeypatch.setattr("app.api.transactions.get_transaction", AsyncMock(return_value=TRANSACTION_ROW))
     monkeypatch.setattr("app.api.transactions.get_allocations", AsyncMock(return_value=[categorized, no_category]))
