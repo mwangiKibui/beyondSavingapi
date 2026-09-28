@@ -154,7 +154,7 @@ def test_list_transactions_rejects_an_import_not_owned_by_the_user(client, fake_
     [
         {"page_size": 15},
         {"direction": "sideways"},
-        {"status": "partial"},
+        {"status": "half-done"},
         {"sort_by": "counterparty"},
         {"sort_dir": "upwards"},
         {"account_id": "not-a-uuid"},

@@ -10,11 +10,13 @@ from pydantic import BaseModel, Field
 from app.core.db import get_pool
 from app.core.security import get_current_user_id
 from app.repositories.accounts import get_account
+from app.repositories.categories import get_categories_by_ids
 from app.repositories.statement_imports import get_import_owned_by_user
 from app.repositories.sub_ledgers import list_sub_ledgers
 from app.repositories.transactions import (
     get_allocations,
     get_transaction,
+    insert_allocations,
     insert_manual_transactions,
     list_transactions,
 )
@@ -25,7 +27,11 @@ router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 ALLOWED_PAGE_SIZES = (5, 10, 20, 30)
 Direction = Literal["in", "out"]
-ReconciliationStatus = Literal["reconciled", "unreconciled"]
+ReconciliationStatus = Literal["reconciled", "partial", "unreconciled"]
+# expense categories only ever apply to a money-out transaction, income
+# only to money-in (ab-60) - category_id: null (reconciled, no category,
+# ab-124) skips this check entirely, since there's no type to compare.
+_CATEGORY_TYPE_FOR_DIRECTION = {"out": "expense", "in": "income"}
 SortBy = Literal["txn_date", "amount"]
 SortDir = Literal["asc", "desc"]
 
@@ -159,6 +165,106 @@ async def get_transaction_endpoint(
         raise
     except Exception:
         logger.error("Unexpected error fetching transaction %s for user %s", transaction_id, user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Something went wrong. Please try again.",
+        ) from None
+
+    return {**transaction, "allocations": allocations}
+
+
+class AllocationCreateItem(BaseModel):
+    category_id: UUID | None = None
+    amount: float
+    note: str | None = None
+
+
+class CreateAllocationsRequest(BaseModel):
+    allocations: list[AllocationCreateItem] = Field(min_length=1)
+
+
+@router.post(
+    "/{transaction_id}/allocations",
+    response_model=TransactionDetailResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_allocations_endpoint(
+    transaction_id: UUID,
+    body: CreateAllocationsRequest,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+        )
+
+    try:
+        transaction = await get_transaction(pool, transaction_id=transaction_id, user_id=user_id)
+        if transaction is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+
+        for index, item in enumerate(body.allocations, start=1):
+            if item.amount <= 0:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Split {index}: Amount must be greater than zero",
+                )
+
+        category_ids = {item.category_id for item in body.allocations if item.category_id is not None}
+        categories_by_id = {}
+        if category_ids:
+            found = await get_categories_by_ids(pool, category_ids=list(category_ids), user_id=user_id)
+            categories_by_id = {category["id"]: category for category in found}
+            missing = category_ids - categories_by_id.keys()
+            if missing:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
+
+        # ab-60: a category's type must match the transaction's direction -
+        # skipped entirely for a null-category (reconciled, no category)
+        # split, which has no type to compare.
+        expected_type = _CATEGORY_TYPE_FOR_DIRECTION[transaction["direction"]]
+        for index, item in enumerate(body.allocations, start=1):
+            if item.category_id is None:
+                continue
+            if categories_by_id[item.category_id]["type"] != expected_type:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Split {index}: Category type doesn't match this transaction's direction",
+                )
+
+        # ab-59: the sum of what's already allocated plus this request's
+        # new splits can't exceed the transaction's own amount.
+        existing_allocations = await get_allocations(pool, transaction_id=transaction_id)
+        # asyncpg maps NUMERIC to Decimal - cast to float here since these
+        # are compared/combined with Pydantic's plain float amounts below.
+        already_allocated = sum(float(allocation["original_amount"]) for allocation in existing_allocations)
+        new_total = sum(item.amount for item in body.allocations)
+        transaction_amount = float(transaction["amount"])
+        if already_allocated + new_total > transaction_amount:
+            remaining = transaction_amount - already_allocated
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Amount can't exceed the remaining {remaining:.2f} {transaction['currency']}",
+            )
+
+        await insert_allocations(
+            pool,
+            transaction_id=transaction_id,
+            category_ids=[item.category_id for item in body.allocations],
+            amounts=[item.amount for item in body.allocations],
+            currency=transaction["currency"],
+            notes=[item.note for item in body.allocations],
+        )
+
+        transaction = await get_transaction(pool, transaction_id=transaction_id, user_id=user_id)
+        allocations = await get_allocations(pool, transaction_id=transaction_id)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error(
+            "Unexpected error creating allocations for transaction %s, user %s", transaction_id, user_id, exc_info=True
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Something went wrong. Please try again.",

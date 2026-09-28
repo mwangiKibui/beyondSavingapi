@@ -42,6 +42,24 @@ DEFAULT_CATEGORIES: list[tuple[str, str]] = [
 ]
 
 
+async def get_categories_by_ids(pool: asyncpg.Pool, *, category_ids: list[UUID], user_id: UUID) -> list[dict]:
+    """Looks up categories by id, scoped to the owning user - used by
+    Create-allocations (ab-57) to confirm every category_id referenced by
+    a split both exists and belongs to this user, and to check its type
+    against the transaction's direction (ab-60). A missing id (wrong user,
+    or doesn't exist) is simply absent from the result - caller compares
+    the count/ids back against what was requested.
+    """
+    if not category_ids:
+        return []
+    rows = await pool.fetch(
+        "SELECT id, name, type FROM categories WHERE id = ANY($1::uuid[]) AND user_id = $2",
+        category_ids,
+        user_id,
+    )
+    return [dict(row) for row in rows]
+
+
 async def seed_default_categories(conn: asyncpg.Connection, *, user_id: UUID) -> None:
     await conn.executemany(
         "INSERT INTO categories (user_id, name, type, is_default) VALUES ($1, $2, $3, TRUE)",
