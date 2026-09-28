@@ -151,9 +151,11 @@ async def list_accounts(
     # exactly 0) whenever the account has ANY sub_ledgers rows, which is
     # what lets the COALESCE below prefer it over the direct-balance
     # fallback only for accounts that actually have sub-ledgers.
-    # unreconciled_count: transactions with zero allocation rows - a
-    # placeholder proxy until ab-61 owns the real reconciled/partial/
-    # unreconciled state machine.
+    # unreconciled_count: transactions not yet fully allocated (ab-61) -
+    # covers both "partial" and "unreconciled" states, either of which
+    # still needs attention at the account level (this filter/count stays
+    # two-state - reconciled vs. not - "partial" is a transaction-level
+    # distinction, not an account-level one).
     base_query = """
         WITH account_data AS (
             SELECT
@@ -187,7 +189,9 @@ async def list_accounts(
             LEFT JOIN LATERAL (
                 SELECT COUNT(*) AS count FROM transactions t
                 WHERE t.account_id = a.id
-                AND NOT EXISTS (SELECT 1 FROM allocations al WHERE al.transaction_id = t.id)
+                AND COALESCE(
+                    (SELECT SUM(al.original_amount) FROM allocations al WHERE al.transaction_id = t.id), 0
+                ) < t.amount
             ) unreconciled ON true
             WHERE a.user_id = $1
               AND a.is_active = true
