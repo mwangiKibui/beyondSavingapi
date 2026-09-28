@@ -1,5 +1,5 @@
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -128,7 +128,10 @@ class AllocationItem(BaseModel):
     category_name: str | None = None
     amount: float
     currency: str
+    original_amount: float
+    original_currency: str
     note: str | None = None
+    created_at: datetime
 
 
 class TransactionDetailResponse(TransactionListItem):

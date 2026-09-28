@@ -140,10 +140,18 @@ async def get_allocations(pool: asyncpg.Pool, *, transaction_id: UUID) -> list[d
     allocation is a deliberate "reconciled, no category" row, not a
     missing one), amount, and optional note. Caller must already have
     confirmed transaction ownership (see get_transaction).
+
+    Includes both `amount`/`currency` (budget-converted, per
+    product-brief.html's "Reconciliation vs. budget math use different
+    amounts" decision) and `original_amount`/`original_currency` (the
+    transaction's own currency, ab-130) plus `created_at` (ab-130), for
+    callers like the reconciliation-history view that need the
+    transaction-currency figure and when each split was made.
     """
     rows = await pool.fetch(
         """
-        SELECT al.id, al.category_id, c.name AS category_name, al.amount, al.currency, al.note
+        SELECT al.id, al.category_id, c.name AS category_name, al.amount, al.currency,
+               al.original_amount, al.original_currency, al.note, al.created_at
         FROM allocations al
         LEFT JOIN categories c ON c.id = al.category_id
         WHERE al.transaction_id = $1
