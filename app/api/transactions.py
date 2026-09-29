@@ -16,7 +16,9 @@ from app.repositories.sub_ledgers import list_sub_ledgers
 from app.repositories.transactions import (
     get_allocations,
     get_transaction,
+    get_transactions_with_allocated,
     insert_allocations,
+    insert_bulk_allocations,
     insert_manual_transactions,
     list_transactions,
 )
@@ -271,6 +273,132 @@ async def create_allocations_endpoint(
         ) from None
 
     return {**transaction, "allocations": allocations}
+
+
+class BulkAllocationMapping(BaseModel):
+    transaction_id: UUID
+    category_id: UUID | None = None
+
+
+class BulkAllocateRequest(BaseModel):
+    # Exactly one shape: uniform (transaction_ids [+ category_id]) or
+    # per-transaction mapping (allocations) - validated in the handler
+    # below, not here, matching this file's existing convention of
+    # business-rule checks living in the route rather than the model
+    # (see CreateTransactionsRequest's own sibling fields).
+    transaction_ids: list[UUID] | None = None
+    category_id: UUID | None = None
+    allocations: list[BulkAllocationMapping] | None = None
+
+
+class BulkAllocateResponse(BaseModel):
+    updated: list[UUID]
+    skipped: list[UUID]
+
+
+@router.post("/bulk-allocate", response_model=BulkAllocateResponse, status_code=status.HTTP_201_CREATED)
+async def bulk_allocate_endpoint(
+    body: BulkAllocateRequest,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    if pool is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+        )
+
+    uniform_shape = body.transaction_ids is not None
+    mapping_shape = body.allocations is not None
+    if uniform_shape == mapping_shape:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Provide exactly one of transaction_ids or allocations",
+        )
+    if uniform_shape and not body.transaction_ids:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="transaction_ids can't be empty")
+    if mapping_shape and not body.allocations:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="allocations can't be empty")
+
+    # Resolve each transaction's category_id up front, independent of shape.
+    category_by_transaction: dict[UUID, UUID | None] = (
+        {transaction_id: body.category_id for transaction_id in body.transaction_ids}
+        if uniform_shape
+        else {item.transaction_id: item.category_id for item in body.allocations}
+    )
+
+    try:
+        transactions = await get_transactions_with_allocated(
+            pool, transaction_ids=list(category_by_transaction.keys()), user_id=user_id
+        )
+        transactions_by_id = {transaction["id"]: transaction for transaction in transactions}
+        missing = category_by_transaction.keys() - transactions_by_id.keys()
+        if missing:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+
+        category_ids = {cid for cid in category_by_transaction.values() if cid is not None}
+        categories_by_id = {}
+        if category_ids:
+            found = await get_categories_by_ids(pool, category_ids=list(category_ids), user_id=user_id)
+            categories_by_id = {category["id"]: category for category in found}
+            missing_categories = category_ids - categories_by_id.keys()
+            if missing_categories:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
+
+        # ab-60, checked for every transaction/category pair before any
+        # writes happen - one mismatch rejects the whole request, same
+        # all-or-nothing timing as the single-transaction endpoint.
+        for transaction_id, category_id in category_by_transaction.items():
+            if category_id is None:
+                continue
+            transaction = transactions_by_id[transaction_id]
+            expected_type = _CATEGORY_TYPE_FOR_DIRECTION[transaction["direction"]]
+            if categories_by_id[category_id]["type"] != expected_type:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="A category's type doesn't match one of the selected transactions' direction",
+                )
+
+        # ab-59: each transaction gets exactly its own remaining balance,
+        # never the full original amount - a row already partly reconciled
+        # only gets the rest filled in. Nothing remaining (already fully
+        # reconciled) is skipped, not errored.
+        insert_transaction_ids: list[UUID] = []
+        insert_category_ids: list[UUID | None] = []
+        insert_amounts: list[float] = []
+        insert_currencies: list[str] = []
+        updated: list[UUID] = []
+        skipped: list[UUID] = []
+
+        for transaction_id, category_id in category_by_transaction.items():
+            transaction = transactions_by_id[transaction_id]
+            remaining = float(transaction["amount"]) - float(transaction["allocated"])
+            if remaining <= 0:
+                skipped.append(transaction_id)
+                continue
+            insert_transaction_ids.append(transaction_id)
+            insert_category_ids.append(category_id)
+            insert_amounts.append(remaining)
+            insert_currencies.append(transaction["currency"])
+            updated.append(transaction_id)
+
+        if insert_transaction_ids:
+            await insert_bulk_allocations(
+                pool,
+                transaction_ids=insert_transaction_ids,
+                category_ids=insert_category_ids,
+                amounts=insert_amounts,
+                currencies=insert_currencies,
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error bulk-allocating for user %s", user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Something went wrong. Please try again.",
+        ) from None
+
+    return {"updated": updated, "skipped": skipped}
 
 
 class TransactionCreateItem(BaseModel):
