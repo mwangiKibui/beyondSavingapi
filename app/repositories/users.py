@@ -1,6 +1,7 @@
 import asyncpg
 
 from app.repositories.categories import seed_default_categories
+from app.repositories.transfer_reasons import seed_default_transfer_reasons
 
 
 class EmailAlreadyExists(Exception):
@@ -10,9 +11,9 @@ class EmailAlreadyExists(Exception):
 async def create_user(
     pool: asyncpg.Pool, *, email: str, first_name: str, last_name: str, password_hash: str
 ) -> dict:
-    # One transaction: a new user always gets their default categories, or
-    # neither exists - a signup that fails partway through never leaves a
-    # user stranded without them.
+    # One transaction: a new user always gets their default categories and
+    # transfer reasons, or none of them exist - a signup that fails
+    # partway through never leaves a user stranded without them.
     async with pool.acquire() as conn:
         async with conn.transaction():
             try:
@@ -31,6 +32,7 @@ async def create_user(
                 raise EmailAlreadyExists(email) from exc
 
             await seed_default_categories(conn, user_id=row["id"])
+            await seed_default_transfer_reasons(conn, user_id=row["id"])
 
     return dict(row)
 
