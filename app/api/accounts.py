@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from app.core.db import get_pool
+from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.security import get_current_user_id
 from app.repositories.accounts import (
     DuplicateAccount,
@@ -140,8 +141,9 @@ async def create_account_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     try:
@@ -168,7 +170,7 @@ async def create_account_endpoint(
         logger.error("Unexpected error creating account for user %s", user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return account
@@ -198,8 +200,9 @@ async def list_accounts_endpoint(
         )
 
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     try:
@@ -219,7 +222,7 @@ async def list_accounts_endpoint(
         logger.error("Unexpected error listing accounts for user %s", user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return {"items": items, "total": total, "page": page, "page_size": page_size}
@@ -231,8 +234,9 @@ async def accounts_summary_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     try:
@@ -241,7 +245,7 @@ async def accounts_summary_endpoint(
         logger.error("Unexpected error summarizing accounts for user %s", user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return {"subtotals": subtotals}
@@ -255,8 +259,9 @@ async def update_account_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     try:
@@ -311,7 +316,7 @@ async def update_account_endpoint(
         logger.error("Unexpected error updating account %s for user %s", account_id, user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return account
@@ -324,8 +329,9 @@ async def deactivate_account_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     try:
@@ -341,7 +347,7 @@ async def deactivate_account_endpoint(
         logger.error("Unexpected error deactivating account %s for user %s", account_id, user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return account

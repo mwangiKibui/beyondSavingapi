@@ -11,6 +11,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 from app.core.config import get_settings
 from app.core.db import get_pool
+from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.repositories.password_reset_tokens import (
     consume_password_reset_token,
     create_password_reset_token,
@@ -46,8 +47,9 @@ async def signup(
     payload: SignUpRequest, pool: asyncpg.Pool | None = Depends(get_pool)
 ) -> dict:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     password_hash = bcrypt.hashpw(payload.password.encode(), bcrypt.gensalt()).decode()
@@ -83,8 +85,9 @@ async def login(
     payload: LoginRequest, pool: asyncpg.Pool | None = Depends(get_pool)
 ) -> TokenResponse:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     invalid_credentials = HTTPException(
@@ -125,8 +128,9 @@ async def request_password_reset(
     payload: PasswordResetRequest, pool: asyncpg.Pool | None = Depends(get_pool)
 ) -> PasswordResetResponse:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     # Same response either way - never reveal whether the email is registered.
@@ -164,8 +168,9 @@ async def confirm_password_reset(
     payload: PasswordResetConfirmRequest, pool: asyncpg.Pool | None = Depends(get_pool)
 ) -> PasswordResetResponse:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     new_password_hash = bcrypt.hashpw(payload.new_password.encode(), bcrypt.gensalt()).decode()

@@ -202,6 +202,68 @@ async def insert_allocations(
     )
 
 
+async def get_transactions_with_allocated(
+    pool: asyncpg.Pool, *, transaction_ids: list[UUID], user_id: UUID
+) -> list[dict]:
+    """Many transactions at once (ab-58), each with its own already-allocated
+    sum - one query (LEFT JOIN LATERAL, same pattern as get_transaction)
+    instead of N+1 for what could be a large bulk selection. Scoped to the
+    owning user; a requested id that doesn't exist or isn't owned by this
+    user is simply absent from the result, same convention as
+    get_categories_by_ids - caller compares the count/ids back against
+    what was requested.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT
+            t.id, t.amount, t.currency, t.direction,
+            COALESCE(alloc.total, 0) AS allocated
+        FROM transactions t
+        JOIN accounts a ON a.id = t.account_id
+        LEFT JOIN LATERAL (
+            SELECT SUM(al.original_amount) AS total FROM allocations al WHERE al.transaction_id = t.id
+        ) alloc ON true
+        WHERE t.id = ANY($1::uuid[]) AND a.user_id = $2
+        """,
+        transaction_ids,
+        user_id,
+    )
+    return [dict(row) for row in rows]
+
+
+async def insert_bulk_allocations(
+    pool: asyncpg.Pool,
+    *,
+    transaction_ids: list[UUID],
+    category_ids: list[UUID | None],
+    amounts: list[float],
+    currencies: list[str],
+) -> None:
+    """One allocation per transaction, across many transactions at once
+    (ab-58) - unlike insert_allocations (splits within a single
+    transaction, one shared currency), each row here can belong to a
+    different transaction with its own currency. original_amount/
+    original_currency always the transaction's own currency; amount/
+    currency (budget-converted) set equal to original for now, same "no
+    FX yet" convention as insert_allocations. note is always NULL - bulk
+    reconciliation doesn't collect one. Caller must already have
+    validated ownership, computed each amount as that transaction's own
+    remaining balance, and applied the category-type-vs-direction guard.
+    """
+    await pool.execute(
+        """
+        INSERT INTO allocations (transaction_id, category_id, original_amount, original_currency, amount, currency)
+        SELECT transaction_id, category_id, amount, currency, amount, currency
+        FROM UNNEST($1::uuid[], $2::uuid[], $3::numeric[], $4::text[])
+            AS t(transaction_id, category_id, amount, currency)
+        """,
+        transaction_ids,
+        category_ids,
+        amounts,
+        currencies,
+    )
+
+
 async def list_transactions(
     pool: asyncpg.Pool,
     *,
