@@ -65,6 +65,23 @@ async def get_account(pool: asyncpg.Pool, *, account_id: UUID, user_id: UUID) ->
     return dict(row) if row else None
 
 
+async def get_accounts_by_ids(pool: asyncpg.Pool, *, account_ids: list[UUID], user_id: UUID) -> list[dict]:
+    """Looks up accounts by id, scoped to the owning user - used by
+    Create-allocations (ab-134) to confirm every source_account_id
+    referenced by a transfer-shaped split both exists and belongs to this
+    user. A missing id is simply absent from the result, same convention
+    as get_categories_by_ids.
+    """
+    if not account_ids:
+        return []
+    rows = await pool.fetch(
+        "SELECT id, nickname FROM accounts WHERE id = ANY($1::uuid[]) AND user_id = $2",
+        account_ids,
+        user_id,
+    )
+    return [dict(row) for row in rows]
+
+
 async def update_account(
     pool: asyncpg.Pool,
     *,

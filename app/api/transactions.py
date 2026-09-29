@@ -10,10 +10,10 @@ from pydantic import BaseModel, Field
 from app.core.db import get_pool
 from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.security import get_current_user_id
-from app.repositories.accounts import get_account
+from app.repositories.accounts import get_account, get_accounts_by_ids
 from app.repositories.categories import get_categories_by_ids
 from app.repositories.statement_imports import get_import_owned_by_user
-from app.repositories.sub_ledgers import list_sub_ledgers
+from app.repositories.sub_ledgers import get_sub_ledgers_by_ids, list_sub_ledgers
 from app.repositories.transactions import (
     get_allocations,
     get_transaction,
@@ -23,6 +23,7 @@ from app.repositories.transactions import (
     insert_manual_transactions,
     list_transactions,
 )
+from app.repositories.transfer_reasons import get_transfer_reasons_by_ids
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,17 @@ class AllocationItem(BaseModel):
     id: UUID
     category_id: UUID | None = None
     category_name: str | None = None
+    # Transfer-shaped split fields (ab-134) - all None for an ordinary
+    # categorized/no-category allocation. Source names are resolved here
+    # (not just ids) so the frontend can render a transfer-shaped split
+    # without a second round-trip.
+    transfer_reason_id: UUID | None = None
+    transfer_reason_name: str | None = None
+    source_account_id: UUID | None = None
+    source_account_name: str | None = None
+    source_sub_ledger_id: UUID | None = None
+    source_sub_ledger_name: str | None = None
+    source_description: str | None = None
     amount: float
     currency: str
     original_amount: float
@@ -180,6 +192,16 @@ async def get_transaction_endpoint(
 
 class AllocationCreateItem(BaseModel):
     category_id: UUID | None = None
+    # Transfer-shaped split (ab-134) - exactly one of category_id or
+    # transfer_reason_id may be set (both null is the existing reconciled-
+    # no-category case). When transfer_reason_id is set, at most one of
+    # the three source fields below may be meaningfully populated - a
+    # source is one of a tracked account, a tracked sub-ledger, or a
+    # free-text description, never several at once.
+    transfer_reason_id: UUID | None = None
+    source_account_id: UUID | None = None
+    source_sub_ledger_id: UUID | None = None
+    source_description: str | None = None
     amount: float
     note: str | None = None
 
@@ -217,6 +239,36 @@ async def create_allocations_endpoint(
                     detail=f"Split {index}: Amount must be greater than zero",
                 )
 
+        # ab-134: a transfer-shaped split (transfer_reason_id set) is an
+        # alternative to a categorized one, never both - both null is
+        # still the existing reconciled-no-category case. When it's
+        # transfer-shaped, its source is exactly one of a tracked account,
+        # a tracked sub-ledger, or a free-text description, never several.
+        effective_source_descriptions: dict[int, str | None] = {}
+        for index, item in enumerate(body.allocations, start=1):
+            if item.category_id is not None and item.transfer_reason_id is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Split {index}: Can't set both a category and a transfer reason",
+                )
+            source_description = (item.source_description or "").strip() or None
+            effective_source_descriptions[index] = source_description
+            if item.transfer_reason_id is None:
+                continue
+            sources_given = sum(
+                1
+                for value in (item.source_account_id, item.source_sub_ledger_id, source_description)
+                if value is not None
+            )
+            if sources_given > 1:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        f"Split {index}: A transfer's source is one of an account, a sub-ledger, "
+                        "or a description - not several"
+                    ),
+                )
+
         category_ids = {item.category_id for item in body.allocations if item.category_id is not None}
         categories_by_id = {}
         if category_ids:
@@ -226,9 +278,45 @@ async def create_allocations_endpoint(
             if missing:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
 
+        transfer_reason_ids = {
+            item.transfer_reason_id for item in body.allocations if item.transfer_reason_id is not None
+        }
+        if transfer_reason_ids:
+            found_reasons = await get_transfer_reasons_by_ids(
+                pool, transfer_reason_ids=list(transfer_reason_ids), user_id=user_id
+            )
+            found_reason_ids = {reason["id"] for reason in found_reasons}
+            missing_reasons = transfer_reason_ids - found_reason_ids
+            if missing_reasons:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transfer reason not found")
+
+        source_account_ids = {
+            item.source_account_id for item in body.allocations if item.source_account_id is not None
+        }
+        if source_account_ids:
+            found_accounts = await get_accounts_by_ids(
+                pool, account_ids=list(source_account_ids), user_id=user_id
+            )
+            found_account_ids = {account["id"] for account in found_accounts}
+            missing_accounts = source_account_ids - found_account_ids
+            if missing_accounts:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source account not found")
+
+        source_sub_ledger_ids = {
+            item.source_sub_ledger_id for item in body.allocations if item.source_sub_ledger_id is not None
+        }
+        if source_sub_ledger_ids:
+            found_sub_ledgers = await get_sub_ledgers_by_ids(
+                pool, sub_ledger_ids=list(source_sub_ledger_ids), user_id=user_id
+            )
+            found_sub_ledger_ids = {sub_ledger["id"] for sub_ledger in found_sub_ledgers}
+            missing_sub_ledgers = source_sub_ledger_ids - found_sub_ledger_ids
+            if missing_sub_ledgers:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source sub-ledger not found")
+
         # ab-60: a category's type must match the transaction's direction -
         # skipped entirely for a null-category (reconciled, no category)
-        # split, which has no type to compare.
+        # or transfer-shaped split, neither of which has a type to compare.
         expected_type = _CATEGORY_TYPE_FOR_DIRECTION[transaction["direction"]]
         for index, item in enumerate(body.allocations, start=1):
             if item.category_id is None:
@@ -240,7 +328,9 @@ async def create_allocations_endpoint(
                 )
 
         # ab-59: the sum of what's already allocated plus this request's
-        # new splits can't exceed the transaction's own amount.
+        # new splits can't exceed the transaction's own amount. Applies
+        # identically to a transfer-shaped split's amount - it's the same
+        # allocations row, just tagged with a reason instead of a category.
         existing_allocations = await get_allocations(pool, transaction_id=transaction_id)
         # asyncpg maps NUMERIC to Decimal - cast to float here since these
         # are compared/combined with Pydantic's plain float amounts below.
@@ -258,6 +348,12 @@ async def create_allocations_endpoint(
             pool,
             transaction_id=transaction_id,
             category_ids=[item.category_id for item in body.allocations],
+            transfer_reason_ids=[item.transfer_reason_id for item in body.allocations],
+            source_account_ids=[item.source_account_id for item in body.allocations],
+            source_sub_ledger_ids=[item.source_sub_ledger_id for item in body.allocations],
+            source_descriptions=[
+                effective_source_descriptions[index] for index in range(1, len(body.allocations) + 1)
+            ],
             amounts=[item.amount for item in body.allocations],
             currency=transaction["currency"],
             notes=[item.note for item in body.allocations],

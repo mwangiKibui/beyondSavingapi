@@ -26,6 +26,28 @@ async def create_sub_ledger(
     return dict(row)
 
 
+async def get_sub_ledgers_by_ids(pool: asyncpg.Pool, *, sub_ledger_ids: list[UUID], user_id: UUID) -> list[dict]:
+    """Looks up sub-ledgers by id, scoped to the owning user via their
+    parent account - used by Create-allocations (ab-134) to confirm every
+    source_sub_ledger_id referenced by a transfer-shaped split both exists
+    and belongs to this user. A missing id is simply absent from the
+    result, same convention as get_categories_by_ids.
+    """
+    if not sub_ledger_ids:
+        return []
+    rows = await pool.fetch(
+        """
+        SELECT sl.id, sl.name
+        FROM sub_ledgers sl
+        JOIN accounts a ON a.id = sl.account_id
+        WHERE sl.id = ANY($1::uuid[]) AND a.user_id = $2
+        """,
+        sub_ledger_ids,
+        user_id,
+    )
+    return [dict(row) for row in rows]
+
+
 async def list_sub_ledgers(pool: asyncpg.Pool, *, account_id: UUID) -> list[dict]:
     rows = await pool.fetch(
         """
