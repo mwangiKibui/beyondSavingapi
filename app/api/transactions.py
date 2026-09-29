@@ -89,6 +89,7 @@ async def list_transactions_endpoint(
         )
 
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
@@ -154,6 +155,7 @@ async def get_transaction_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
@@ -198,6 +200,7 @@ async def create_allocations_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
@@ -304,6 +307,7 @@ async def bulk_allocate_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
@@ -431,6 +435,7 @@ async def create_transactions_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE)
 
     try:

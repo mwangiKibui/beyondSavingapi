@@ -67,6 +67,7 @@ async def create_category_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
@@ -110,6 +111,7 @@ async def list_categories_endpoint(
         )
 
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
@@ -143,6 +145,7 @@ async def update_category_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )

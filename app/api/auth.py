@@ -47,6 +47,7 @@ async def signup(
     payload: SignUpRequest, pool: asyncpg.Pool | None = Depends(get_pool)
 ) -> dict:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
@@ -84,6 +85,7 @@ async def login(
     payload: LoginRequest, pool: asyncpg.Pool | None = Depends(get_pool)
 ) -> TokenResponse:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
@@ -126,6 +128,7 @@ async def request_password_reset(
     payload: PasswordResetRequest, pool: asyncpg.Pool | None = Depends(get_pool)
 ) -> PasswordResetResponse:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
@@ -165,6 +168,7 @@ async def confirm_password_reset(
     payload: PasswordResetConfirmRequest, pool: asyncpg.Pool | None = Depends(get_pool)
 ) -> PasswordResetResponse:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )

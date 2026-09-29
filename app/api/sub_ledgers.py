@@ -63,6 +63,7 @@ async def list_sub_ledgers_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
@@ -90,6 +91,7 @@ async def create_sub_ledger_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
@@ -125,6 +127,7 @@ async def update_sub_ledger_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
@@ -171,6 +174,7 @@ async def delete_sub_ledger_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> None:
     if pool is None:
+        logger.error("Database pool unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
