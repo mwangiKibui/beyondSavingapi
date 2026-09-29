@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from app.core.db import get_pool
+from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.security import get_current_user_id
 from app.repositories.categories import (
     DuplicateCategory,
@@ -67,7 +68,7 @@ async def create_category_endpoint(
 ) -> dict:
     if pool is None:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     try:
@@ -83,7 +84,7 @@ async def create_category_endpoint(
         logger.error("Unexpected error creating category for user %s", user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return category
@@ -110,7 +111,7 @@ async def list_categories_endpoint(
 
     if pool is None:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     try:
@@ -128,7 +129,7 @@ async def list_categories_endpoint(
         logger.error("Unexpected error listing categories for user %s", user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return {"items": items, "total": total, "page": page, "page_size": page_size}
@@ -143,7 +144,7 @@ async def update_category_endpoint(
 ) -> dict:
     if pool is None:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     try:
@@ -161,7 +162,7 @@ async def update_category_endpoint(
         logger.error("Unexpected error updating category %s for user %s", category_id, user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return category

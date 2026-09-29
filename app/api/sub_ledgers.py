@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.core.db import get_pool
+from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.security import get_current_user_id
 from app.repositories.accounts import get_account
 from app.repositories.sub_ledgers import (
@@ -63,7 +64,7 @@ async def list_sub_ledgers_endpoint(
 ) -> dict:
     if pool is None:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     try:
@@ -75,7 +76,7 @@ async def list_sub_ledgers_endpoint(
         logger.error("Unexpected error listing sub-ledgers for account %s", account_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return {"items": items}
@@ -90,7 +91,7 @@ async def create_sub_ledger_endpoint(
 ) -> dict:
     if pool is None:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     try:
@@ -109,7 +110,7 @@ async def create_sub_ledger_endpoint(
         logger.error("Unexpected error creating sub-ledger for account %s", account_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return sub_ledger
@@ -125,7 +126,7 @@ async def update_sub_ledger_endpoint(
 ) -> dict:
     if pool is None:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     try:
@@ -156,7 +157,7 @@ async def update_sub_ledger_endpoint(
         logger.error("Unexpected error updating sub-ledger %s", sub_ledger_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return sub_ledger
@@ -171,7 +172,7 @@ async def delete_sub_ledger_endpoint(
 ) -> None:
     if pool is None:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     try:
@@ -185,5 +186,5 @@ async def delete_sub_ledger_endpoint(
         logger.error("Unexpected error deleting sub-ledger %s", sub_ledger_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None

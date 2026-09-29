@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from app.core.db import get_pool
+from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.security import get_current_user_id
 from app.repositories.accounts import get_account
 from app.repositories.categories import get_categories_by_ids
@@ -89,7 +90,7 @@ async def list_transactions_endpoint(
 
     if pool is None:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     try:
@@ -124,7 +125,7 @@ async def list_transactions_endpoint(
         logger.error("Unexpected error listing transactions for user %s", user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return {"items": items, "total": total, "page": page, "page_size": page_size}
@@ -154,7 +155,7 @@ async def get_transaction_endpoint(
 ) -> dict:
     if pool is None:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     try:
@@ -169,7 +170,7 @@ async def get_transaction_endpoint(
         logger.error("Unexpected error fetching transaction %s for user %s", transaction_id, user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return {**transaction, "allocations": allocations}
@@ -198,7 +199,7 @@ async def create_allocations_endpoint(
 ) -> dict:
     if pool is None:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     try:
@@ -269,7 +270,7 @@ async def create_allocations_endpoint(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return {**transaction, "allocations": allocations}
@@ -304,7 +305,7 @@ async def bulk_allocate_endpoint(
 ) -> dict:
     if pool is None:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     uniform_shape = body.transaction_ids is not None
@@ -395,7 +396,7 @@ async def bulk_allocate_endpoint(
         logger.error("Unexpected error bulk-allocating for user %s", user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return {"updated": updated, "skipped": skipped}
@@ -430,7 +431,7 @@ async def create_transactions_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     if pool is None:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE)
 
     try:
         accounts_by_id: dict[UUID, dict] = {}
@@ -500,7 +501,7 @@ async def create_transactions_endpoint(
         logger.error("Unexpected error creating manual transactions for user %s", user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     sub_ledger_names = {

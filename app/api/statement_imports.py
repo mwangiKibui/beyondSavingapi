@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.core.config import get_settings
 from app.core.db import get_pool
+from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.queues import PARSE_JOBS_QUEUE
 from app.core.redis import get_redis
 from app.core.security import get_current_user_id
@@ -93,7 +94,7 @@ async def list_statement_imports_endpoint(
 
     if pool is None:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     try:
@@ -111,7 +112,7 @@ async def list_statement_imports_endpoint(
         logger.error("Unexpected error listing statement imports for user %s", user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return {"items": items, "total": total, "page": page, "page_size": page_size}
@@ -132,7 +133,7 @@ async def upload_statement_endpoint(
 ) -> dict:
     if pool is None:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
 
     file_name = file.filename or ""
@@ -218,7 +219,7 @@ async def upload_statement_endpoint(
         logger.error("Unexpected error uploading statement for user %s", user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Something went wrong. Please try again.",
+            detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
     return statement_import
