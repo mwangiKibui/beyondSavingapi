@@ -264,6 +264,198 @@ def test_create_allocations_returns_the_refreshed_transaction_and_allocations(
     assert len(body["allocations"]) == 1
 
 
+def test_create_allocations_rejects_both_category_and_transfer_reason_on_one_split(
+    client, fake_user, fake_pool, monkeypatch
+):
+    monkeypatch.setattr("app.api.transactions.get_transaction", AsyncMock(return_value=TRANSACTION_ROW))
+
+    response = client.post(
+        f"/transactions/{TRANSACTION_ID}/allocations",
+        json=request_body(
+            allocations=[
+                {
+                    "category_id": str(EXPENSE_CATEGORY_ID),
+                    "transfer_reason_id": str(uuid4()),
+                    "amount": 1000.0,
+                    "note": None,
+                }
+            ]
+        ),
+    )
+
+    assert response.status_code == 422
+    assert "Can't set both a category and a transfer reason" in response.json()["detail"]
+
+
+def test_create_allocations_rejects_more_than_one_source_on_a_transfer_split(
+    client, fake_user, fake_pool, monkeypatch
+):
+    transfer_reason_id = uuid4()
+    monkeypatch.setattr("app.api.transactions.get_transaction", AsyncMock(return_value=TRANSACTION_ROW))
+    monkeypatch.setattr(
+        "app.api.transactions.get_transfer_reasons_by_ids",
+        AsyncMock(return_value=[{"id": transfer_reason_id, "name": "Loan Repayment"}]),
+    )
+
+    response = client.post(
+        f"/transactions/{TRANSACTION_ID}/allocations",
+        json=request_body(
+            allocations=[
+                {
+                    "transfer_reason_id": str(transfer_reason_id),
+                    "source_account_id": str(uuid4()),
+                    "source_description": "Cash from a friend",
+                    "amount": 1000.0,
+                    "note": None,
+                }
+            ]
+        ),
+    )
+
+    assert response.status_code == 422
+    assert "one of an account, a sub-ledger, or a description" in response.json()["detail"]
+
+
+def test_create_allocations_returns_404_when_transfer_reason_not_found(client, fake_user, fake_pool, monkeypatch):
+    monkeypatch.setattr("app.api.transactions.get_transaction", AsyncMock(return_value=TRANSACTION_ROW))
+    monkeypatch.setattr("app.api.transactions.get_transfer_reasons_by_ids", AsyncMock(return_value=[]))
+
+    response = client.post(
+        f"/transactions/{TRANSACTION_ID}/allocations",
+        json=request_body(
+            allocations=[{"transfer_reason_id": str(uuid4()), "amount": 1000.0, "note": None}]
+        ),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Transfer reason not found"
+
+
+def test_create_allocations_returns_404_when_source_account_not_found(client, fake_user, fake_pool, monkeypatch):
+    transfer_reason_id = uuid4()
+    monkeypatch.setattr("app.api.transactions.get_transaction", AsyncMock(return_value=TRANSACTION_ROW))
+    monkeypatch.setattr(
+        "app.api.transactions.get_transfer_reasons_by_ids",
+        AsyncMock(return_value=[{"id": transfer_reason_id, "name": "Loan Repayment"}]),
+    )
+    monkeypatch.setattr("app.api.transactions.get_accounts_by_ids", AsyncMock(return_value=[]))
+
+    response = client.post(
+        f"/transactions/{TRANSACTION_ID}/allocations",
+        json=request_body(
+            allocations=[
+                {
+                    "transfer_reason_id": str(transfer_reason_id),
+                    "source_account_id": str(uuid4()),
+                    "amount": 1000.0,
+                    "note": None,
+                }
+            ]
+        ),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Source account not found"
+
+
+def test_create_allocations_returns_404_when_source_sub_ledger_not_found(client, fake_user, fake_pool, monkeypatch):
+    transfer_reason_id = uuid4()
+    monkeypatch.setattr("app.api.transactions.get_transaction", AsyncMock(return_value=TRANSACTION_ROW))
+    monkeypatch.setattr(
+        "app.api.transactions.get_transfer_reasons_by_ids",
+        AsyncMock(return_value=[{"id": transfer_reason_id, "name": "Loan Repayment"}]),
+    )
+    monkeypatch.setattr("app.api.transactions.get_sub_ledgers_by_ids", AsyncMock(return_value=[]))
+
+    response = client.post(
+        f"/transactions/{TRANSACTION_ID}/allocations",
+        json=request_body(
+            allocations=[
+                {
+                    "transfer_reason_id": str(transfer_reason_id),
+                    "source_sub_ledger_id": str(uuid4()),
+                    "amount": 1000.0,
+                    "note": None,
+                }
+            ]
+        ),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Source sub-ledger not found"
+
+
+def test_create_allocations_with_a_transfer_shaped_split(client, fake_user, fake_pool, monkeypatch):
+    transfer_reason_id = uuid4()
+    source_sub_ledger_id = uuid4()
+    monkeypatch.setattr("app.api.transactions.get_transaction", AsyncMock(return_value=TRANSACTION_ROW))
+    monkeypatch.setattr("app.api.transactions.get_allocations", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        "app.api.transactions.get_transfer_reasons_by_ids",
+        AsyncMock(return_value=[{"id": transfer_reason_id, "name": "Loan Repayment"}]),
+    )
+    monkeypatch.setattr(
+        "app.api.transactions.get_sub_ledgers_by_ids",
+        AsyncMock(return_value=[{"id": source_sub_ledger_id, "name": "Ordinary Deposit"}]),
+    )
+    mock_insert = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.api.transactions.insert_allocations", mock_insert)
+
+    response = client.post(
+        f"/transactions/{TRANSACTION_ID}/allocations",
+        json=request_body(
+            allocations=[
+                {
+                    "transfer_reason_id": str(transfer_reason_id),
+                    "source_sub_ledger_id": str(source_sub_ledger_id),
+                    "amount": 1000.0,
+                    "note": None,
+                }
+            ]
+        ),
+    )
+
+    assert response.status_code == 201
+    _, kwargs = mock_insert.call_args
+    assert kwargs["category_ids"] == [None]
+    assert kwargs["transfer_reason_ids"] == [transfer_reason_id]
+    assert kwargs["source_account_ids"] == [None]
+    assert kwargs["source_sub_ledger_ids"] == [source_sub_ledger_id]
+    assert kwargs["source_descriptions"] == [None]
+
+
+def test_create_allocations_with_a_transfer_split_using_a_free_text_source(
+    client, fake_user, fake_pool, monkeypatch
+):
+    transfer_reason_id = uuid4()
+    monkeypatch.setattr("app.api.transactions.get_transaction", AsyncMock(return_value=TRANSACTION_ROW))
+    monkeypatch.setattr("app.api.transactions.get_allocations", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        "app.api.transactions.get_transfer_reasons_by_ids",
+        AsyncMock(return_value=[{"id": transfer_reason_id, "name": "Sent to another of my accounts"}]),
+    )
+    mock_insert = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.api.transactions.insert_allocations", mock_insert)
+
+    response = client.post(
+        f"/transactions/{TRANSACTION_ID}/allocations",
+        json=request_body(
+            allocations=[
+                {
+                    "transfer_reason_id": str(transfer_reason_id),
+                    "source_description": "  Cash from a friend  ",
+                    "amount": 1000.0,
+                    "note": None,
+                }
+            ]
+        ),
+    )
+
+    assert response.status_code == 201
+    _, kwargs = mock_insert.call_args
+    assert kwargs["source_descriptions"] == ["Cash from a friend"]
+
+
 def test_create_allocations_returns_generic_error_and_logs_on_unexpected_failure(
     client, fake_user, fake_pool, monkeypatch, caplog
 ):

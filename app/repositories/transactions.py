@@ -154,13 +154,29 @@ async def get_allocations(pool: asyncpg.Pool, *, transaction_id: UUID) -> list[d
     transaction's own currency, ab-130) plus `created_at` (ab-130), for
     callers like the reconciliation-history view that need the
     transaction-currency figure and when each split was made.
+
+    Also includes a transfer-shaped split's own fields (ab-134): the
+    reason's name (LEFT JOIN, since transfer_reason_id is nullable - most
+    splits are categorized/no-category, not transfers) and the source's
+    display name, resolved here so the frontend never needs a second
+    round-trip - a source is exactly one of a tracked account (name via
+    LEFT JOIN), a tracked sub-ledger (name via LEFT JOIN), or a free-text
+    description, per the mutual-exclusivity the API enforces on write.
     """
     rows = await pool.fetch(
         """
-        SELECT al.id, al.category_id, c.name AS category_name, al.amount, al.currency,
-               al.original_amount, al.original_currency, al.note, al.created_at
+        SELECT al.id, al.category_id, c.name AS category_name,
+               al.transfer_reason_id, tr.name AS transfer_reason_name,
+               al.source_account_id, sa.nickname AS source_account_name,
+               al.source_sub_ledger_id, ssl.name AS source_sub_ledger_name,
+               al.source_description,
+               al.amount, al.currency, al.original_amount, al.original_currency,
+               al.note, al.created_at
         FROM allocations al
         LEFT JOIN categories c ON c.id = al.category_id
+        LEFT JOIN transfer_reasons tr ON tr.id = al.transfer_reason_id
+        LEFT JOIN accounts sa ON sa.id = al.source_account_id
+        LEFT JOIN sub_ledgers ssl ON ssl.id = al.source_sub_ledger_id
         WHERE al.transaction_id = $1
         ORDER BY al.created_at
         """,
@@ -174,6 +190,10 @@ async def insert_allocations(
     *,
     transaction_id: UUID,
     category_ids: list[UUID | None],
+    transfer_reason_ids: list[UUID | None],
+    source_account_ids: list[UUID | None],
+    source_sub_ledger_ids: list[UUID | None],
+    source_descriptions: list[str | None],
     amounts: list[float],
     currency: str,
     notes: list[str | None],
@@ -184,18 +204,35 @@ async def insert_allocations(
     transaction's own currency. amount/currency (the budget-converted
     figure) are set equal to original for now, fx_rate left at its column
     default of 1 - no FX conversion or budget-plan routing exists yet
-    (those are separate, not-yet-built BE tickets). Caller must already
-    have validated ownership, the over-allocation guard (ab-59), and the
-    category-type-vs-direction guard (ab-60).
+    (those are separate, not-yet-built BE tickets).
+
+    A split can instead be transfer-shaped (ab-134): transfer_reason_id
+    set instead of category_id, plus its source (one of source_account_id,
+    source_sub_ledger_id, or source_description). Caller must already
+    have validated ownership, the over-allocation guard (ab-59), the
+    category-type-vs-direction guard (ab-60, skipped for a transfer-shaped
+    split), and the category/transfer_reason mutual-exclusivity + single-
+    source checks (ab-134).
     """
     await pool.execute(
         """
-        INSERT INTO allocations (transaction_id, category_id, original_amount, original_currency, amount, currency, note)
-        SELECT $1, category_id, amount, $4, amount, $4, note
-        FROM UNNEST($2::uuid[], $3::numeric[], $5::text[]) AS t(category_id, amount, note)
+        INSERT INTO allocations (
+            transaction_id, category_id, transfer_reason_id, source_account_id,
+            source_sub_ledger_id, source_description, original_amount, original_currency,
+            amount, currency, note
+        )
+        SELECT $1, category_id, transfer_reason_id, source_account_id, source_sub_ledger_id,
+               source_description, amount, $8, amount, $8, note
+        FROM UNNEST($2::uuid[], $3::uuid[], $4::uuid[], $5::uuid[], $6::text[], $7::numeric[], $9::text[])
+            AS t(category_id, transfer_reason_id, source_account_id, source_sub_ledger_id,
+                 source_description, amount, note)
         """,
         transaction_id,
         category_ids,
+        transfer_reason_ids,
+        source_account_ids,
+        source_sub_ledger_ids,
+        source_descriptions,
         amounts,
         currency,
         notes,

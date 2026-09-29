@@ -27,6 +27,19 @@ TRANSACTION_ROW = {
     "sub_ledger_name": None,
 }
 
+# Spread into an allocation dict fixture below a categorized/no-category
+# split - transfer-shaped fields (ab-134) are all None for one of those,
+# and get_allocations' real query now always returns these keys.
+NO_TRANSFER_FIELDS = {
+    "transfer_reason_id": None,
+    "transfer_reason_name": None,
+    "source_account_id": None,
+    "source_account_name": None,
+    "source_sub_ledger_id": None,
+    "source_sub_ledger_name": None,
+    "source_description": None,
+}
+
 
 @pytest.fixture(scope="module")
 def client():
@@ -85,6 +98,7 @@ def test_get_transaction_with_a_categorized_allocation(client, fake_user, fake_p
         "id": str(uuid4()),
         "category_id": str(category_id),
         "category_name": "Groceries",
+        **NO_TRANSFER_FIELDS,
         "amount": 1000.0,
         "currency": "KES",
         "original_amount": 1000.0,
@@ -108,6 +122,7 @@ def test_get_transaction_with_a_null_category_allocation(client, fake_user, fake
         "id": str(uuid4()),
         "category_id": None,
         "category_name": None,
+        **NO_TRANSFER_FIELDS,
         "amount": 1000.0,
         "currency": "KES",
         "original_amount": 1000.0,
@@ -163,6 +178,7 @@ def test_get_transaction_with_a_hybrid_split(client, fake_user, fake_pool, monke
         "id": str(uuid4()),
         "category_id": str(uuid4()),
         "category_name": "Transport",
+        **NO_TRANSFER_FIELDS,
         "amount": 600.0,
         "currency": "KES",
         "original_amount": 600.0,
@@ -174,6 +190,7 @@ def test_get_transaction_with_a_hybrid_split(client, fake_user, fake_pool, monke
         "id": str(uuid4()),
         "category_id": None,
         "category_name": None,
+        **NO_TRANSFER_FIELDS,
         "amount": 400.0,
         "currency": "KES",
         "original_amount": 400.0,
@@ -188,6 +205,38 @@ def test_get_transaction_with_a_hybrid_split(client, fake_user, fake_pool, monke
 
     assert response.status_code == 200
     assert response.json()["allocations"] == [categorized, no_category]
+
+
+def test_get_transaction_with_a_transfer_shaped_allocation(client, fake_user, fake_pool, monkeypatch):
+    # ab-134: a transfer-shaped split has category_id/category_name null
+    # and transfer_reason_id/name set instead, plus a resolved source name
+    # (here, a tracked sub-ledger) - the frontend gets everything it needs
+    # to render this without a second round-trip.
+    allocation = {
+        "id": str(uuid4()),
+        "category_id": None,
+        "category_name": None,
+        "transfer_reason_id": str(uuid4()),
+        "transfer_reason_name": "Loan Repayment",
+        "source_account_id": None,
+        "source_account_name": None,
+        "source_sub_ledger_id": str(uuid4()),
+        "source_sub_ledger_name": "Ordinary Deposit",
+        "source_description": None,
+        "amount": 1000.0,
+        "currency": "KES",
+        "original_amount": 1000.0,
+        "original_currency": "KES",
+        "note": None,
+        "created_at": "2026-09-01T12:00:00Z",
+    }
+    monkeypatch.setattr("app.api.transactions.get_transaction", AsyncMock(return_value=TRANSACTION_ROW))
+    monkeypatch.setattr("app.api.transactions.get_allocations", AsyncMock(return_value=[allocation]))
+
+    response = client.get(f"/transactions/{TRANSACTION_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["allocations"] == [allocation]
 
 
 def test_get_transaction_passes_ids_to_the_repository(client, fake_user, fake_pool, monkeypatch):
