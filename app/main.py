@@ -5,7 +5,15 @@ import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import accounts, auth, categories, statement_imports, sub_ledgers, transactions
+from app.api import (
+    accounts,
+    auth,
+    categories,
+    statement_imports,
+    sub_ledgers,
+    transactions,
+    transfer_reasons,
+)
 from app.core.config import get_settings
 from app.core.redis import get_redis
 from app.core.storage import ensure_bucket, get_storage_client
@@ -55,6 +63,7 @@ app.include_router(categories.router)
 app.include_router(statement_imports.router)
 app.include_router(sub_ledgers.router)
 app.include_router(transactions.router)
+app.include_router(transfer_reasons.router)
 
 
 @app.get("/health")
