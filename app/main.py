@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import (
     accounts,
     auth,
+    budget_plans,
     categories,
     statement_imports,
     sub_ledgers,
@@ -59,6 +60,7 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(accounts.router)
+app.include_router(budget_plans.router)
 app.include_router(categories.router)
 app.include_router(statement_imports.router)
 app.include_router(sub_ledgers.router)
