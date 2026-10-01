@@ -14,6 +14,7 @@ from app.api import (
     sub_ledgers,
     transactions,
     transfer_reasons,
+    users,
 )
 from app.core.config import get_settings
 from app.core.redis import get_redis
@@ -66,6 +67,7 @@ app.include_router(statement_imports.router)
 app.include_router(sub_ledgers.router)
 app.include_router(transactions.router)
 app.include_router(transfer_reasons.router)
+app.include_router(users.router)
 
 
 @app.get("/health")
