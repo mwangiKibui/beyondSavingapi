@@ -194,10 +194,14 @@ async def list_budget_plans(
             budgets.append({**budget, **derived})
 
         # ab-142: total_expenditure/total_income are whole-plan sums across
-        # EVERY allocation in the window (not a sum of the category
+        # EVERY real allocation in the window (not a sum of the category
         # budgets), always computed regardless of whether total_cap is
         # set - they power the Budget plans listing's own columns, not
-        # the cap progress bar.
+        # the cap progress bar. A transfer-shaped allocation (ab-132 -
+        # money moving between the user's own buckets, e.g. a loan
+        # repayment) is explicitly NOT real income/expense, so it's
+        # excluded here the same way the per-category `consumed` subquery
+        # above only ever matches a real category_id.
         total_expenditure = await pool.fetchval(
             """
             SELECT COALESCE(SUM(a.amount), 0)
@@ -205,6 +209,7 @@ async def list_budget_plans(
             JOIN transactions t ON t.id = a.transaction_id
             WHERE a.currency = $1
               AND t.direction = 'out'
+              AND a.transfer_reason_id IS NULL
               AND t.txn_date >= $2::date
               AND t.txn_date <= $3::date
             """,
@@ -219,6 +224,7 @@ async def list_budget_plans(
             JOIN transactions t ON t.id = a.transaction_id
             WHERE a.currency = $1
               AND t.direction = 'in'
+              AND a.transfer_reason_id IS NULL
               AND t.txn_date >= $2::date
               AND t.txn_date <= $3::date
             """,
