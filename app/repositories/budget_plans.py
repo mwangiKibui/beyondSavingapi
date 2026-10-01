@@ -117,6 +117,58 @@ async def update_budget(
     return dict(row) if row else None
 
 
+async def list_plan_money_flows(
+    pool: asyncpg.Pool,
+    *,
+    user_id: UUID,
+    plan_id: UUID,
+) -> dict | None:
+    """The reconciled allocations behind a plan's Money In / Money Out tabs
+    (ab-144/145) - the exact rows that would sum to total_income/
+    total_expenditure (ab-142), broken out per transaction so the user can
+    see what actually makes up each total. A transfer-shaped allocation
+    (ab-132 - money moving between the user's own buckets) is excluded,
+    same as those totals. Returns None if the plan doesn't exist or isn't
+    owned by user_id.
+    """
+    plan = await get_budget_plan(pool, plan_id=plan_id, user_id=user_id)
+    if plan is None:
+        return None
+
+    async def fetch_direction(direction: str) -> list[dict]:
+        rows = await pool.fetch(
+            """
+            SELECT
+                a.id,
+                t.txn_date,
+                t.counterparty,
+                t.description,
+                c.name AS category_name,
+                a.amount,
+                a.currency
+            FROM allocations a
+            JOIN transactions t ON t.id = a.transaction_id
+            LEFT JOIN categories c ON c.id = a.category_id
+            WHERE a.currency = $1
+              AND t.direction = $2
+              AND a.transfer_reason_id IS NULL
+              AND t.txn_date >= $3::date
+              AND t.txn_date <= $4::date
+            ORDER BY t.txn_date DESC
+            """,
+            plan["currency"],
+            direction,
+            plan["starts_at"],
+            plan["ends_at"],
+        )
+        return [dict(row) for row in rows]
+
+    return {
+        "money_in": await fetch_direction("in"),
+        "money_out": await fetch_direction("out"),
+    }
+
+
 async def list_budget_plans(
     pool: asyncpg.Pool,
     *,
