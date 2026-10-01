@@ -16,6 +16,7 @@ from app.repositories.budget_plans import (
     add_budget,
     create_budget_plan,
     list_budget_plans,
+    list_plan_money_flows,
     update_budget,
 )
 from app.repositories.categories import get_categories_by_ids
@@ -98,6 +99,21 @@ class BudgetPlanListItem(BudgetPlanResponse):
 
 class BudgetPlanListResponse(BaseModel):
     items: list[BudgetPlanListItem]
+
+
+class MoneyFlowItem(BaseModel):
+    id: UUID
+    txn_date: datetime
+    counterparty: str | None
+    description: str | None
+    category_name: str | None
+    amount: Decimal
+    currency: str
+
+
+class MoneyFlowsResponse(BaseModel):
+    money_in: list[MoneyFlowItem]
+    money_out: list[MoneyFlowItem]
 
 
 def _require_pool(pool: asyncpg.Pool | None) -> None:
@@ -215,3 +231,28 @@ async def list_budget_plans_endpoint(
         ) from None
 
     return {"items": plans}
+
+
+@router.get("/budget-plans/{plan_id}/money-flows", response_model=MoneyFlowsResponse)
+async def get_plan_money_flows_endpoint(
+    plan_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    _require_pool(pool)
+
+    try:
+        flows = await list_plan_money_flows(pool, user_id=user_id, plan_id=plan_id)
+        if flows is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Budget plan not found")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error(
+            "Unexpected error fetching money flows for plan %s for user %s", plan_id, user_id, exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
+        ) from None
+
+    return flows
