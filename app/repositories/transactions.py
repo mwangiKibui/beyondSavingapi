@@ -253,7 +253,7 @@ async def get_transactions_with_allocated(
     rows = await pool.fetch(
         """
         SELECT
-            t.id, t.amount, t.currency, t.direction,
+            t.id, t.txn_date, t.amount, t.currency, t.direction,
             COALESCE(alloc.total, 0) AS allocated
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id

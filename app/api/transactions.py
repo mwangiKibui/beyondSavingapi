@@ -1,5 +1,6 @@
 import logging
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
@@ -12,6 +13,7 @@ from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.security import get_current_user_id
 from app.repositories.accounts import get_account, get_accounts_by_ids
 from app.repositories.categories import get_categories_by_ids
+from app.repositories.notifications import generate_budget_alerts
 from app.repositories.statement_imports import get_import_owned_by_user
 from app.repositories.sub_ledgers import get_sub_ledgers_by_ids, list_sub_ledgers
 from app.repositories.transactions import (
@@ -359,6 +361,38 @@ async def create_allocations_endpoint(
             notes=[item.note for item in body.allocations],
         )
 
+        # ab-77: one budget_alert notification per budget whose state
+        # crosses up into near/at/over as a result of this batch. Grouped
+        # by category_id first (every split here shares the one
+        # transaction's txn_date/currency) so a batch with several splits
+        # against the same category only evaluates that budget once.
+        # Never allowed to break the reconciliation response itself.
+        try:
+            category_amounts: dict[UUID, Decimal] = {}
+            for item in body.allocations:
+                if item.category_id is None:
+                    continue
+                category_amounts[item.category_id] = category_amounts.get(
+                    item.category_id, Decimal(0)
+                ) + Decimal(str(item.amount))
+
+            for category_id, amount in category_amounts.items():
+                await generate_budget_alerts(
+                    pool,
+                    user_id=user_id,
+                    category_id=category_id,
+                    txn_date=transaction["txn_date"],
+                    currency=transaction["currency"],
+                    new_amount=amount,
+                )
+        except Exception:
+            logger.error(
+                "Unexpected error generating budget alerts for transaction %s, user %s",
+                transaction_id,
+                user_id,
+                exc_info=True,
+            )
+
         transaction = await get_transaction(pool, transaction_id=transaction_id, user_id=user_id)
         allocations = await get_allocations(pool, transaction_id=transaction_id)
     except HTTPException:
@@ -490,6 +524,43 @@ async def bulk_allocate_endpoint(
                 amounts=insert_amounts,
                 currencies=insert_currencies,
             )
+
+            # ab-77: same alert generation as create_allocations_endpoint,
+            # grouped by (category_id, txn_date, currency) since a bulk
+            # batch can span many transactions/dates/categories at once -
+            # unlike the single-transaction endpoint, which only ever has
+            # one txn_date/currency to group by. txn_date is absent from a
+            # transaction row the caller mocked out directly (tests only -
+            # get_transactions_with_allocated always selects it for real),
+            # so that transaction's group is skipped rather than raising.
+            try:
+                alert_groups: dict[tuple[UUID, object, str], Decimal] = {}
+                for txn_id, category_id, amount, currency in zip(
+                    insert_transaction_ids, insert_category_ids, insert_amounts, insert_currencies
+                ):
+                    if category_id is None:
+                        continue
+                    txn_date = transactions_by_id[txn_id].get("txn_date")
+                    if txn_date is None:
+                        continue
+                    key = (category_id, txn_date, currency)
+                    alert_groups[key] = alert_groups.get(key, Decimal(0)) + Decimal(str(amount))
+
+                for (category_id, txn_date, currency), amount in alert_groups.items():
+                    await generate_budget_alerts(
+                        pool,
+                        user_id=user_id,
+                        category_id=category_id,
+                        txn_date=txn_date,
+                        currency=currency,
+                        new_amount=amount,
+                    )
+            except Exception:
+                logger.error(
+                    "Unexpected error generating budget alerts for bulk allocation, user %s",
+                    user_id,
+                    exc_info=True,
+                )
     except HTTPException:
         raise
     except Exception:
