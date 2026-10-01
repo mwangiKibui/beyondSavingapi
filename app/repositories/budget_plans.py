@@ -67,7 +67,7 @@ async def add_budget(
     user_id: UUID,
     plan_id: UUID,
     category_id: UUID,
-    limit_amount: Decimal,
+    limit_amount: Decimal | None,
 ) -> dict | None:
     """Returns None if the plan doesn't exist or isn't owned by user_id.
     category_id's own existence/ownership is the caller's job to check
@@ -100,7 +100,7 @@ async def update_budget(
     *,
     user_id: UUID,
     budget_id: UUID,
-    limit_amount: Decimal,
+    limit_amount: Decimal | None,
 ) -> dict | None:
     row = await pool.fetchrow(
         """
@@ -193,27 +193,53 @@ async def list_budget_plans(
             )
             budgets.append({**budget, **derived})
 
-        # The overall total_cap (if set) measures against every EXPENSE
-        # allocation in the window, independent of which category budgets
-        # exist - it's a whole-plan ceiling, not a sum of the category
-        # limits (docs/schema.sql: "on top of the per-category budgets").
+        # ab-142: total_expenditure/total_income are whole-plan sums across
+        # EVERY real allocation in the window (not a sum of the category
+        # budgets), always computed regardless of whether total_cap is
+        # set - they power the Budget plans listing's own columns, not
+        # the cap progress bar. A transfer-shaped allocation (ab-132 -
+        # money moving between the user's own buckets, e.g. a loan
+        # repayment) is explicitly NOT real income/expense, so it's
+        # excluded here the same way the per-category `consumed` subquery
+        # above only ever matches a real category_id.
+        total_expenditure = await pool.fetchval(
+            """
+            SELECT COALESCE(SUM(a.amount), 0)
+            FROM allocations a
+            JOIN transactions t ON t.id = a.transaction_id
+            WHERE a.currency = $1
+              AND t.direction = 'out'
+              AND a.transfer_reason_id IS NULL
+              AND t.txn_date >= $2::date
+              AND t.txn_date <= $3::date
+            """,
+            plan["currency"],
+            plan["starts_at"],
+            plan["ends_at"],
+        )
+        total_income = await pool.fetchval(
+            """
+            SELECT COALESCE(SUM(a.amount), 0)
+            FROM allocations a
+            JOIN transactions t ON t.id = a.transaction_id
+            WHERE a.currency = $1
+              AND t.direction = 'in'
+              AND a.transfer_reason_id IS NULL
+              AND t.txn_date >= $2::date
+              AND t.txn_date <= $3::date
+            """,
+            plan["currency"],
+            plan["starts_at"],
+            plan["ends_at"],
+        )
+
+        # The overall total_cap (if set) measures against that same
+        # total_expenditure (docs/schema.sql: "on top of the per-category
+        # budgets") - reused here rather than summed again.
         total_consumed = None
         total_derived = None
         if plan["total_cap"] is not None:
-            total_consumed = await pool.fetchval(
-                """
-                SELECT COALESCE(SUM(a.amount), 0)
-                FROM allocations a
-                JOIN transactions t ON t.id = a.transaction_id
-                WHERE a.currency = $1
-                  AND t.direction = 'out'
-                  AND t.txn_date >= $2::date
-                  AND t.txn_date <= $3::date
-                """,
-                plan["currency"],
-                plan["starts_at"],
-                plan["ends_at"],
-            )
+            total_consumed = total_expenditure
             total_derived = derive_budget_state(
                 category_type="expense",
                 limit_amount=plan["total_cap"],
@@ -226,6 +252,8 @@ async def list_budget_plans(
             "budgets": budgets,
             "total_consumed": total_consumed,
             "total_state": total_derived["state"] if total_derived else None,
+            "total_expenditure": total_expenditure,
+            "total_income": total_income,
         })
 
     return plans

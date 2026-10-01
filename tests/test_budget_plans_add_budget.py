@@ -109,6 +109,30 @@ def test_add_budget_success(client, fake_user, fake_pool, monkeypatch):
     assert str(kwargs["category_id"]) == CATEGORY_ID
 
 
+def test_add_budget_allows_null_limit_for_income_category(client, fake_user, fake_pool, monkeypatch):
+    monkeypatch.setattr(
+        "app.api.budget_plans.get_categories_by_ids",
+        AsyncMock(return_value=[{"id": CATEGORY_ID, "name": "Salary", "type": "income"}]),
+    )
+    created = {
+        "id": str(uuid4()),
+        "plan_id": PLAN_ID,
+        "category_id": CATEGORY_ID,
+        "limit_amount": None,
+        "created_at": "2026-09-25T00:00:00+00:00",
+    }
+    mock_add = AsyncMock(return_value=created)
+    monkeypatch.setattr("app.api.budget_plans.add_budget", mock_add)
+
+    response = client.post(f"/budget-plans/{PLAN_ID}/budgets", json={"category_id": CATEGORY_ID})
+
+    assert response.status_code == 201
+    assert response.json()["limit_amount"] is None
+
+    _, kwargs = mock_add.call_args
+    assert kwargs["limit_amount"] is None
+
+
 def test_add_budget_logs_and_returns_generic_500_on_unexpected_error(
     client, fake_user, fake_pool, monkeypatch, caplog
 ):

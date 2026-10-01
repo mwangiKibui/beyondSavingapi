@@ -57,19 +57,23 @@ class BudgetPlanResponse(BaseModel):
 
 class AddBudgetRequest(BaseModel):
     category_id: UUID
-    limit_amount: Decimal = Field(ge=0)
+    # ab-141/142: None for an income category's budget - there's no
+    # cap/target at all, only actual inflow is tracked. An expense
+    # category's budget is still expected to supply one (enforced by the
+    # frontend, not here - the API stays permissive either way).
+    limit_amount: Decimal | None = Field(default=None, ge=0)
 
 
 class BudgetResponse(BaseModel):
     id: UUID
     plan_id: UUID
     category_id: UUID
-    limit_amount: Decimal
+    limit_amount: Decimal | None
     created_at: datetime
 
 
 class UpdateBudgetRequest(BaseModel):
-    limit_amount: Decimal = Field(ge=0)
+    limit_amount: Decimal | None = Field(default=None, ge=0)
 
 
 class BudgetWithStateResponse(BaseModel):
@@ -77,17 +81,19 @@ class BudgetWithStateResponse(BaseModel):
     category_id: UUID
     category_name: str
     category_type: str
-    limit_amount: Decimal
+    limit_amount: Decimal | None
     consumed: Decimal
-    remaining: Decimal
-    percent: Decimal
-    state: str
+    remaining: Decimal | None
+    percent: Decimal | None
+    state: str | None
 
 
 class BudgetPlanListItem(BudgetPlanResponse):
     budgets: list[BudgetWithStateResponse]
     total_consumed: Decimal | None
     total_state: str | None
+    total_expenditure: Decimal
+    total_income: Decimal
 
 
 class BudgetPlanListResponse(BaseModel):
