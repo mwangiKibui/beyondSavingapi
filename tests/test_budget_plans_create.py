@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.core.db import get_pool
 from app.core.security import get_current_user_id
 from app.main import app
+from app.repositories.budget_plans import OverlappingBudgetPlan
 
 VALID_PAYLOAD = {
     "period": "weekly",
@@ -123,6 +125,28 @@ def test_create_budget_plan_accepts_optional_fields(client, fake_user, fake_pool
     assert kwargs["name"] == "This week"
     assert kwargs["total_cap"] == Decimal("5000")
     assert kwargs["is_recurring"] is True
+
+
+def test_create_budget_plan_returns_409_on_overlapping_same_period_plan(client, fake_user, fake_pool, monkeypatch):
+    conflicting_plan = {
+        "id": uuid4(),
+        "name": "October",
+        "starts_at": datetime(2026, 10, 1, tzinfo=timezone.utc),
+        "ends_at": datetime(2026, 10, 31, tzinfo=timezone.utc),
+    }
+    mock_create = AsyncMock(side_effect=OverlappingBudgetPlan(conflicting_plan))
+    monkeypatch.setattr("app.api.budget_plans.create_budget_plan", mock_create)
+
+    response = client.post(
+        "/budget-plans",
+        json={**VALID_PAYLOAD, "period": "monthly", "starts_at": "2026-10-15T00:00:00Z", "ends_at": "2026-11-15T00:00:00Z"},
+    )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "October" in detail
+    assert "monthly" in detail
+    assert "Oct 01, 2026" in detail
 
 
 def test_create_budget_plan_logs_and_returns_generic_500_on_unexpected_error(
