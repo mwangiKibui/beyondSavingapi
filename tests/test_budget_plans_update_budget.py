@@ -74,6 +74,26 @@ def test_update_budget_success(client, fake_user, fake_pool, monkeypatch):
     assert str(kwargs["budget_id"]) == BUDGET_ID
 
 
+def test_update_budget_allows_null_limit(client, fake_user, fake_pool, monkeypatch):
+    updated = {
+        "id": BUDGET_ID,
+        "plan_id": str(uuid4()),
+        "category_id": str(uuid4()),
+        "limit_amount": None,
+        "created_at": "2026-09-25T00:00:00+00:00",
+    }
+    mock_update = AsyncMock(return_value=updated)
+    monkeypatch.setattr("app.api.budget_plans.update_budget", mock_update)
+
+    response = client.patch(f"/budgets/{BUDGET_ID}", json={"limit_amount": None})
+
+    assert response.status_code == 200
+    assert response.json()["limit_amount"] is None
+
+    _, kwargs = mock_update.call_args
+    assert kwargs["limit_amount"] is None
+
+
 def test_update_budget_logs_and_returns_generic_500_on_unexpected_error(
     client, fake_user, fake_pool, monkeypatch, caplog
 ):

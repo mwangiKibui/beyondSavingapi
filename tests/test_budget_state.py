@@ -58,3 +58,18 @@ def test_custom_near_threshold_is_respected():
         near_threshold=Decimal("0.5"),
     )
     assert result["state"] == "near"
+
+
+def test_uncapped_income_has_no_remaining_percent_or_state():
+    result = derive_budget_state(category_type="income", limit_amount=None, consumed=Decimal("7000"))
+    assert result["consumed"] == Decimal("7000")
+    assert result["remaining"] is None
+    assert result["percent"] is None
+    assert result["state"] is None
+
+
+def test_uncapped_with_zero_consumption_has_no_remaining_percent_or_state():
+    result = derive_budget_state(category_type="income", limit_amount=None, consumed=Decimal("0"))
+    assert result["remaining"] is None
+    assert result["percent"] is None
+    assert result["state"] is None

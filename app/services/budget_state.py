@@ -15,7 +15,7 @@ IncomeState = str  # "on_track" | "good"
 def derive_budget_state(
     *,
     category_type: str,
-    limit_amount: Decimal,
+    limit_amount: Decimal | None,
     consumed: Decimal,
     near_threshold: Decimal = DEFAULT_NEAR_THRESHOLD,
 ) -> dict:
@@ -26,7 +26,14 @@ def derive_budget_state(
     not a column). `consumed` is the caller's job to compute (sum of
     allocations in this category whose transaction date falls in the
     plan's window, in the plan's own currency).
+
+    `limit_amount=None` means uncapped (ab-141 - income categories have
+    no target at all): there's nothing to alert on, so `remaining`,
+    `percent`, and `state` are all `None`. Only `consumed` is still real.
     """
+    if limit_amount is None:
+        return {"consumed": consumed, "remaining": None, "percent": None, "state": None}
+
     remaining = limit_amount - consumed
     # A zero limit has no meaningful ratio - any consumption at all is past
     # it (expense: "over"; income: "good", the target was trivially met),

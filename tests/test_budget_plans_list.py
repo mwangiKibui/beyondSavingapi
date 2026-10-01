@@ -69,6 +69,8 @@ def test_list_budget_plans_success(client, fake_user, fake_pool, monkeypatch):
             ],
             "total_consumed": "3200.00",
             "total_state": "ok",
+            "total_expenditure": "3200.00",
+            "total_income": "12000.00",
         }
     ]
     monkeypatch.setattr("app.api.budget_plans.list_budget_plans", AsyncMock(return_value=plans))
@@ -83,6 +85,54 @@ def test_list_budget_plans_success(client, fake_user, fake_pool, monkeypatch):
     assert plan["budgets"][0]["state"] == "near"
     assert plan["budgets"][0]["category_name"] == "Foodstuff"
     assert plan["total_state"] == "ok"
+    assert plan["total_expenditure"] == "3200.00"
+    assert plan["total_income"] == "12000.00"
+
+
+def test_list_budget_plans_reports_totals_even_without_a_cap(client, fake_user, fake_pool, monkeypatch):
+    plans = [
+        {
+            "id": str(uuid4()),
+            "name": "This week",
+            "period": "weekly",
+            "starts_at": "2026-09-25T00:00:00+00:00",
+            "ends_at": "2026-10-02T00:00:00+00:00",
+            "total_cap": None,
+            "currency": "KES",
+            "is_recurring": True,
+            "is_active": True,
+            "created_at": "2026-09-25T00:00:00+00:00",
+            "budgets": [
+                {
+                    "id": str(uuid4()),
+                    "category_id": str(uuid4()),
+                    "category_name": "Salary",
+                    "category_type": "income",
+                    "limit_amount": None,
+                    "consumed": "12000.00",
+                    "remaining": None,
+                    "percent": None,
+                    "state": None,
+                }
+            ],
+            "total_consumed": None,
+            "total_state": None,
+            "total_expenditure": "0.00",
+            "total_income": "12000.00",
+        }
+    ]
+    monkeypatch.setattr("app.api.budget_plans.list_budget_plans", AsyncMock(return_value=plans))
+
+    response = client.get("/budget-plans")
+
+    assert response.status_code == 200
+    plan = response.json()["items"][0]
+    assert plan["total_cap"] is None
+    assert plan["total_state"] is None
+    assert plan["total_expenditure"] == "0.00"
+    assert plan["total_income"] == "12000.00"
+    assert plan["budgets"][0]["limit_amount"] is None
+    assert plan["budgets"][0]["state"] is None
 
 
 def test_list_budget_plans_logs_and_returns_generic_500_on_unexpected_error(
