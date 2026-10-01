@@ -13,6 +13,7 @@ from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.security import get_current_user_id
 from app.repositories.budget_plans import (
     DuplicateBudget,
+    OverlappingBudgetPlan,
     add_budget,
     create_budget_plan,
     list_budget_plans,
@@ -141,6 +142,14 @@ async def create_budget_plan_endpoint(
             total_cap=payload.total_cap,
             is_recurring=payload.is_recurring,
         )
+    except OverlappingBudgetPlan as exc:
+        conflict = exc.conflicting_plan
+        window = f"{conflict['starts_at']:%b %d, %Y} - {conflict['ends_at']:%b %d, %Y}"
+        conflict_name = conflict["name"] or "Untitled plan"
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f'An overlapping {payload.period} plan already exists: "{conflict_name}" ({window}).',
+        ) from exc
     except Exception:
         logger.error("Unexpected error creating budget plan for user %s", user_id, exc_info=True)
         raise HTTPException(

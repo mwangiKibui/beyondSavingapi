@@ -20,6 +20,16 @@ class DuplicateBudget(Exception):
     (plan_id, category_id))."""
 
 
+class OverlappingBudgetPlan(Exception):
+    """Raised when the user already has a plan of the SAME period whose
+    window overlaps the one being created (ab-147) - carries the
+    conflicting plan's row so the API layer can name it in the error."""
+
+    def __init__(self, conflicting_plan: dict):
+        self.conflicting_plan = conflicting_plan
+        super().__init__("Overlapping budget plan")
+
+
 async def create_budget_plan(
     pool: asyncpg.Pool,
     *,
@@ -31,6 +41,33 @@ async def create_budget_plan(
     total_cap: Decimal | None,
     is_recurring: bool,
 ) -> dict:
+    # Only one plan per PERIOD TYPE may cover any given date range - a
+    # daily, weekly, monthly, and annual plan can all run at once (they're
+    # different granularities, meant to coexist), but two monthly plans
+    # can't overlap. Overlap is checked regardless of whether the existing
+    # plan is "active today" - a future month that hasn't started yet
+    # still conflicts with another plan already covering that range.
+    # Inclusive calendar-date comparison, matching how list_budget_plans
+    # already scopes a plan's own consumption (txn_date BETWEEN
+    # starts_at::date AND ends_at::date).
+    conflict = await pool.fetchrow(
+        """
+        SELECT id, name, starts_at, ends_at
+        FROM budget_plans
+        WHERE user_id = $1
+          AND period = $2
+          AND starts_at::date <= $4::date
+          AND $3::date <= ends_at::date
+        LIMIT 1
+        """,
+        user_id,
+        period,
+        starts_at,
+        ends_at,
+    )
+    if conflict is not None:
+        raise OverlappingBudgetPlan(dict(conflict))
+
     row = await pool.fetchrow(
         """
         INSERT INTO budget_plans (user_id, name, period, starts_at, ends_at, total_cap, is_recurring)
