@@ -156,13 +156,21 @@ async def list_notifications(
     user_id: UUID,
     page: int,
     page_size: int,
-    unread_only: bool,
+    read_status: str = "all",
+    from_date: date | None = None,
+    to_date: date | None = None,
 ) -> tuple[list[dict], int, int]:
     """Newest-first page of a user's notifications (ab-75). unread_count is
     the user's TOTAL unread count regardless of the current page/filter -
     computed as its own query so a nav badge can show it without a second
     call, same purpose as budget_plans.py's own total_expenditure/
     total_income computed alongside each plan's per-category figures.
+
+    `read_status` is "all" | "read" | "unread" - "all" (the default)
+    applies no read_at filter at all. `from_date`/`to_date` filter by the
+    notification's own created_at calendar date, inclusive on both ends,
+    same `($N::date IS NULL OR ...)` optional-range pattern transactions.py
+    uses.
     """
     unread_count = await pool.fetchval(
         "SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND read_at IS NULL",
@@ -172,19 +180,23 @@ async def list_notifications(
     base_query = """
         FROM notifications
         WHERE user_id = $1
-          AND ($2::boolean IS FALSE OR read_at IS NULL)
+          AND ($2::text = 'all' OR ($2::text = 'unread') = (read_at IS NULL))
+          AND ($3::date IS NULL OR created_at::date >= $3)
+          AND ($4::date IS NULL OR created_at::date <= $4)
     """
-    total = await pool.fetchval(f"SELECT COUNT(*) {base_query}", user_id, unread_only)
+    total = await pool.fetchval(f"SELECT COUNT(*) {base_query}", user_id, read_status, from_date, to_date)
 
     rows = await pool.fetch(
         f"""
         SELECT id, type, state, title, body, budget_id, plan_id, read_at, created_at
         {base_query}
         ORDER BY created_at DESC
-        LIMIT $3 OFFSET $4
+        LIMIT $5 OFFSET $6
         """,
         user_id,
-        unread_only,
+        read_status,
+        from_date,
+        to_date,
         page_size,
         (page - 1) * page_size,
     )

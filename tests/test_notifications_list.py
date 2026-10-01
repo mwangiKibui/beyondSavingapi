@@ -65,7 +65,10 @@ def test_list_notifications_success(client, fake_user, fake_pool, monkeypatch):
     mock_list = AsyncMock(return_value=(items, 1, 3))
     monkeypatch.setattr("app.api.notifications.list_notifications", mock_list)
 
-    response = client.get("/notifications", params={"page": 1, "page_size": 10, "unread_only": True})
+    response = client.get(
+        "/notifications",
+        params={"page": 1, "page_size": 10, "status": "unread", "from": "2026-09-01", "to": "2026-10-01"},
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -81,10 +84,12 @@ def test_list_notifications_success(client, fake_user, fake_pool, monkeypatch):
     assert kwargs["user_id"] == fake_user
     assert kwargs["page"] == 1
     assert kwargs["page_size"] == 10
-    assert kwargs["unread_only"] is True
+    assert kwargs["read_status"] == "unread"
+    assert str(kwargs["from_date"]) == "2026-09-01"
+    assert str(kwargs["to_date"]) == "2026-10-01"
 
 
-def test_list_notifications_defaults_to_all_notifications(client, fake_user, fake_pool, monkeypatch):
+def test_list_notifications_defaults_to_all_notifications_no_date_range(client, fake_user, fake_pool, monkeypatch):
     mock_list = AsyncMock(return_value=([], 0, 0))
     monkeypatch.setattr("app.api.notifications.list_notifications", mock_list)
 
@@ -92,9 +97,16 @@ def test_list_notifications_defaults_to_all_notifications(client, fake_user, fak
 
     assert response.status_code == 200
     _, kwargs = mock_list.call_args
-    assert kwargs["unread_only"] is False
+    assert kwargs["read_status"] == "all"
+    assert kwargs["from_date"] is None
+    assert kwargs["to_date"] is None
     assert kwargs["page"] == 1
     assert kwargs["page_size"] == 10
+
+
+def test_list_notifications_rejects_an_invalid_status(client, fake_user):
+    response = client.get("/notifications", params={"status": "archived"})
+    assert response.status_code == 422
 
 
 def test_list_notifications_logs_and_returns_generic_500_on_unexpected_error(

@@ -1,5 +1,6 @@
 import logging
-from datetime import datetime
+from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
 import asyncpg
@@ -21,6 +22,8 @@ router = APIRouter(prefix="/notifications", tags=["notifications"])
 # literals.
 ALLOWED_PAGE_SIZES = (5, 10, 20, 30)
 
+ReadStatus = Literal["all", "read", "unread"]
+
 
 class NotificationItem(BaseModel):
     id: UUID
@@ -39,8 +42,8 @@ class NotificationListResponse(BaseModel):
     total: int
     page: int
     page_size: int
-    # The user's TOTAL unread count, regardless of the current page or the
-    # unread_only filter - lets a nav badge render without a second call.
+    # The user's TOTAL unread count, regardless of the current page or any
+    # status/date filter - lets a nav badge render without a second call.
     unread_count: int
 
 
@@ -56,7 +59,9 @@ async def list_notifications_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=10),
-    unread_only: bool = Query(default=False),
+    read_status: ReadStatus = Query(default="all", alias="status"),
+    from_date: date | None = Query(default=None, alias="from"),
+    to_date: date | None = Query(default=None, alias="to"),
 ) -> dict:
     if page_size not in ALLOWED_PAGE_SIZES:
         raise HTTPException(
@@ -72,7 +77,9 @@ async def list_notifications_endpoint(
             user_id=user_id,
             page=page,
             page_size=page_size,
-            unread_only=unread_only,
+            read_status=read_status,
+            from_date=from_date,
+            to_date=to_date,
         )
     except Exception:
         logger.error("Unexpected error listing notifications for user %s", user_id, exc_info=True)
