@@ -674,7 +674,13 @@ def build_transaction_statement(
         "opening_balance": opening_balance,
         "rows": [
             {
-                "description": row["description"] or row["counterparty"] or "—",
+                # 2026-10-02 feedback: when neither the bank nor the user
+                # gave this transaction any text, name it by its own
+                # nature ("Money In"/"Money Out") rather than a bare "—",
+                # which told the viewer nothing.
+                "description": row["description"]
+                or row["counterparty"]
+                or ("Money In" if row["direction"] == "in" else "Money Out"),
                 "date": row["txn_date"],
                 "balance": row["balance"],
                 "credit": row["txn_amount"] if row["direction"] == "in" else None,

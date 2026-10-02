@@ -699,3 +699,18 @@ def test_build_transaction_statement_status_derivation_matches_accounts_list_con
     statement = build_transaction_statement(rows, from_date=None, to_date=None, status_filter=None)
 
     assert [row["status"] for row in statement["rows"]] == ["reconciled", "unreconciled", "unreconciled"]
+
+
+def test_build_transaction_statement_names_an_untitled_row_by_its_own_nature():
+    """2026-10-02 feedback: a transaction with neither a description nor
+    a counterparty is labeled "Money In"/"Money Out" by its own
+    direction, not a bare "—" that told the viewer nothing."""
+    rows = [
+        _statement_row(description=None, counterparty=None, direction="in"),
+        _statement_row(description=None, counterparty=None, direction="out"),
+        _statement_row(description=None, counterparty="Naivas", direction="out"),
+    ]
+
+    statement = build_transaction_statement(rows, from_date=None, to_date=None, status_filter=None)
+
+    assert [row["description"] for row in statement["rows"]] == ["Money In", "Money Out", "Naivas"]

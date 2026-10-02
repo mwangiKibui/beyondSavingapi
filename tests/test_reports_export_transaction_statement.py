@@ -194,11 +194,11 @@ def test_export_transaction_statement_csv_success_shape_and_rows(client, fake_us
     assert response.headers["content-disposition"] == 'attachment; filename="transaction-statement.csv"'
 
     rows = list(csv.reader(io.StringIO(response.text)))
-    assert rows[0] == ["Description", "Balance", "Credit", "Debit"]
-    assert rows[1] == ["Balance b/f", "1000.00", "", ""]
-    assert rows[2] == ["Naivas", "800.00", "", "200.00"]
-    assert rows[3] == ["Salary", "1800.00", "1000.00", ""]
-    assert rows[4] == ["Total", "1800.00", "1000.00", "200.00"]
+    assert rows[0] == ["Description", "Date", "Balance", "Credit", "Debit"]
+    assert rows[1] == ["Balance b/f", "", "1000.00", "", ""]
+    assert rows[2] == ["Naivas", "2026-09-05", "800.00", "", "200.00"]
+    assert rows[3] == ["Salary", "2026-09-10", "1800.00", "1000.00", ""]
+    assert rows[4] == ["Total", "", "1800.00", "1000.00", "200.00"]
 
 
 def test_export_transaction_statement_csv_omits_balance_bf_when_unknown(client, fake_user, fake_pool, monkeypatch):
@@ -210,7 +210,7 @@ def test_export_transaction_statement_csv_omits_balance_bf_when_unknown(client, 
     response = client.get("/reports/transaction-statement/export.csv", params={"account_id": str(uuid4())})
 
     rows = list(csv.reader(io.StringIO(response.text)))
-    assert rows[1] == ["Naivas", "800.00", "", "200.00"]
+    assert rows[1] == ["Naivas", "2026-09-05", "800.00", "", "200.00"]
 
 
 def test_export_transaction_statement_csv_logs_and_returns_generic_500_on_unexpected_error(

@@ -717,15 +717,18 @@ def _statement_table_rows(statement: dict) -> list[list[str]]:
     returns opening_balance/closing_balance/totals as their own fields
     for the frontend to style distinctly) - flattens the statement into
     plain table rows: a leading "Balance b/f" row when an opening balance
-    is known, one row per transaction, and a trailing "Total" row.
+    is known, one row per transaction, and a trailing "Total" row. Date
+    is its own column (2026-10-02 feedback) - blank for the b/f/Total
+    rows, which aren't tied to one transaction's date.
     """
     rows = []
     if statement["opening_balance"] is not None:
-        rows.append(["Balance b/f", _format_statement_balance(statement["opening_balance"]), "", ""])
+        rows.append(["Balance b/f", "", _format_statement_balance(statement["opening_balance"]), "", ""])
     for row in statement["rows"]:
         rows.append(
             [
                 row["description"],
+                str(row["date"]),
                 _format_statement_balance(row["balance"]),
                 _format_statement_amount(row["credit"]),
                 _format_statement_amount(row["debit"]),
@@ -734,6 +737,7 @@ def _statement_table_rows(statement: dict) -> list[list[str]]:
     rows.append(
         [
             "Total",
+            "",
             _format_statement_balance(statement["closing_balance"]),
             _format_statement_amount(statement["total_credit"]),
             _format_statement_amount(statement["total_debit"]),
@@ -818,7 +822,7 @@ async def export_transaction_statement_csv_endpoint(
         ) from None
 
     return _csv_response(
-        ["Description", "Balance", "Credit", "Debit"],
+        ["Description", "Date", "Balance", "Credit", "Debit"],
         _statement_table_rows(statement),
         filename="transaction-statement.csv",
     )
@@ -857,7 +861,7 @@ async def export_transaction_statement_pdf_endpoint(
     status_subtitle = {"reconciled": "Status: Reconciled", "unreconciled": "Status: Unreconciled"}.get(txn_status)
     pdf_bytes = build_simple_table_pdf(
         "Transaction Statement",
-        ["Description", "Balance", "Credit", "Debit"],
+        ["Description", "Date", "Balance", "Credit", "Debit"],
         _statement_table_rows(statement),
         subtitle=status_subtitle,
         account_name=account["nickname"],
