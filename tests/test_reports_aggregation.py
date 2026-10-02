@@ -257,9 +257,10 @@ def _account_summary_row(**overrides):
         "account_id": None,
         "account_nickname": "KCB Salary",
         "transaction_id": None,
-        "txn_amount": None,
         "direction": None,
-        "has_transfer_allocation": False,
+        "allocation_id": None,
+        "alloc_amount": None,
+        "transfer_reason_id": None,
     }
     base.update(overrides)
     return base
@@ -281,20 +282,22 @@ def test_build_account_summary_includes_an_account_with_zero_transactions():
     ]
 
 
-def test_build_account_summary_sums_by_direction_per_account():
+def test_build_account_summary_sums_allocated_amount_by_direction_per_account():
     account_id = uuid4()
     rows = [
         _account_summary_row(
             account_id=account_id,
             transaction_id=uuid4(),
-            txn_amount=Decimal("1000.00"),
             direction="in",
+            allocation_id=uuid4(),
+            alloc_amount=Decimal("1000.00"),
         ),
         _account_summary_row(
             account_id=account_id,
             transaction_id=uuid4(),
-            txn_amount=Decimal("300.00"),
             direction="out",
+            allocation_id=uuid4(),
+            alloc_amount=Decimal("300.00"),
         ),
     ]
 
@@ -310,23 +313,26 @@ def test_build_account_summary_sums_by_direction_per_account():
     ]
 
 
-def test_build_account_summary_excludes_a_transaction_with_a_transfer_shaped_allocation():
+def test_build_account_summary_excludes_a_transfer_shaped_allocation():
     account_id = uuid4()
     rows = [
         _account_summary_row(
             account_id=account_id,
             transaction_id=uuid4(),
-            txn_amount=Decimal("1000.00"),
             direction="in",
+            allocation_id=uuid4(),
+            alloc_amount=Decimal("1000.00"),
         ),
-        # A transfer-shaped allocation on this one excludes it entirely
-        # from money_out, same convention as build_report's total_out.
+        # Transfer-shaped allocations aren't real income/expense - same
+        # convention as build_report's total_in/total_out and
+        # by_category.
         _account_summary_row(
             account_id=account_id,
             transaction_id=uuid4(),
-            txn_amount=Decimal("500.00"),
             direction="out",
-            has_transfer_allocation=True,
+            allocation_id=uuid4(),
+            alloc_amount=Decimal("500.00"),
+            transfer_reason_id=uuid4(),
         ),
     ]
 
@@ -334,6 +340,36 @@ def test_build_account_summary_excludes_a_transaction_with_a_transfer_shaped_all
 
     assert summary[0]["money_in"] == Decimal("1000.00")
     assert summary[0]["money_out"] == Decimal("0.00")
+
+
+def test_build_account_summary_only_counts_the_reconciled_portion_of_a_transaction():
+    """2026-10-02 feedback: money_in/money_out reflect what was actually
+    RECONCILED (allocated), not a transaction's full amount - a
+    1000.00 transaction with only 600.00 allocated to a category
+    contributes 600.00, not 1000.00, and an allocation_id of None (no
+    allocation at all) contributes nothing."""
+    account_id = uuid4()
+    txn_id = uuid4()
+    rows = [
+        _account_summary_row(
+            account_id=account_id,
+            transaction_id=txn_id,
+            direction="in",
+            allocation_id=uuid4(),
+            alloc_amount=Decimal("600.00"),
+        ),
+        _account_summary_row(
+            account_id=account_id,
+            transaction_id=uuid4(),
+            direction="in",
+            allocation_id=None,
+            alloc_amount=None,
+        ),
+    ]
+
+    summary = build_account_summary(rows)
+
+    assert summary[0]["money_in"] == Decimal("600.00")
 
 
 def test_resolve_transfer_source_label_prefers_a_tracked_source_account():

@@ -250,16 +250,20 @@ async def get_report_csv_rows(pool: asyncpg.Pool, filters: ReportFilters) -> lis
 
 
 async def fetch_account_summary_rows(pool: asyncpg.Pool, *, user_id: UUID, account_id: UUID | None) -> list[dict]:
-    """One row per (account, transaction) pair backing Account Summary
-    (ab-150, GET /reports/accounts) - LEFT JOIN so an account with zero
-    transactions still appears once, with every transaction-side column
+    """One row per (account, transaction, allocation) triple backing
+    Account Summary (ab-150, GET /reports/accounts) - LEFT JOINed all the
+    way so an account with zero transactions, or a transaction with zero
+    allocations, still appears once with the missing side's columns
     NULL. **All-time, no date filter at all** - unlike fetch_report_rows
     above, this report is explicitly scoped to "every account we have,"
-    not a date window. has_transfer_allocation is computed per-transaction
-    here (not filtered out in SQL) so build_account_summary below can
-    apply the same "exclude transfers from real income/expense"
-    exclusion build_report applies, in pure Python, the same
-    fetch-then-aggregate split as fetch_report_rows/build_report.
+    not a date window.
+
+    2026-10-02 feedback: money_in/money_out must reflect what we actually
+    RECONCILED, not a transaction's raw amount - we only know what the
+    user did with the portion of a transaction they allocated, not with
+    whatever's left unreconciled, so this now joins allocations (the same
+    way fetch_report_rows does) rather than aggregating transactions.amount
+    directly.
     """
     rows = await pool.fetch(
         """
@@ -267,14 +271,13 @@ async def fetch_account_summary_rows(pool: asyncpg.Pool, *, user_id: UUID, accou
             a.id AS account_id,
             a.nickname AS account_nickname,
             t.id AS transaction_id,
-            t.amount AS txn_amount,
             t.direction,
-            EXISTS (
-                SELECT 1 FROM allocations al
-                WHERE al.transaction_id = t.id AND al.transfer_reason_id IS NOT NULL
-            ) AS has_transfer_allocation
+            al.id AS allocation_id,
+            al.amount AS alloc_amount,
+            al.transfer_reason_id
         FROM accounts a
         LEFT JOIN transactions t ON t.account_id = a.id
+        LEFT JOIN allocations al ON al.transaction_id = t.id
         WHERE a.user_id = $1
           AND ($2::uuid IS NULL OR a.id = $2)
         ORDER BY a.nickname
@@ -288,13 +291,14 @@ async def fetch_account_summary_rows(pool: asyncpg.Pool, *, user_id: UUID, accou
 def build_account_summary(rows: list[dict]) -> list[dict]:
     """Pure-Python aggregation over fetch_account_summary_rows' own result
     set (ab-150) - mirrors build_report's own fetch-then-aggregate split
-    above. money_in/money_out are each account's own transactions summed
-    by direction, EXCLUDING any transaction with a transfer-shaped
-    allocation (has_transfer_allocation) - same "exclude transfers from
-    real income/expense" convention as build_report's total_in/total_out
-    and budget_plans.py's own totals. An account has exactly one
-    currency, so there's no cross-currency rollup to do here, unlike
-    build_report.
+    above. money_in/money_out are each account's own RECONCILED amount
+    (the sum of its allocations' own amounts, not each transaction's raw
+    amount - 2026-10-02 feedback) by direction, counting only rows with a
+    real allocation and EXCLUDING any transfer-shaped one, same
+    "allocations are the reconciled amount, transfers aren't real income/
+    expense" convention build_report's by_category/reconciled_no_category_
+    total already use. An account has exactly one currency, so there's no
+    cross-currency rollup to do here, unlike build_report.
     """
     summary: dict[UUID, dict] = {}
     for row in rows:
@@ -307,12 +311,12 @@ def build_account_summary(rows: list[dict]) -> list[dict]:
                 "money_out": ZERO,
             },
         )
-        if row["transaction_id"] is None or row["has_transfer_allocation"]:
+        if row["allocation_id"] is None or row["transfer_reason_id"] is not None:
             continue
         if row["direction"] == "in":
-            bucket["money_in"] += row["txn_amount"]
+            bucket["money_in"] += row["alloc_amount"]
         else:
-            bucket["money_out"] += row["txn_amount"]
+            bucket["money_out"] += row["alloc_amount"]
 
     return sorted(summary.values(), key=lambda b: b["account_nickname"])
 
