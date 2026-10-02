@@ -135,6 +135,7 @@ class TransactionStatementRow(BaseModel):
     credit: Decimal | None
     debit: Decimal | None
     status: str
+    reconciled_category: str | None
 
 
 class TransactionStatementResponse(BaseModel):
@@ -718,16 +719,18 @@ def _statement_table_rows(statement: dict) -> list[list[str]]:
     for the frontend to style distinctly) - flattens the statement into
     plain table rows: a leading "Balance b/f" row when an opening balance
     is known, one row per transaction, and a trailing "Total" row. Date
-    is its own column (2026-10-02 feedback) - blank for the b/f/Total
-    rows, which aren't tied to one transaction's date.
+    and Reconciled Category (2026-10-02 feedback) are each their own
+    column - both blank for the b/f/Total rows, which aren't tied to one
+    transaction.
     """
     rows = []
     if statement["opening_balance"] is not None:
-        rows.append(["Balance b/f", "", _format_statement_balance(statement["opening_balance"]), "", ""])
+        rows.append(["Balance b/f", "", "", _format_statement_balance(statement["opening_balance"]), "", ""])
     for row in statement["rows"]:
         rows.append(
             [
                 row["description"],
+                row["reconciled_category"] or "",
                 str(row["date"]),
                 _format_statement_balance(row["balance"]),
                 _format_statement_amount(row["credit"]),
@@ -737,6 +740,7 @@ def _statement_table_rows(statement: dict) -> list[list[str]]:
     rows.append(
         [
             "Total",
+            "",
             "",
             _format_statement_balance(statement["closing_balance"]),
             _format_statement_amount(statement["total_credit"]),
@@ -763,6 +767,7 @@ async def get_transaction_statement_endpoint(
     from_date: date | None = Query(default=None, alias="from"),
     to_date: date | None = Query(default=None, alias="to"),
     txn_status: TransactionStatementStatus | None = Query(default=None, alias="status"),
+    category_id: UUID | None = Query(default=None),
 ) -> dict:
     """account_id is required (unlike every other /reports filter) - a
     running balance is inherently a single-account concept, so there's no
@@ -778,6 +783,7 @@ async def get_transaction_statement_endpoint(
             from_date=from_date,
             to_date=to_date,
             status_filter=txn_status,
+            category_id=category_id,
         )
     except HTTPException:
         raise
@@ -799,6 +805,7 @@ async def export_transaction_statement_csv_endpoint(
     from_date: date | None = Query(default=None, alias="from"),
     to_date: date | None = Query(default=None, alias="to"),
     txn_status: TransactionStatementStatus | None = Query(default=None, alias="status"),
+    category_id: UUID | None = Query(default=None),
 ) -> Response:
     _require_pool(pool)
 
@@ -811,6 +818,7 @@ async def export_transaction_statement_csv_endpoint(
             from_date=from_date,
             to_date=to_date,
             status_filter=txn_status,
+            category_id=category_id,
         )
     except HTTPException:
         raise
@@ -822,7 +830,7 @@ async def export_transaction_statement_csv_endpoint(
         ) from None
 
     return _csv_response(
-        ["Description", "Date", "Balance", "Credit", "Debit"],
+        ["Description", "Reconciled Category", "Date", "Balance", "Credit", "Debit"],
         _statement_table_rows(statement),
         filename="transaction-statement.csv",
     )
@@ -836,6 +844,7 @@ async def export_transaction_statement_pdf_endpoint(
     from_date: date | None = Query(default=None, alias="from"),
     to_date: date | None = Query(default=None, alias="to"),
     txn_status: TransactionStatementStatus | None = Query(default=None, alias="status"),
+    category_id: UUID | None = Query(default=None),
 ) -> Response:
     _require_pool(pool)
 
@@ -848,6 +857,7 @@ async def export_transaction_statement_pdf_endpoint(
             from_date=from_date,
             to_date=to_date,
             status_filter=txn_status,
+            category_id=category_id,
         )
     except HTTPException:
         raise
@@ -861,7 +871,7 @@ async def export_transaction_statement_pdf_endpoint(
     status_subtitle = {"reconciled": "Status: Reconciled", "unreconciled": "Status: Unreconciled"}.get(txn_status)
     pdf_bytes = build_simple_table_pdf(
         "Transaction Statement",
-        ["Description", "Date", "Balance", "Credit", "Debit"],
+        ["Description", "Reconciled Category", "Date", "Balance", "Credit", "Debit"],
         _statement_table_rows(statement),
         subtitle=status_subtitle,
         account_name=account["nickname"],

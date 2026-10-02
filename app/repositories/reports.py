@@ -556,6 +556,15 @@ async def fetch_transaction_statement_rows(pool: asyncpg.Pool, *, user_id: UUID,
     folded into "not" - matching the Accounts list page's own filter,
     not the Transactions list page's separate 3-state one).
 
+    category_names/category_ids/transfer_names (2026-10-02's Reconciled
+    Category column + filter) are each a deduped array of every category/
+    transfer-reason this transaction's own allocations touch - a
+    transaction can be split across several categories, so this stays
+    one row per TRANSACTION (not one per allocation, which would need a
+    separate group-by step every caller would have to redo) by
+    aggregating with array_agg(DISTINCT ...) in its own LATERAL, the same
+    "aggregate once in SQL" choice as allocated_total's own LATERAL.
+
     txn_date ASC, created_at ASC (oldest first) - a running balance only
     reads correctly top-to-bottom in chronological order, the reverse of
     every other /reports query's newest-first convention.
@@ -570,12 +579,29 @@ async def fetch_transaction_statement_rows(pool: asyncpg.Pool, *, user_id: UUID,
             t.description,
             t.counterparty,
             t.balance_after,
-            COALESCE(alloc.total, 0) AS allocated_total
+            COALESCE(alloc.total, 0) AS allocated_total,
+            COALESCE(cat.names, ARRAY[]::text[]) AS category_names,
+            COALESCE(cat.ids, ARRAY[]::uuid[]) AS category_ids,
+            COALESCE(xfer.names, ARRAY[]::text[]) AS transfer_names
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         LEFT JOIN LATERAL (
             SELECT SUM(al.original_amount) AS total FROM allocations al WHERE al.transaction_id = t.id
         ) alloc ON true
+        LEFT JOIN LATERAL (
+            SELECT
+                array_agg(DISTINCT c.name ORDER BY c.name) AS names,
+                array_agg(DISTINCT al.category_id) AS ids
+            FROM allocations al
+            JOIN categories c ON c.id = al.category_id
+            WHERE al.transaction_id = t.id AND al.category_id IS NOT NULL
+        ) cat ON true
+        LEFT JOIN LATERAL (
+            SELECT array_agg(DISTINCT tr.name ORDER BY tr.name) AS names
+            FROM allocations al
+            JOIN transfer_reasons tr ON tr.id = al.transfer_reason_id
+            WHERE al.transaction_id = t.id AND al.transfer_reason_id IS NOT NULL
+        ) xfer ON true
         WHERE a.user_id = $1 AND t.account_id = $2
         ORDER BY t.txn_date ASC, t.created_at ASC
         """,
@@ -589,12 +615,27 @@ def _signed_amount(row: dict) -> Decimal:
     return row["txn_amount"] if row["direction"] == "in" else -row["txn_amount"]
 
 
+def _reconciled_category(row: dict) -> str | None:
+    """"Reconciled Category" column (2026-10-02) - only set once a
+    transaction is actually reconciled (matching the "value only if
+    reconciled" ask), joining every category AND transfer-reason name its
+    allocations touch. A reconciled transaction with neither (ab-124's
+    "reconciled, no category" state) reads "No category" rather than
+    blank, so it's visibly distinct from an unreconciled one (which is
+    None here, rendered as blank)."""
+    if row["status"] != "reconciled":
+        return None
+    labels = [*row["category_names"], *row["transfer_names"]]
+    return ", ".join(labels) if labels else "No category"
+
+
 def build_transaction_statement(
     rows: list[dict],
     *,
     from_date: date | None,
     to_date: date | None,
     status_filter: str | None,
+    category_id: UUID | None = None,
 ) -> dict:
     """Pure-Python aggregation over fetch_transaction_statement_rows' own
     result set (2026-10-02's Transaction Statement report) - every
@@ -622,13 +663,17 @@ def build_transaction_statement(
     balance is None ("—" to the caller), matching "the b/f row only
     appears if we've uploaded a statement."
 
-    Filtering (from_date/to_date/status_filter) only controls which rows
-    are DISPLAYED - the balance itself is computed from the account's
-    FULL, unfiltered history, since a hidden transaction (outside the
-    date window, or the wrong reconciliation status) still really moved
-    the account's balance. opening_balance is therefore the true computed
+    Filtering (from_date/to_date/status_filter/category_id) only controls
+    which rows are DISPLAYED - the balance itself is computed from the
+    account's FULL, unfiltered history, since a hidden transaction
+    (outside the date window, the wrong reconciliation status, or
+    reconciled under a different category) still really moved the
+    account's balance. opening_balance is therefore the true computed
     balance immediately before the first DISPLAYED row, not simply
-    from_date's own boundary.
+    from_date's own boundary. category_id matches a transaction whose
+    allocations touch that category at all (category_ids, from
+    fetch_transaction_statement_rows) - never a transfer reason, which
+    this filter doesn't cover.
     """
     anchor_index = next((i for i, row in enumerate(rows) if row["balance_after"] is not None), None)
 
@@ -646,7 +691,9 @@ def build_transaction_statement(
         if running is not None:
             running = running + _signed_amount(row)
         status = "reconciled" if row["allocated_total"] >= row["txn_amount"] else "unreconciled"
-        computed.append({**row, "balance": running, "status": status})
+        enriched = {**row, "balance": running, "status": status}
+        enriched["reconciled_category"] = _reconciled_category(enriched)
+        computed.append(enriched)
 
     def _matches(row: dict) -> bool:
         if from_date is not None and row["txn_date"] < from_date:
@@ -654,6 +701,8 @@ def build_transaction_statement(
         if to_date is not None and row["txn_date"] > to_date:
             return False
         if status_filter is not None and row["status"] != status_filter:
+            return False
+        if category_id is not None and category_id not in row["category_ids"]:
             return False
         return True
 
@@ -686,6 +735,7 @@ def build_transaction_statement(
                 "credit": row["txn_amount"] if row["direction"] == "in" else None,
                 "debit": row["txn_amount"] if row["direction"] == "out" else None,
                 "status": row["status"],
+                "reconciled_category": row["reconciled_category"],
             }
             for row in displayed
         ],
@@ -703,9 +753,12 @@ async def get_transaction_statement(
     from_date: date | None,
     to_date: date | None,
     status_filter: str | None,
+    category_id: UUID | None = None,
 ) -> dict:
     """Transaction Statement's own data (2026-10-02) - fetches one
     account's full transaction history and aggregates it in one pass,
     same convention as every other get_*/build_* pair above."""
     rows = await fetch_transaction_statement_rows(pool, user_id=user_id, account_id=account_id)
-    return build_transaction_statement(rows, from_date=from_date, to_date=to_date, status_filter=status_filter)
+    return build_transaction_statement(
+        rows, from_date=from_date, to_date=to_date, status_filter=status_filter, category_id=category_id
+    )

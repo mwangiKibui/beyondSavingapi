@@ -55,6 +55,7 @@ def _statement():
                 "credit": None,
                 "debit": Decimal("200.00"),
                 "status": "reconciled",
+                "reconciled_category": "Groceries",
             },
             {
                 "description": "Salary",
@@ -63,6 +64,7 @@ def _statement():
                 "credit": Decimal("1000.00"),
                 "debit": None,
                 "status": "unreconciled",
+                "reconciled_category": None,
             },
         ],
         "total_credit": Decimal("1000.00"),
@@ -113,17 +115,26 @@ def test_get_transaction_statement_success_shape(client, fake_user, fake_pool, m
     assert body["rows"][0]["description"] == "Naivas"
     assert body["rows"][0]["debit"] == "200.00"
     assert body["rows"][0]["credit"] is None
+    assert body["rows"][0]["reconciled_category"] == "Groceries"
+    assert body["rows"][1]["reconciled_category"] is None
 
 
 def test_get_transaction_statement_forwards_filters(client, fake_user, fake_pool, monkeypatch):
     account_id = str(uuid4())
+    category_id = str(uuid4())
     monkeypatch.setattr("app.api.reports.get_account", AsyncMock(return_value=_account()))
     mock = AsyncMock(return_value=_statement())
     monkeypatch.setattr("app.api.reports.get_transaction_statement", mock)
 
     response = client.get(
         "/reports/transaction-statement",
-        params={"account_id": account_id, "from": "2026-09-01", "to": "2026-09-30", "status": "reconciled"},
+        params={
+            "account_id": account_id,
+            "from": "2026-09-01",
+            "to": "2026-09-30",
+            "status": "reconciled",
+            "category_id": category_id,
+        },
     )
 
     assert response.status_code == 200
@@ -133,6 +144,7 @@ def test_get_transaction_statement_forwards_filters(client, fake_user, fake_pool
     assert str(kwargs["from_date"]) == "2026-09-01"
     assert str(kwargs["to_date"]) == "2026-09-30"
     assert kwargs["status_filter"] == "reconciled"
+    assert str(kwargs["category_id"]) == category_id
 
 
 def test_get_transaction_statement_rejects_an_invalid_status(client, fake_user, fake_pool):
@@ -194,11 +206,11 @@ def test_export_transaction_statement_csv_success_shape_and_rows(client, fake_us
     assert response.headers["content-disposition"] == 'attachment; filename="transaction-statement.csv"'
 
     rows = list(csv.reader(io.StringIO(response.text)))
-    assert rows[0] == ["Description", "Date", "Balance", "Credit", "Debit"]
-    assert rows[1] == ["Balance b/f", "", "1000.00", "", ""]
-    assert rows[2] == ["Naivas", "2026-09-05", "800.00", "", "200.00"]
-    assert rows[3] == ["Salary", "2026-09-10", "1800.00", "1000.00", ""]
-    assert rows[4] == ["Total", "", "1800.00", "1000.00", "200.00"]
+    assert rows[0] == ["Description", "Reconciled Category", "Date", "Balance", "Credit", "Debit"]
+    assert rows[1] == ["Balance b/f", "", "", "1000.00", "", ""]
+    assert rows[2] == ["Naivas", "Groceries", "2026-09-05", "800.00", "", "200.00"]
+    assert rows[3] == ["Salary", "", "2026-09-10", "1800.00", "1000.00", ""]
+    assert rows[4] == ["Total", "", "", "1800.00", "1000.00", "200.00"]
 
 
 def test_export_transaction_statement_csv_omits_balance_bf_when_unknown(client, fake_user, fake_pool, monkeypatch):
@@ -210,7 +222,7 @@ def test_export_transaction_statement_csv_omits_balance_bf_when_unknown(client, 
     response = client.get("/reports/transaction-statement/export.csv", params={"account_id": str(uuid4())})
 
     rows = list(csv.reader(io.StringIO(response.text)))
-    assert rows[1] == ["Naivas", "2026-09-05", "800.00", "", "200.00"]
+    assert rows[1] == ["Naivas", "Groceries", "2026-09-05", "800.00", "", "200.00"]
 
 
 def test_export_transaction_statement_csv_logs_and_returns_generic_500_on_unexpected_error(

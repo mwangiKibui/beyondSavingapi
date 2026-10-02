@@ -566,6 +566,9 @@ def _statement_row(**overrides):
         "counterparty": None,
         "balance_after": None,
         "allocated_total": Decimal("0.00"),
+        "category_names": [],
+        "category_ids": [],
+        "transfer_names": [],
     }
     base.update(overrides)
     return base
@@ -714,3 +717,87 @@ def test_build_transaction_statement_names_an_untitled_row_by_its_own_nature():
     statement = build_transaction_statement(rows, from_date=None, to_date=None, status_filter=None)
 
     assert [row["description"] for row in statement["rows"]] == ["Money In", "Money Out", "Naivas"]
+
+
+def test_build_transaction_statement_reconciled_category_only_set_when_reconciled():
+    """2026-10-02 feedback: "Reconciled Category" only has a value for a
+    reconciled row - an unreconciled one is None (blank to the caller),
+    even if it happens to carry category_names from a PARTIAL allocation."""
+    rows = [
+        _statement_row(
+            txn_amount=Decimal("100.00"), allocated_total=Decimal("100.00"), category_names=["Groceries"]
+        ),
+        _statement_row(
+            txn_amount=Decimal("100.00"), allocated_total=Decimal("40.00"), category_names=["Groceries"]
+        ),
+    ]
+
+    statement = build_transaction_statement(rows, from_date=None, to_date=None, status_filter=None)
+
+    assert statement["rows"][0]["reconciled_category"] == "Groceries"
+    assert statement["rows"][1]["reconciled_category"] is None
+
+
+def test_build_transaction_statement_reconciled_category_joins_categories_and_transfers():
+    rows = [
+        _statement_row(
+            txn_amount=Decimal("100.00"),
+            allocated_total=Decimal("100.00"),
+            category_names=["Groceries", "Transport"],
+        ),
+        _statement_row(
+            txn_amount=Decimal("100.00"), allocated_total=Decimal("100.00"), transfer_names=["Savings top-up"]
+        ),
+        _statement_row(txn_amount=Decimal("100.00"), allocated_total=Decimal("100.00")),
+    ]
+
+    statement = build_transaction_statement(rows, from_date=None, to_date=None, status_filter=None)
+
+    assert statement["rows"][0]["reconciled_category"] == "Groceries, Transport"
+    assert statement["rows"][1]["reconciled_category"] == "Savings top-up"
+    # Reconciled with neither a category nor a transfer reason - ab-124's
+    # "reconciled, no category" state - reads "No category", not blank.
+    assert statement["rows"][2]["reconciled_category"] == "No category"
+
+
+def test_build_transaction_statement_category_filter_hides_non_matching_rows_but_not_their_balance_effect():
+    groceries_id = uuid4()
+    rows = [
+        _statement_row(
+            txn_date=date(2026, 9, 1),
+            txn_amount=Decimal("1000.00"),
+            direction="in",
+            balance_after=Decimal("1000.00"),
+            allocated_total=Decimal("1000.00"),
+            category_names=["Salary"],
+            category_ids=[uuid4()],
+        ),
+        _statement_row(
+            txn_date=date(2026, 9, 5),
+            txn_amount=Decimal("100.00"),
+            direction="out",
+            allocated_total=Decimal("100.00"),
+            category_names=["Groceries"],
+            category_ids=[groceries_id],
+        ),
+        _statement_row(
+            txn_date=date(2026, 9, 10),
+            txn_amount=Decimal("40.00"),
+            direction="out",
+            allocated_total=Decimal("40.00"),
+            category_names=["Groceries"],
+            category_ids=[groceries_id],
+        ),
+    ]
+
+    statement = build_transaction_statement(
+        rows, from_date=None, to_date=None, status_filter=None, category_id=groceries_id
+    )
+
+    assert len(statement["rows"]) == 2
+    assert [row["reconciled_category"] for row in statement["rows"]] == ["Groceries", "Groceries"]
+    # The Salary row isn't shown (different category), but its +1000.00
+    # still carries into the balance of the first displayed row
+    # (1000 - 100 = 900).
+    assert statement["rows"][0]["balance"] == Decimal("900.00")
+    assert statement["total_debit"] == Decimal("140.00")
