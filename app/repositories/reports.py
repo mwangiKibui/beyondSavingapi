@@ -195,6 +195,23 @@ async def get_report(pool: asyncpg.Pool, filters: ReportFilters) -> dict:
     return build_report(rows, currency=filters.currency)
 
 
+async def get_category_summary(pool: asyncpg.Pool, filters: ReportFilters, *, category_type: str) -> list[dict]:
+    """Category Summary export's own data (ab-152, GET
+    /reports/categories/export.csv|.pdf) - reuses build_report's own
+    by-category aggregation (the exact same `by_category` figures GET
+    /reports already serves) and just filters it down to one
+    category_type ("expense" or "income"), rather than re-deriving the
+    category breakdown from scratch. filters.account_id/direction are
+    expected to be None here (the export only takes category_type/
+    from/to) - threading the same ReportFilters dataclass through keeps
+    this on the exact same fetch-then-aggregate pipeline as every other
+    /reports endpoint.
+    """
+    rows = await fetch_report_rows(pool, filters)
+    report = build_report(rows, currency=filters.currency)
+    return [item for item in report["by_category"] if item["category_type"] == category_type]
+
+
 def build_csv_rows(rows: list[dict]) -> list[dict]:
     """One row per TRANSACTION (not allocation) for the CSV export
     (ab-84), built from the exact same rows GET /reports aggregates -
@@ -305,6 +322,111 @@ async def get_account_summary(pool: asyncpg.Pool, *, user_id: UUID, account_id: 
     and aggregates it in one pass, same convention as get_report above."""
     rows = await fetch_account_summary_rows(pool, user_id=user_id, account_id=account_id)
     return build_account_summary(rows)
+
+
+async def fetch_budget_plan_rows(pool: asyncpg.Pool, *, user_id: UUID) -> list[dict]:
+    """Every one of the user's budget plans (ab-152, GET
+    /reports/budget-plans/export.csv|.pdf) - unfiltered by window, same
+    "fetch everything, then filter/aggregate in pure Python" split as
+    fetch_report_rows/build_report and fetch_account_summary_rows/
+    build_account_summary above. Keeping the window-overlap filter
+    (filter_budget_plans_by_window below) in pure Python rather than the
+    WHERE clause is what makes it directly unit-testable against
+    hand-built plan dicts, the same way build_report's own filtering
+    logic is.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT id, name, starts_at, ends_at, total_cap, currency
+        FROM budget_plans
+        WHERE user_id = $1
+        ORDER BY starts_at DESC
+        """,
+        user_id,
+    )
+    return [dict(row) for row in rows]
+
+
+def filter_budget_plans_by_window(
+    plans: list[dict], *, from_date: date | None, to_date: date | None
+) -> list[dict]:
+    """The Budget Plans export's own window-overlap filter (ab-152) - a
+    plan is kept when its window OVERLAPS [from_date, to_date], not just
+    when it STARTS inside that range (ab-151's frontend already expects
+    this overlap semantic for the same report; this is the backend doing
+    the same filtering itself rather than the frontend fetching
+    everything unfiltered). Both bounds are optional - omitting one
+    leaves that side unbounded, same optional-filter convention as every
+    other /reports filter.
+
+    starts_at::date <= to_date AND ends_at::date >= from_date - the
+    standard two-interval-overlap test, so a plan that starts BEFORE
+    from_date but ends INSIDE the range is still kept (its ends_at is >=
+    from_date and its starts_at is always <= to_date in that case), same
+    as a plan that starts inside the range but ends after to_date, or
+    one entirely inside it.
+    """
+    return [
+        plan
+        for plan in plans
+        if (to_date is None or plan["starts_at"].date() <= to_date)
+        and (from_date is None or plan["ends_at"].date() >= from_date)
+    ]
+
+
+async def get_budget_plans_report(
+    pool: asyncpg.Pool, *, user_id: UUID, from_date: date | None, to_date: date | None
+) -> list[dict]:
+    """Budget Plans export's own data (ab-152) - fetches every plan,
+    keeps only the ones whose window overlaps from/to (see
+    filter_budget_plans_by_window), then computes each kept plan's
+    money_in/money_out the same way list_budget_plans' total_income/
+    total_expenditure already are (app/repositories/budget_plans.py):
+    summed from real (non-transfer) allocations in the PLAN'S OWN
+    currency and window (plan["starts_at"]/plan["ends_at"]), not the
+    query's from/to range - a plan's totals are always its own full
+    window's activity, the same way the Budget Plans listing's totals
+    are, regardless of which from/to the caller used to select which
+    plans to include in this export.
+    """
+    plans = await fetch_budget_plan_rows(pool, user_id=user_id)
+    plans = filter_budget_plans_by_window(plans, from_date=from_date, to_date=to_date)
+
+    result = []
+    for plan in plans:
+        total_expenditure = await pool.fetchval(
+            """
+            SELECT COALESCE(SUM(a.amount), 0)
+            FROM allocations a
+            JOIN transactions t ON t.id = a.transaction_id
+            WHERE a.currency = $1
+              AND t.direction = 'out'
+              AND a.transfer_reason_id IS NULL
+              AND t.txn_date >= $2::date
+              AND t.txn_date <= $3::date
+            """,
+            plan["currency"],
+            plan["starts_at"],
+            plan["ends_at"],
+        )
+        total_income = await pool.fetchval(
+            """
+            SELECT COALESCE(SUM(a.amount), 0)
+            FROM allocations a
+            JOIN transactions t ON t.id = a.transaction_id
+            WHERE a.currency = $1
+              AND t.direction = 'in'
+              AND a.transfer_reason_id IS NULL
+              AND t.txn_date >= $2::date
+              AND t.txn_date <= $3::date
+            """,
+            plan["currency"],
+            plan["starts_at"],
+            plan["ends_at"],
+        )
+        result.append({**plan, "money_in": total_income, "money_out": total_expenditure})
+
+    return result
 
 
 def _resolve_transfer_source_label(row: dict) -> str:

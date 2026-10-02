@@ -6,15 +6,18 @@ actual math is verified (not just that some mock returned the expected
 number).
 """
 
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
 from app.repositories.reports import (
+    ReportFilters,
     _resolve_transfer_source_label,
     build_account_summary,
     build_csv_rows,
     build_report,
+    filter_budget_plans_by_window,
+    get_category_summary,
 )
 
 GROCERIES_ID = uuid4()
@@ -383,3 +386,134 @@ def test_resolve_transfer_source_label_dashes_when_nothing_is_set():
     }
 
     assert _resolve_transfer_source_label(row) == "—"
+
+
+# --- filter_budget_plans_by_window (ab-152) -------------------------------
+
+
+def _plan(**overrides):
+    base = {
+        "id": uuid4(),
+        "name": "This month",
+        "starts_at": datetime(2026, 9, 1, tzinfo=timezone.utc),
+        "ends_at": datetime(2026, 9, 30, tzinfo=timezone.utc),
+        "total_cap": Decimal("5000.00"),
+        "currency": "KES",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_filter_budget_plans_by_window_keeps_a_plan_that_starts_before_from_but_ends_inside_the_range():
+    # ab-152: true window-overlap, not just "starts within range" - this
+    # plan started a full month before `from` but its window still
+    # overlaps [from, to] because it ends inside it.
+    plan = _plan(
+        starts_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 9, 10, tzinfo=timezone.utc),
+    )
+
+    kept = filter_budget_plans_by_window([plan], from_date=date(2026, 9, 1), to_date=date(2026, 9, 30))
+
+    assert kept == [plan]
+
+
+def test_filter_budget_plans_by_window_excludes_a_plan_entirely_before_the_range():
+    plan = _plan(
+        starts_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 7, 31, tzinfo=timezone.utc),
+    )
+
+    kept = filter_budget_plans_by_window([plan], from_date=date(2026, 9, 1), to_date=date(2026, 9, 30))
+
+    assert kept == []
+
+
+def test_filter_budget_plans_by_window_excludes_a_plan_entirely_after_the_range():
+    plan = _plan(
+        starts_at=datetime(2026, 10, 5, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 10, 20, tzinfo=timezone.utc),
+    )
+
+    kept = filter_budget_plans_by_window([plan], from_date=date(2026, 9, 1), to_date=date(2026, 9, 30))
+
+    assert kept == []
+
+
+def test_filter_budget_plans_by_window_keeps_everything_when_both_bounds_are_omitted():
+    plan = _plan()
+
+    kept = filter_budget_plans_by_window([plan], from_date=None, to_date=None)
+
+    assert kept == [plan]
+
+
+def test_filter_budget_plans_by_window_only_bounds_the_side_that_is_given():
+    # Only `from` given: a plan ending well before `from` is excluded,
+    # but one starting far in the future (no `to` bound at all) is kept.
+    old_plan = _plan(
+        starts_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 1, 31, tzinfo=timezone.utc),
+    )
+    future_plan = _plan(
+        starts_at=datetime(2027, 1, 1, tzinfo=timezone.utc),
+        ends_at=datetime(2027, 1, 31, tzinfo=timezone.utc),
+    )
+
+    kept = filter_budget_plans_by_window([old_plan, future_plan], from_date=date(2026, 9, 1), to_date=None)
+
+    assert kept == [future_plan]
+
+
+# --- get_category_summary (ab-152) ----------------------------------------
+
+
+class _FakeCategorySummaryPool:
+    """Minimal asyncpg.Pool stand-in for get_category_summary's own call
+    to fetch_report_rows - returns a fixed set of fetch_report_rows()-
+    shaped rows regardless of the query/args, since build_report's own
+    aggregation correctness is already covered above; this only proves
+    get_category_summary reuses that aggregation (rather than
+    re-deriving a category breakdown from scratch) and filters it down
+    to one category_type.
+    """
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def fetch(self, query, *args):
+        return self._rows
+
+
+async def test_get_category_summary_reuses_by_category_aggregation_filtered_to_expense():
+    rows = [
+        _row(
+            transaction_id=uuid4(),
+            txn_amount=Decimal("500.00"),
+            direction="out",
+            allocation_id=uuid4(),
+            category_id=GROCERIES_ID,
+            category_name="Groceries",
+            category_type="expense",
+            alloc_amount=Decimal("500.00"),
+        ),
+        _row(
+            transaction_id=uuid4(),
+            txn_amount=Decimal("1000.00"),
+            direction="in",
+            allocation_id=uuid4(),
+            category_id=SALARY_ID,
+            category_name="Salary",
+            category_type="income",
+            alloc_amount=Decimal("1000.00"),
+        ),
+    ]
+    pool = _FakeCategorySummaryPool(rows)
+    filters = ReportFilters(user_id=uuid4(), currency="KES")
+
+    result = await get_category_summary(pool, filters, category_type="expense")
+
+    assert len(result) == 1
+    assert result[0]["category_name"] == "Groceries"
+    assert result[0]["category_type"] == "expense"
+    assert result[0]["total"] == Decimal("500.00")

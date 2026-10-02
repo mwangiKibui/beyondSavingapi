@@ -111,3 +111,59 @@ def build_report_pdf(
 
     doc.build(elements)
     return buffer.getvalue()
+
+
+def build_simple_table_pdf(
+    title: str,
+    column_headers: list[str],
+    rows: list[list[str]],
+    *,
+    subtitle: str | None = None,
+) -> bytes:
+    """Generic title + table PDF, shared by every ab-152 export (Account
+    Summary, Budget Plans, Category/Expense/Income Summary, Transfers) -
+    reuses build_report_pdf's own SimpleDocTemplate/Table/TableStyle
+    setup above (ab-85's reportlab.platypus plumbing) instead of each of
+    the four new export types re-building it from scratch. Unlike
+    build_report_pdf, this takes already-stringified rows straight from
+    the caller rather than a `report` dict, since each ab-152 export has
+    its own row shape (there's no single shared aggregate dict the way
+    GET /reports' `report` is shared across its own CSV/PDF export).
+    """
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        title=f"beyondSaving - {title}",
+        topMargin=0.75 * inch,
+        bottomMargin=0.75 * inch,
+        leftMargin=0.75 * inch,
+        rightMargin=0.75 * inch,
+    )
+    styles = getSampleStyleSheet()
+
+    elements = [Paragraph(f"beyondSaving - {title}", styles["Title"])]
+    if subtitle:
+        elements.append(Paragraph(subtitle, styles["Normal"]))
+    elements.append(Spacer(1, 16))
+
+    if rows:
+        table = Table([column_headers, *rows])
+        table.setStyle(
+            TableStyle(
+                [
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
+                    ("FONTSIZE", (0, 0), (-1, -1), 9),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+        elements.append(table)
+    else:
+        elements.append(Paragraph("No data in this range.", styles["Normal"]))
+
+    doc.build(elements)
+    return buffer.getvalue()
