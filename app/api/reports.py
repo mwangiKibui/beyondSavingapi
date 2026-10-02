@@ -487,6 +487,8 @@ async def export_budget_plans_pdf_endpoint(
         "Budget Plans",
         ["Plan Name", "Window (start - end)", "Total Cap", "Money In", "Money Out"],
         rows,
+        from_date=from_date,
+        to_date=to_date,
     )
     return _pdf_response(pdf_bytes, filename="budget-plans.pdf")
 
@@ -564,7 +566,9 @@ async def export_category_summary_pdf_endpoint(
 
     rows = [[item["category_name"] or "—", str(item["total"])] for item in items]
     title = "Expense Summary" if category_type == "expense" else "Income Summary"
-    pdf_bytes = build_simple_table_pdf(title, ["Category", "Amount"], rows)
+    pdf_bytes = build_simple_table_pdf(
+        title, ["Category", "Amount"], rows, from_date=from_date, to_date=to_date
+    )
     return _pdf_response(pdf_bytes, filename=f"{category_type}-summary.pdf")
 
 
@@ -653,8 +657,10 @@ async def export_transfers_pdf_endpoint(
         for item in items
     ]
     pdf_bytes = build_simple_table_pdf(
-        "Transfers",
+        "Transfers Summary",
         ["Transfer Nature", "Source Account", "Destination Account", "Amount", "Date"],
         rows,
+        from_date=from_date,
+        to_date=to_date,
     )
     return _pdf_response(pdf_bytes, filename="transfers.pdf")
