@@ -16,6 +16,7 @@ from app.repositories.reports import (
     build_account_summary,
     build_csv_rows,
     build_report,
+    build_transaction_statement,
     filter_budget_plans_by_window,
     get_category_summary,
 )
@@ -553,3 +554,148 @@ async def test_get_category_summary_reuses_by_category_aggregation_filtered_to_e
     assert result[0]["category_name"] == "Groceries"
     assert result[0]["category_type"] == "expense"
     assert result[0]["total"] == Decimal("500.00")
+
+
+def _statement_row(**overrides):
+    base = {
+        "transaction_id": uuid4(),
+        "txn_date": date(2026, 9, 1),
+        "txn_amount": Decimal("0.00"),
+        "direction": "in",
+        "description": "Payment",
+        "counterparty": None,
+        "balance_after": None,
+        "allocated_total": Decimal("0.00"),
+    }
+    base.update(overrides)
+    return base
+
+
+def test_build_transaction_statement_is_unknowable_for_an_all_manual_account():
+    """2026-10-02 feedback: "balance b/f" only appears if we've uploaded a
+    statement - an account with nothing but manual entries (no row ever
+    had a real balance_after) has no anchor to compute from at all, so
+    every balance - including opening_balance - is None."""
+    rows = [
+        _statement_row(txn_date=date(2026, 9, 1), txn_amount=Decimal("1000.00"), direction="in"),
+        _statement_row(txn_date=date(2026, 9, 5), txn_amount=Decimal("200.00"), direction="out"),
+    ]
+
+    statement = build_transaction_statement(rows, from_date=None, to_date=None, status_filter=None)
+
+    assert statement["opening_balance"] is None
+    assert statement["closing_balance"] is None
+    assert [row["balance"] for row in statement["rows"]] == [None, None]
+
+
+def test_build_transaction_statement_computes_running_balance_from_an_anchor():
+    """A statement-sourced row's balance_after is the anchor; every other
+    row's balance is computed by replaying credit/debit from there -
+    "based on the debit or credit then the balance will change"."""
+    rows = [
+        _statement_row(
+            txn_date=date(2026, 9, 1), txn_amount=Decimal("1000.00"), direction="in", balance_after=Decimal("1000.00")
+        ),
+        _statement_row(txn_date=date(2026, 9, 5), txn_amount=Decimal("200.00"), direction="out"),
+        _statement_row(txn_date=date(2026, 9, 10), txn_amount=Decimal("50.00"), direction="in"),
+    ]
+
+    statement = build_transaction_statement(rows, from_date=None, to_date=None, status_filter=None)
+
+    assert statement["opening_balance"] == Decimal("0.00")
+    assert [row["balance"] for row in statement["rows"]] == [
+        Decimal("1000.00"),
+        Decimal("800.00"),
+        Decimal("850.00"),
+    ]
+    assert statement["closing_balance"] == Decimal("850.00")
+
+
+def test_build_transaction_statement_back_calculates_balance_before_a_later_anchor():
+    """The anchor doesn't have to be the first transaction - an earlier
+    manual entry's balance is back-calculated by undoing the anchor's own
+    delta and every delta between the manual entry and the anchor."""
+    rows = [
+        _statement_row(txn_date=date(2026, 9, 1), txn_amount=Decimal("100.00"), direction="in"),  # manual, no anchor
+        _statement_row(
+            txn_date=date(2026, 9, 5), txn_amount=Decimal("1000.00"), direction="in", balance_after=Decimal("1100.00")
+        ),
+    ]
+
+    statement = build_transaction_statement(rows, from_date=None, to_date=None, status_filter=None)
+
+    assert statement["opening_balance"] == Decimal("0.00")
+    assert statement["rows"][0]["balance"] == Decimal("100.00")
+    assert statement["rows"][1]["balance"] == Decimal("1100.00")
+
+
+def test_build_transaction_statement_date_filter_keeps_true_opening_balance():
+    """Filtering to a later date window still reflects every transaction
+    that happened BEFORE it in opening_balance - a hidden transaction
+    still really moved the balance, even though its own row isn't shown."""
+    rows = [
+        _statement_row(
+            txn_date=date(2026, 9, 1), txn_amount=Decimal("1000.00"), direction="in", balance_after=Decimal("1000.00")
+        ),
+        _statement_row(txn_date=date(2026, 9, 10), txn_amount=Decimal("300.00"), direction="out"),
+        _statement_row(txn_date=date(2026, 9, 20), txn_amount=Decimal("50.00"), direction="in"),
+    ]
+
+    statement = build_transaction_statement(rows, from_date=date(2026, 9, 15), to_date=None, status_filter=None)
+
+    assert statement["opening_balance"] == Decimal("700.00")
+    assert len(statement["rows"]) == 1
+    assert statement["rows"][0]["balance"] == Decimal("750.00")
+    assert statement["total_credit"] == Decimal("50.00")
+    assert statement["total_debit"] == Decimal("0.00")
+
+
+def test_build_transaction_statement_status_filter_hides_rows_but_not_their_balance_effect():
+    """A row hidden by the status filter still shifts the balance shown
+    on later displayed rows, and is excluded from the totals."""
+    rows = [
+        _statement_row(
+            txn_date=date(2026, 9, 1),
+            txn_amount=Decimal("1000.00"),
+            direction="in",
+            balance_after=Decimal("1000.00"),
+            allocated_total=Decimal("1000.00"),  # fully allocated -> reconciled
+        ),
+        _statement_row(
+            txn_date=date(2026, 9, 5),
+            txn_amount=Decimal("100.00"),
+            direction="out",
+            allocated_total=Decimal("0.00"),  # unreconciled
+        ),
+        _statement_row(
+            txn_date=date(2026, 9, 10),
+            txn_amount=Decimal("40.00"),
+            direction="in",
+            allocated_total=Decimal("40.00"),  # reconciled
+        ),
+    ]
+
+    statement = build_transaction_statement(rows, from_date=None, to_date=None, status_filter="reconciled")
+
+    assert len(statement["rows"]) == 2
+    assert statement["rows"][0]["balance"] == Decimal("1000.00")
+    # The unreconciled -100.00 row isn't shown, but its effect carries
+    # into the next displayed row's balance (900 - 100 + 40 = 940).
+    assert statement["rows"][1]["balance"] == Decimal("940.00")
+    assert statement["total_credit"] == Decimal("1040.00")
+    assert statement["total_debit"] == Decimal("0.00")
+
+
+def test_build_transaction_statement_status_derivation_matches_accounts_list_convention():
+    """Fully allocated (>=) is reconciled; zero or partial is
+    unreconciled - the same 2-state boundary accounts.py's own
+    unreconciled_count uses."""
+    rows = [
+        _statement_row(txn_amount=Decimal("100.00"), allocated_total=Decimal("100.00")),
+        _statement_row(txn_amount=Decimal("100.00"), allocated_total=Decimal("60.00")),
+        _statement_row(txn_amount=Decimal("100.00"), allocated_total=Decimal("0.00")),
+    ]
+
+    statement = build_transaction_statement(rows, from_date=None, to_date=None, status_filter=None)
+
+    assert [row["status"] for row in statement["rows"]] == ["reconciled", "unreconciled", "unreconciled"]

@@ -536,3 +536,170 @@ async def get_transfers(
         }
         for row in (dict(row) for row in rows)
     ]
+
+
+async def fetch_transaction_statement_rows(pool: asyncpg.Pool, *, user_id: UUID, account_id: UUID) -> list[dict]:
+    """Every transaction ON ONE ACCOUNT, oldest first (2026-10-02's
+    Transaction Statement report) - unlike every other /reports query,
+    this is scoped to exactly one account_id (a running balance is a
+    single-account concept; it has no cross-account meaning), so there's
+    no optional-filter branching here - the caller (the router) has
+    already confirmed account_id belongs to user_id.
+
+    allocated_total is the same per-transaction "how much of this has
+    been reconciled" figure get_transaction/list_transactions already
+    compute (SUM of each allocation's own-currency original_amount) -
+    reused here by build_transaction_statement below to derive each row's
+    reconciled/unreconciled status, same >= comparison convention as
+    list_transactions' own status derivation and accounts.py's
+    unreconciled_count (2-state: "fully reconciled" vs. not, "partial"
+    folded into "not" - matching the Accounts list page's own filter,
+    not the Transactions list page's separate 3-state one).
+
+    txn_date ASC, created_at ASC (oldest first) - a running balance only
+    reads correctly top-to-bottom in chronological order, the reverse of
+    every other /reports query's newest-first convention.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT
+            t.id AS transaction_id,
+            t.txn_date,
+            t.amount AS txn_amount,
+            t.direction,
+            t.description,
+            t.counterparty,
+            t.balance_after,
+            COALESCE(alloc.total, 0) AS allocated_total
+        FROM transactions t
+        JOIN accounts a ON a.id = t.account_id
+        LEFT JOIN LATERAL (
+            SELECT SUM(al.original_amount) AS total FROM allocations al WHERE al.transaction_id = t.id
+        ) alloc ON true
+        WHERE a.user_id = $1 AND t.account_id = $2
+        ORDER BY t.txn_date ASC, t.created_at ASC
+        """,
+        user_id,
+        account_id,
+    )
+    return [dict(row) for row in rows]
+
+
+def _signed_amount(row: dict) -> Decimal:
+    return row["txn_amount"] if row["direction"] == "in" else -row["txn_amount"]
+
+
+def build_transaction_statement(
+    rows: list[dict],
+    *,
+    from_date: date | None,
+    to_date: date | None,
+    status_filter: str | None,
+) -> dict:
+    """Pure-Python aggregation over fetch_transaction_statement_rows' own
+    result set (2026-10-02's Transaction Statement report) - every
+    transaction mixes two sources (a bank statement's own balance_after,
+    only known for 'statement' rows, vs. a manual entry's unknown one), so
+    the Balance column is COMPUTED by replaying each row's own credit/
+    debit in chronological order, anchored to whichever row has the
+    earliest known balance_after, rather than ever trusting a stored
+    balance_after directly. This is the one place in the codebase that
+    computes a derived running balance (every other balance figure here -
+    accounts.py's own account.balance - just reads the latest transaction's
+    stored balance_after) - deliberately so, per product feedback: a
+    manual entry changes the balance the same way a statement-sourced one
+    does.
+
+    Algorithm: find the earliest row with a non-null balance_after (the
+    "anchor"). Back-calculate the TRUE balance immediately before the
+    account's very first transaction ever (position 0) by undoing the
+    anchor's own delta, then undoing every delta between position 0 and
+    the anchor. From that one true starting point, a single forward pass
+    assigns every row (including any before the anchor, and every manual
+    one) its own computed post-transaction balance. If NO row has a known
+    balance_after at all (an all-manual account, never uploaded a
+    statement), there's no anchor and nothing is computable - every
+    balance is None ("—" to the caller), matching "the b/f row only
+    appears if we've uploaded a statement."
+
+    Filtering (from_date/to_date/status_filter) only controls which rows
+    are DISPLAYED - the balance itself is computed from the account's
+    FULL, unfiltered history, since a hidden transaction (outside the
+    date window, or the wrong reconciliation status) still really moved
+    the account's balance. opening_balance is therefore the true computed
+    balance immediately before the first DISPLAYED row, not simply
+    from_date's own boundary.
+    """
+    anchor_index = next((i for i, row in enumerate(rows) if row["balance_after"] is not None), None)
+
+    if anchor_index is not None:
+        anchor = rows[anchor_index]
+        balance_before_anchor = anchor["balance_after"] - _signed_amount(anchor)
+        cumulative_before_anchor = sum((_signed_amount(row) for row in rows[:anchor_index]), ZERO)
+        starting_balance: Decimal | None = balance_before_anchor - cumulative_before_anchor
+    else:
+        starting_balance = None
+
+    computed = []
+    running = starting_balance
+    for row in rows:
+        if running is not None:
+            running = running + _signed_amount(row)
+        status = "reconciled" if row["allocated_total"] >= row["txn_amount"] else "unreconciled"
+        computed.append({**row, "balance": running, "status": status})
+
+    def _matches(row: dict) -> bool:
+        if from_date is not None and row["txn_date"] < from_date:
+            return False
+        if to_date is not None and row["txn_date"] > to_date:
+            return False
+        if status_filter is not None and row["status"] != status_filter:
+            return False
+        return True
+
+    displayed = [row for row in computed if _matches(row)]
+
+    opening_balance = starting_balance
+    if displayed:
+        first_id = displayed[0]["transaction_id"]
+        first_index = next(i for i, row in enumerate(computed) if row["transaction_id"] == first_id)
+        if first_index > 0:
+            opening_balance = computed[first_index - 1]["balance"]
+
+    total_credit = sum((row["txn_amount"] for row in displayed if row["direction"] == "in"), ZERO)
+    total_debit = sum((row["txn_amount"] for row in displayed if row["direction"] == "out"), ZERO)
+    closing_balance = displayed[-1]["balance"] if displayed else opening_balance
+
+    return {
+        "opening_balance": opening_balance,
+        "rows": [
+            {
+                "description": row["description"] or row["counterparty"] or "—",
+                "date": row["txn_date"],
+                "balance": row["balance"],
+                "credit": row["txn_amount"] if row["direction"] == "in" else None,
+                "debit": row["txn_amount"] if row["direction"] == "out" else None,
+                "status": row["status"],
+            }
+            for row in displayed
+        ],
+        "total_credit": total_credit,
+        "total_debit": total_debit,
+        "closing_balance": closing_balance,
+    }
+
+
+async def get_transaction_statement(
+    pool: asyncpg.Pool,
+    *,
+    user_id: UUID,
+    account_id: UUID,
+    from_date: date | None,
+    to_date: date | None,
+    status_filter: str | None,
+) -> dict:
+    """Transaction Statement's own data (2026-10-02) - fetches one
+    account's full transaction history and aggregates it in one pass,
+    same convention as every other get_*/build_* pair above."""
+    rows = await fetch_transaction_statement_rows(pool, user_id=user_id, account_id=account_id)
+    return build_transaction_statement(rows, from_date=from_date, to_date=to_date, status_filter=status_filter)

@@ -23,6 +23,7 @@ from app.repositories.reports import (
     get_category_summary,
     get_report,
     get_report_csv_rows,
+    get_transaction_statement,
     get_transfers,
     resolve_report_currency,
 )
@@ -42,6 +43,12 @@ Direction = Literal["in", "out"]
 # report views - categories.type's own column values, reused here rather
 # than inventing a second "expense"/"income" vocabulary.
 CategoryType = Literal["expense", "income"]
+
+# Transaction Statement's own status filter (2026-10-02) - deliberately
+# 2-state (not Transactions list's reconciled/partial/unreconciled),
+# matching the Accounts list page's own reconciled/unreconciled filter:
+# "partial" folds into "unreconciled" at this level.
+TransactionStatementStatus = Literal["reconciled", "unreconciled"]
 
 
 async def _build_filters(
@@ -119,6 +126,23 @@ class TransferItem(BaseModel):
 
 class TransferListResponse(BaseModel):
     items: list[TransferItem]
+
+
+class TransactionStatementRow(BaseModel):
+    description: str
+    date: date
+    balance: Decimal | None
+    credit: Decimal | None
+    debit: Decimal | None
+    status: str
+
+
+class TransactionStatementResponse(BaseModel):
+    opening_balance: Decimal | None
+    rows: list[TransactionStatementRow]
+    total_credit: Decimal
+    total_debit: Decimal
+    closing_balance: Decimal | None
 
 
 def _require_pool(pool: asyncpg.Pool | None) -> None:
@@ -675,3 +699,169 @@ async def export_transfers_pdf_endpoint(
         to_date=to_date,
     )
     return _pdf_response(pdf_bytes, filename="transfers.pdf")
+
+
+# --- Transaction Statement (2026-10-02) -----------------------------------
+
+
+def _format_statement_amount(value: Decimal | None) -> str:
+    return "" if value is None else str(value)
+
+
+def _format_statement_balance(value: Decimal | None) -> str:
+    return "—" if value is None else str(value)
+
+
+def _statement_table_rows(statement: dict) -> list[list[str]]:
+    """Shared by the CSV/PDF exports (and not the JSON endpoint, which
+    returns opening_balance/closing_balance/totals as their own fields
+    for the frontend to style distinctly) - flattens the statement into
+    plain table rows: a leading "Balance b/f" row when an opening balance
+    is known, one row per transaction, and a trailing "Total" row.
+    """
+    rows = []
+    if statement["opening_balance"] is not None:
+        rows.append(["Balance b/f", _format_statement_balance(statement["opening_balance"]), "", ""])
+    for row in statement["rows"]:
+        rows.append(
+            [
+                row["description"],
+                _format_statement_balance(row["balance"]),
+                _format_statement_amount(row["credit"]),
+                _format_statement_amount(row["debit"]),
+            ]
+        )
+    rows.append(
+        [
+            "Total",
+            _format_statement_balance(statement["closing_balance"]),
+            _format_statement_amount(statement["total_credit"]),
+            _format_statement_amount(statement["total_debit"]),
+        ]
+    )
+    return rows
+
+
+async def _resolve_statement_account(
+    pool: asyncpg.Pool, *, account_id: UUID, user_id: UUID
+) -> dict:
+    account = await get_account(pool, account_id=account_id, user_id=user_id)
+    if account is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+    return account
+
+
+@router.get("/transaction-statement", response_model=TransactionStatementResponse)
+async def get_transaction_statement_endpoint(
+    account_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+    from_date: date | None = Query(default=None, alias="from"),
+    to_date: date | None = Query(default=None, alias="to"),
+    txn_status: TransactionStatementStatus | None = Query(default=None, alias="status"),
+) -> dict:
+    """account_id is required (unlike every other /reports filter) - a
+    running balance is inherently a single-account concept, so there's no
+    "all accounts" view of this report."""
+    _require_pool(pool)
+
+    try:
+        await _resolve_statement_account(pool, account_id=account_id, user_id=user_id)
+        statement = await get_transaction_statement(
+            pool,
+            user_id=user_id,
+            account_id=account_id,
+            from_date=from_date,
+            to_date=to_date,
+            status_filter=txn_status,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error building transaction statement for user %s", user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=GENERIC_ERROR_MESSAGE,
+        ) from None
+
+    return statement
+
+
+@router.get("/transaction-statement/export.csv")
+async def export_transaction_statement_csv_endpoint(
+    account_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+    from_date: date | None = Query(default=None, alias="from"),
+    to_date: date | None = Query(default=None, alias="to"),
+    txn_status: TransactionStatementStatus | None = Query(default=None, alias="status"),
+) -> Response:
+    _require_pool(pool)
+
+    try:
+        await _resolve_statement_account(pool, account_id=account_id, user_id=user_id)
+        statement = await get_transaction_statement(
+            pool,
+            user_id=user_id,
+            account_id=account_id,
+            from_date=from_date,
+            to_date=to_date,
+            status_filter=txn_status,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error exporting transaction statement CSV for user %s", user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=GENERIC_ERROR_MESSAGE,
+        ) from None
+
+    return _csv_response(
+        ["Description", "Balance", "Credit", "Debit"],
+        _statement_table_rows(statement),
+        filename="transaction-statement.csv",
+    )
+
+
+@router.get("/transaction-statement/export.pdf")
+async def export_transaction_statement_pdf_endpoint(
+    account_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+    from_date: date | None = Query(default=None, alias="from"),
+    to_date: date | None = Query(default=None, alias="to"),
+    txn_status: TransactionStatementStatus | None = Query(default=None, alias="status"),
+) -> Response:
+    _require_pool(pool)
+
+    try:
+        account = await _resolve_statement_account(pool, account_id=account_id, user_id=user_id)
+        statement = await get_transaction_statement(
+            pool,
+            user_id=user_id,
+            account_id=account_id,
+            from_date=from_date,
+            to_date=to_date,
+            status_filter=txn_status,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error exporting transaction statement PDF for user %s", user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=GENERIC_ERROR_MESSAGE,
+        ) from None
+
+    status_subtitle = {"reconciled": "Status: Reconciled", "unreconciled": "Status: Unreconciled"}.get(txn_status)
+    pdf_bytes = build_simple_table_pdf(
+        "Transaction Statement",
+        ["Description", "Balance", "Credit", "Debit"],
+        _statement_table_rows(statement),
+        subtitle=status_subtitle,
+        account_name=account["nickname"],
+        from_date=from_date,
+        to_date=to_date,
+    )
+    return _pdf_response(pdf_bytes, filename="transaction-statement.pdf")
