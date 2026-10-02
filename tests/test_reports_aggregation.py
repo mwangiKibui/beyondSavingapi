@@ -10,7 +10,12 @@ from datetime import date
 from decimal import Decimal
 from uuid import uuid4
 
-from app.repositories.reports import build_csv_rows, build_report
+from app.repositories.reports import (
+    _resolve_transfer_source_label,
+    build_account_summary,
+    build_csv_rows,
+    build_report,
+)
 
 GROCERIES_ID = uuid4()
 SALARY_ID = uuid4()
@@ -242,3 +247,139 @@ def test_build_csv_rows_comma_joins_multiple_categories_and_dashes_an_unallocate
     assert unallocated_row["categories"] == "—"
     assert unallocated_row["counterparty"] == ""
     assert unallocated_row["description"] == ""
+
+
+def _account_summary_row(**overrides):
+    base = {
+        "account_id": None,
+        "account_nickname": "KCB Salary",
+        "transaction_id": None,
+        "txn_amount": None,
+        "direction": None,
+        "has_transfer_allocation": False,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_build_account_summary_includes_an_account_with_zero_transactions():
+    account_id = uuid4()
+    rows = [_account_summary_row(account_id=account_id, account_nickname="Empty Account")]
+
+    summary = build_account_summary(rows)
+
+    assert summary == [
+        {
+            "account_id": account_id,
+            "account_nickname": "Empty Account",
+            "money_in": Decimal("0.00"),
+            "money_out": Decimal("0.00"),
+        }
+    ]
+
+
+def test_build_account_summary_sums_by_direction_per_account():
+    account_id = uuid4()
+    rows = [
+        _account_summary_row(
+            account_id=account_id,
+            transaction_id=uuid4(),
+            txn_amount=Decimal("1000.00"),
+            direction="in",
+        ),
+        _account_summary_row(
+            account_id=account_id,
+            transaction_id=uuid4(),
+            txn_amount=Decimal("300.00"),
+            direction="out",
+        ),
+    ]
+
+    summary = build_account_summary(rows)
+
+    assert summary == [
+        {
+            "account_id": account_id,
+            "account_nickname": "KCB Salary",
+            "money_in": Decimal("1000.00"),
+            "money_out": Decimal("300.00"),
+        }
+    ]
+
+
+def test_build_account_summary_excludes_a_transaction_with_a_transfer_shaped_allocation():
+    account_id = uuid4()
+    rows = [
+        _account_summary_row(
+            account_id=account_id,
+            transaction_id=uuid4(),
+            txn_amount=Decimal("1000.00"),
+            direction="in",
+        ),
+        # A transfer-shaped allocation on this one excludes it entirely
+        # from money_out, same convention as build_report's total_out.
+        _account_summary_row(
+            account_id=account_id,
+            transaction_id=uuid4(),
+            txn_amount=Decimal("500.00"),
+            direction="out",
+            has_transfer_allocation=True,
+        ),
+    ]
+
+    summary = build_account_summary(rows)
+
+    assert summary[0]["money_in"] == Decimal("1000.00")
+    assert summary[0]["money_out"] == Decimal("0.00")
+
+
+def test_resolve_transfer_source_label_prefers_a_tracked_source_account():
+    row = {
+        "source_account_id": uuid4(),
+        "source_account_nickname": "M-Pesa",
+        "source_sub_ledger_id": uuid4(),
+        "source_sub_ledger_name": "Emergency Fund",
+        "source_sub_ledger_account_nickname": "KCB Savings",
+        "source_description": "Should be ignored",
+    }
+
+    assert _resolve_transfer_source_label(row) == "M-Pesa"
+
+
+def test_resolve_transfer_source_label_falls_back_to_sub_ledger_and_its_parent_account():
+    row = {
+        "source_account_id": None,
+        "source_account_nickname": None,
+        "source_sub_ledger_id": uuid4(),
+        "source_sub_ledger_name": "Emergency Fund",
+        "source_sub_ledger_account_nickname": "KCB Savings",
+        "source_description": None,
+    }
+
+    assert _resolve_transfer_source_label(row) == "KCB Savings / Emergency Fund"
+
+
+def test_resolve_transfer_source_label_falls_back_to_a_free_text_description():
+    row = {
+        "source_account_id": None,
+        "source_account_nickname": None,
+        "source_sub_ledger_id": None,
+        "source_sub_ledger_name": None,
+        "source_sub_ledger_account_nickname": None,
+        "source_description": "Cash deposit from a friend",
+    }
+
+    assert _resolve_transfer_source_label(row) == "Cash deposit from a friend"
+
+
+def test_resolve_transfer_source_label_dashes_when_nothing_is_set():
+    row = {
+        "source_account_id": None,
+        "source_account_nickname": None,
+        "source_sub_ledger_id": None,
+        "source_sub_ledger_name": None,
+        "source_sub_ledger_account_nickname": None,
+        "source_description": None,
+    }
+
+    assert _resolve_transfer_source_label(row) == "—"

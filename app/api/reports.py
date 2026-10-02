@@ -18,8 +18,10 @@ from app.repositories.reports import (
     ReportFilters,
     build_report,
     fetch_report_rows,
+    get_account_summary,
     get_report,
     get_report_csv_rows,
+    get_transfers,
     resolve_report_currency,
 )
 from app.services.report_pdf import build_report_pdf
@@ -85,6 +87,31 @@ class ReportResponse(BaseModel):
     by_category: list[CategoryBreakdownItem]
     reconciled_no_category_total: Decimal
     unreconciled_total: Decimal
+
+
+class AccountSummaryItem(BaseModel):
+    account_id: UUID
+    account_nickname: str
+    money_in: Decimal
+    money_out: Decimal
+
+
+class AccountSummaryResponse(BaseModel):
+    items: list[AccountSummaryItem]
+
+
+class TransferItem(BaseModel):
+    id: UUID
+    transfer_reason_name: str | None
+    source_label: str
+    destination_account_name: str
+    amount: Decimal
+    currency: str
+    date: date
+
+
+class TransferListResponse(BaseModel):
+    items: list[TransferItem]
 
 
 def _require_pool(pool: asyncpg.Pool | None) -> None:
@@ -231,3 +258,61 @@ async def export_report_pdf_endpoint(
         media_type="application/pdf",
         headers={"Content-Disposition": 'attachment; filename="report.pdf"'},
     )
+
+
+@router.get("/accounts", response_model=AccountSummaryResponse)
+async def get_account_summary_endpoint(
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+    account_id: UUID | None = Query(default=None),
+) -> dict:
+    """Account Summary (ab-150) - every account the user has, or just the
+    one matching account_id, all-time with no date dimension at all (see
+    get_account_summary's own docstring)."""
+    _require_pool(pool)
+
+    try:
+        items = await get_account_summary(pool, user_id=user_id, account_id=account_id)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error building account summary for user %s", user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=GENERIC_ERROR_MESSAGE,
+        ) from None
+
+    return {"items": items}
+
+
+@router.get("/transfers", response_model=TransferListResponse)
+async def get_transfers_endpoint(
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+    account_id: UUID | None = Query(default=None),
+    from_date: date | None = Query(default=None, alias="from"),
+    to_date: date | None = Query(default=None, alias="to"),
+) -> dict:
+    """Account-to-Account Transfer list (ab-150) - one row per
+    transfer-shaped allocation matching the filters, newest first (see
+    get_transfers' own docstring)."""
+    _require_pool(pool)
+
+    try:
+        items = await get_transfers(
+            pool,
+            user_id=user_id,
+            account_id=account_id,
+            from_date=from_date,
+            to_date=to_date,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error building transfer list for user %s", user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=GENERIC_ERROR_MESSAGE,
+        ) from None
+
+    return {"items": items}

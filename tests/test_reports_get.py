@@ -157,3 +157,138 @@ def test_get_report_logs_and_returns_generic_500_on_unexpected_error(client, fak
     body = response.json()
     assert body["detail"] == "Something went wrong. Please try again."
     assert "secret=xyz" not in body["detail"]
+
+
+# --- GET /reports/accounts (ab-150) -----------------------------------
+
+
+def _account_summary_item(**overrides):
+    base = {
+        "account_id": str(uuid4()),
+        "account_nickname": "KCB Salary",
+        "money_in": "12345.00",
+        "money_out": "6789.00",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_get_account_summary_requires_auth(client):
+    response = client.get("/reports/accounts")
+    assert response.status_code == 401
+
+
+def test_get_account_summary_returns_503_when_db_unreachable(client, fake_user):
+    response = client.get("/reports/accounts")
+    assert response.status_code == 503
+
+
+def test_get_account_summary_success(client, fake_user, fake_pool, monkeypatch):
+    item = _account_summary_item()
+    monkeypatch.setattr("app.api.reports.get_account_summary", AsyncMock(return_value=[item]))
+
+    response = client.get("/reports/accounts")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"items": [item]}
+
+
+def test_get_account_summary_forwards_account_id_filter(client, fake_user, fake_pool, monkeypatch):
+    account_id = str(uuid4())
+    get_account_summary_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr("app.api.reports.get_account_summary", get_account_summary_mock)
+
+    response = client.get("/reports/accounts", params={"account_id": account_id})
+
+    assert response.status_code == 200
+    _, kwargs = get_account_summary_mock.call_args
+    assert str(kwargs["account_id"]) == account_id
+    assert kwargs["user_id"] == fake_user
+
+
+def test_get_account_summary_logs_and_returns_generic_500_on_unexpected_error(
+    client, fake_user, fake_pool, monkeypatch, caplog
+):
+    monkeypatch.setattr(
+        "app.api.reports.get_account_summary", AsyncMock(side_effect=RuntimeError("connection reset, secret=xyz"))
+    )
+
+    with caplog.at_level(logging.ERROR):
+        response = client.get("/reports/accounts")
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["detail"] == "Something went wrong. Please try again."
+    assert "secret=xyz" not in body["detail"]
+
+
+# --- GET /reports/transfers (ab-150) ------------------------------------
+
+
+def _transfer_item(**overrides):
+    base = {
+        "id": str(uuid4()),
+        "transfer_reason_name": "Sent to another of my accounts",
+        "source_label": "M-Pesa",
+        "destination_account_name": "KCB Savings",
+        "amount": "500.00",
+        "currency": "KES",
+        "date": "2026-09-20",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_get_transfers_requires_auth(client):
+    response = client.get("/reports/transfers")
+    assert response.status_code == 401
+
+
+def test_get_transfers_returns_503_when_db_unreachable(client, fake_user):
+    response = client.get("/reports/transfers")
+    assert response.status_code == 503
+
+
+def test_get_transfers_success(client, fake_user, fake_pool, monkeypatch):
+    item = _transfer_item()
+    monkeypatch.setattr("app.api.reports.get_transfers", AsyncMock(return_value=[item]))
+
+    response = client.get("/reports/transfers")
+
+    assert response.status_code == 200
+    assert response.json() == {"items": [item]}
+
+
+def test_get_transfers_forwards_filters_to_the_repository(client, fake_user, fake_pool, monkeypatch):
+    account_id = str(uuid4())
+    get_transfers_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr("app.api.reports.get_transfers", get_transfers_mock)
+
+    response = client.get(
+        "/reports/transfers",
+        params={"account_id": account_id, "from": "2026-09-01", "to": "2026-10-01"},
+    )
+
+    assert response.status_code == 200
+    _, kwargs = get_transfers_mock.call_args
+    assert str(kwargs["account_id"]) == account_id
+    assert str(kwargs["from_date"]) == "2026-09-01"
+    assert str(kwargs["to_date"]) == "2026-10-01"
+    assert kwargs["user_id"] == fake_user
+
+
+def test_get_transfers_logs_and_returns_generic_500_on_unexpected_error(
+    client, fake_user, fake_pool, monkeypatch, caplog
+):
+    monkeypatch.setattr(
+        "app.api.reports.get_transfers", AsyncMock(side_effect=RuntimeError("connection reset, secret=xyz"))
+    )
+
+    with caplog.at_level(logging.ERROR):
+        response = client.get("/reports/transfers")
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["detail"] == "Something went wrong. Please try again."
+    assert "secret=xyz" not in body["detail"]
