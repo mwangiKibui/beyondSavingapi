@@ -10,6 +10,7 @@ from app.api import (
     auth,
     budget_plans,
     categories,
+    dashboard,
     notifications,
     reports,
     statement_imports,
@@ -65,6 +66,7 @@ app.include_router(auth.router)
 app.include_router(accounts.router)
 app.include_router(budget_plans.router)
 app.include_router(categories.router)
+app.include_router(dashboard.router)
 app.include_router(notifications.router)
 app.include_router(reports.router)
 app.include_router(statement_imports.router)
