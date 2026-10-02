@@ -195,6 +195,23 @@ async def get_report(pool: asyncpg.Pool, filters: ReportFilters) -> dict:
     return build_report(rows, currency=filters.currency)
 
 
+async def get_category_summary(pool: asyncpg.Pool, filters: ReportFilters, *, category_type: str) -> list[dict]:
+    """Category Summary export's own data (ab-152, GET
+    /reports/categories/export.csv|.pdf) - reuses build_report's own
+    by-category aggregation (the exact same `by_category` figures GET
+    /reports already serves) and just filters it down to one
+    category_type ("expense" or "income"), rather than re-deriving the
+    category breakdown from scratch. filters.account_id/direction are
+    expected to be None here (the export only takes category_type/
+    from/to) - threading the same ReportFilters dataclass through keeps
+    this on the exact same fetch-then-aggregate pipeline as every other
+    /reports endpoint.
+    """
+    rows = await fetch_report_rows(pool, filters)
+    report = build_report(rows, currency=filters.currency)
+    return [item for item in report["by_category"] if item["category_type"] == category_type]
+
+
 def build_csv_rows(rows: list[dict]) -> list[dict]:
     """One row per TRANSACTION (not allocation) for the CSV export
     (ab-84), built from the exact same rows GET /reports aggregates -
@@ -233,16 +250,20 @@ async def get_report_csv_rows(pool: asyncpg.Pool, filters: ReportFilters) -> lis
 
 
 async def fetch_account_summary_rows(pool: asyncpg.Pool, *, user_id: UUID, account_id: UUID | None) -> list[dict]:
-    """One row per (account, transaction) pair backing Account Summary
-    (ab-150, GET /reports/accounts) - LEFT JOIN so an account with zero
-    transactions still appears once, with every transaction-side column
+    """One row per (account, transaction, allocation) triple backing
+    Account Summary (ab-150, GET /reports/accounts) - LEFT JOINed all the
+    way so an account with zero transactions, or a transaction with zero
+    allocations, still appears once with the missing side's columns
     NULL. **All-time, no date filter at all** - unlike fetch_report_rows
     above, this report is explicitly scoped to "every account we have,"
-    not a date window. has_transfer_allocation is computed per-transaction
-    here (not filtered out in SQL) so build_account_summary below can
-    apply the same "exclude transfers from real income/expense"
-    exclusion build_report applies, in pure Python, the same
-    fetch-then-aggregate split as fetch_report_rows/build_report.
+    not a date window.
+
+    2026-10-02 feedback: money_in/money_out must reflect what we actually
+    RECONCILED, not a transaction's raw amount - we only know what the
+    user did with the portion of a transaction they allocated, not with
+    whatever's left unreconciled, so this now joins allocations (the same
+    way fetch_report_rows does) rather than aggregating transactions.amount
+    directly.
     """
     rows = await pool.fetch(
         """
@@ -250,14 +271,13 @@ async def fetch_account_summary_rows(pool: asyncpg.Pool, *, user_id: UUID, accou
             a.id AS account_id,
             a.nickname AS account_nickname,
             t.id AS transaction_id,
-            t.amount AS txn_amount,
             t.direction,
-            EXISTS (
-                SELECT 1 FROM allocations al
-                WHERE al.transaction_id = t.id AND al.transfer_reason_id IS NOT NULL
-            ) AS has_transfer_allocation
+            al.id AS allocation_id,
+            al.amount AS alloc_amount,
+            al.transfer_reason_id
         FROM accounts a
         LEFT JOIN transactions t ON t.account_id = a.id
+        LEFT JOIN allocations al ON al.transaction_id = t.id
         WHERE a.user_id = $1
           AND ($2::uuid IS NULL OR a.id = $2)
         ORDER BY a.nickname
@@ -271,13 +291,14 @@ async def fetch_account_summary_rows(pool: asyncpg.Pool, *, user_id: UUID, accou
 def build_account_summary(rows: list[dict]) -> list[dict]:
     """Pure-Python aggregation over fetch_account_summary_rows' own result
     set (ab-150) - mirrors build_report's own fetch-then-aggregate split
-    above. money_in/money_out are each account's own transactions summed
-    by direction, EXCLUDING any transaction with a transfer-shaped
-    allocation (has_transfer_allocation) - same "exclude transfers from
-    real income/expense" convention as build_report's total_in/total_out
-    and budget_plans.py's own totals. An account has exactly one
-    currency, so there's no cross-currency rollup to do here, unlike
-    build_report.
+    above. money_in/money_out are each account's own RECONCILED amount
+    (the sum of its allocations' own amounts, not each transaction's raw
+    amount - 2026-10-02 feedback) by direction, counting only rows with a
+    real allocation and EXCLUDING any transfer-shaped one, same
+    "allocations are the reconciled amount, transfers aren't real income/
+    expense" convention build_report's by_category/reconciled_no_category_
+    total already use. An account has exactly one currency, so there's no
+    cross-currency rollup to do here, unlike build_report.
     """
     summary: dict[UUID, dict] = {}
     for row in rows:
@@ -290,12 +311,12 @@ def build_account_summary(rows: list[dict]) -> list[dict]:
                 "money_out": ZERO,
             },
         )
-        if row["transaction_id"] is None or row["has_transfer_allocation"]:
+        if row["allocation_id"] is None or row["transfer_reason_id"] is not None:
             continue
         if row["direction"] == "in":
-            bucket["money_in"] += row["txn_amount"]
+            bucket["money_in"] += row["alloc_amount"]
         else:
-            bucket["money_out"] += row["txn_amount"]
+            bucket["money_out"] += row["alloc_amount"]
 
     return sorted(summary.values(), key=lambda b: b["account_nickname"])
 
@@ -305,6 +326,111 @@ async def get_account_summary(pool: asyncpg.Pool, *, user_id: UUID, account_id: 
     and aggregates it in one pass, same convention as get_report above."""
     rows = await fetch_account_summary_rows(pool, user_id=user_id, account_id=account_id)
     return build_account_summary(rows)
+
+
+async def fetch_budget_plan_rows(pool: asyncpg.Pool, *, user_id: UUID) -> list[dict]:
+    """Every one of the user's budget plans (ab-152, GET
+    /reports/budget-plans/export.csv|.pdf) - unfiltered by window, same
+    "fetch everything, then filter/aggregate in pure Python" split as
+    fetch_report_rows/build_report and fetch_account_summary_rows/
+    build_account_summary above. Keeping the window-overlap filter
+    (filter_budget_plans_by_window below) in pure Python rather than the
+    WHERE clause is what makes it directly unit-testable against
+    hand-built plan dicts, the same way build_report's own filtering
+    logic is.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT id, name, starts_at, ends_at, total_cap, currency
+        FROM budget_plans
+        WHERE user_id = $1
+        ORDER BY starts_at DESC
+        """,
+        user_id,
+    )
+    return [dict(row) for row in rows]
+
+
+def filter_budget_plans_by_window(
+    plans: list[dict], *, from_date: date | None, to_date: date | None
+) -> list[dict]:
+    """The Budget Plans export's own window-overlap filter (ab-152) - a
+    plan is kept when its window OVERLAPS [from_date, to_date], not just
+    when it STARTS inside that range (ab-151's frontend already expects
+    this overlap semantic for the same report; this is the backend doing
+    the same filtering itself rather than the frontend fetching
+    everything unfiltered). Both bounds are optional - omitting one
+    leaves that side unbounded, same optional-filter convention as every
+    other /reports filter.
+
+    starts_at::date <= to_date AND ends_at::date >= from_date - the
+    standard two-interval-overlap test, so a plan that starts BEFORE
+    from_date but ends INSIDE the range is still kept (its ends_at is >=
+    from_date and its starts_at is always <= to_date in that case), same
+    as a plan that starts inside the range but ends after to_date, or
+    one entirely inside it.
+    """
+    return [
+        plan
+        for plan in plans
+        if (to_date is None or plan["starts_at"].date() <= to_date)
+        and (from_date is None or plan["ends_at"].date() >= from_date)
+    ]
+
+
+async def get_budget_plans_report(
+    pool: asyncpg.Pool, *, user_id: UUID, from_date: date | None, to_date: date | None
+) -> list[dict]:
+    """Budget Plans export's own data (ab-152) - fetches every plan,
+    keeps only the ones whose window overlaps from/to (see
+    filter_budget_plans_by_window), then computes each kept plan's
+    money_in/money_out the same way list_budget_plans' total_income/
+    total_expenditure already are (app/repositories/budget_plans.py):
+    summed from real (non-transfer) allocations in the PLAN'S OWN
+    currency and window (plan["starts_at"]/plan["ends_at"]), not the
+    query's from/to range - a plan's totals are always its own full
+    window's activity, the same way the Budget Plans listing's totals
+    are, regardless of which from/to the caller used to select which
+    plans to include in this export.
+    """
+    plans = await fetch_budget_plan_rows(pool, user_id=user_id)
+    plans = filter_budget_plans_by_window(plans, from_date=from_date, to_date=to_date)
+
+    result = []
+    for plan in plans:
+        total_expenditure = await pool.fetchval(
+            """
+            SELECT COALESCE(SUM(a.amount), 0)
+            FROM allocations a
+            JOIN transactions t ON t.id = a.transaction_id
+            WHERE a.currency = $1
+              AND t.direction = 'out'
+              AND a.transfer_reason_id IS NULL
+              AND t.txn_date >= $2::date
+              AND t.txn_date <= $3::date
+            """,
+            plan["currency"],
+            plan["starts_at"],
+            plan["ends_at"],
+        )
+        total_income = await pool.fetchval(
+            """
+            SELECT COALESCE(SUM(a.amount), 0)
+            FROM allocations a
+            JOIN transactions t ON t.id = a.transaction_id
+            WHERE a.currency = $1
+              AND t.direction = 'in'
+              AND a.transfer_reason_id IS NULL
+              AND t.txn_date >= $2::date
+              AND t.txn_date <= $3::date
+            """,
+            plan["currency"],
+            plan["starts_at"],
+            plan["ends_at"],
+        )
+        result.append({**plan, "money_in": total_income, "money_out": total_expenditure})
+
+    return result
 
 
 def _resolve_transfer_source_label(row: dict) -> str:
@@ -410,3 +536,229 @@ async def get_transfers(
         }
         for row in (dict(row) for row in rows)
     ]
+
+
+async def fetch_transaction_statement_rows(pool: asyncpg.Pool, *, user_id: UUID, account_id: UUID) -> list[dict]:
+    """Every transaction ON ONE ACCOUNT, oldest first (2026-10-02's
+    Transaction Statement report) - unlike every other /reports query,
+    this is scoped to exactly one account_id (a running balance is a
+    single-account concept; it has no cross-account meaning), so there's
+    no optional-filter branching here - the caller (the router) has
+    already confirmed account_id belongs to user_id.
+
+    allocated_total is the same per-transaction "how much of this has
+    been reconciled" figure get_transaction/list_transactions already
+    compute (SUM of each allocation's own-currency original_amount) -
+    reused here by build_transaction_statement below to derive each row's
+    reconciled/unreconciled status, same >= comparison convention as
+    list_transactions' own status derivation and accounts.py's
+    unreconciled_count (2-state: "fully reconciled" vs. not, "partial"
+    folded into "not" - matching the Accounts list page's own filter,
+    not the Transactions list page's separate 3-state one).
+
+    category_names/category_ids/transfer_names (2026-10-02's Reconciled
+    Category column + filter) are each a deduped array of every category/
+    transfer-reason this transaction's own allocations touch - a
+    transaction can be split across several categories, so this stays
+    one row per TRANSACTION (not one per allocation, which would need a
+    separate group-by step every caller would have to redo) by
+    aggregating with array_agg(DISTINCT ...) in its own LATERAL, the same
+    "aggregate once in SQL" choice as allocated_total's own LATERAL.
+
+    txn_date ASC, created_at ASC (oldest first) - a running balance only
+    reads correctly top-to-bottom in chronological order, the reverse of
+    every other /reports query's newest-first convention.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT
+            t.id AS transaction_id,
+            t.txn_date,
+            t.amount AS txn_amount,
+            t.direction,
+            t.description,
+            t.counterparty,
+            t.balance_after,
+            COALESCE(alloc.total, 0) AS allocated_total,
+            COALESCE(cat.names, ARRAY[]::text[]) AS category_names,
+            COALESCE(cat.ids, ARRAY[]::uuid[]) AS category_ids,
+            COALESCE(xfer.names, ARRAY[]::text[]) AS transfer_names
+        FROM transactions t
+        JOIN accounts a ON a.id = t.account_id
+        LEFT JOIN LATERAL (
+            SELECT SUM(al.original_amount) AS total FROM allocations al WHERE al.transaction_id = t.id
+        ) alloc ON true
+        LEFT JOIN LATERAL (
+            SELECT
+                array_agg(DISTINCT c.name ORDER BY c.name) AS names,
+                array_agg(DISTINCT al.category_id) AS ids
+            FROM allocations al
+            JOIN categories c ON c.id = al.category_id
+            WHERE al.transaction_id = t.id AND al.category_id IS NOT NULL
+        ) cat ON true
+        LEFT JOIN LATERAL (
+            SELECT array_agg(DISTINCT tr.name ORDER BY tr.name) AS names
+            FROM allocations al
+            JOIN transfer_reasons tr ON tr.id = al.transfer_reason_id
+            WHERE al.transaction_id = t.id AND al.transfer_reason_id IS NOT NULL
+        ) xfer ON true
+        WHERE a.user_id = $1 AND t.account_id = $2
+        ORDER BY t.txn_date ASC, t.created_at ASC
+        """,
+        user_id,
+        account_id,
+    )
+    return [dict(row) for row in rows]
+
+
+def _signed_amount(row: dict) -> Decimal:
+    return row["txn_amount"] if row["direction"] == "in" else -row["txn_amount"]
+
+
+def _reconciled_category(row: dict) -> str | None:
+    """"Reconciled Category" column (2026-10-02) - only set once a
+    transaction is actually reconciled (matching the "value only if
+    reconciled" ask), joining every category AND transfer-reason name its
+    allocations touch. A reconciled transaction with neither (ab-124's
+    "reconciled, no category" state) reads "No category" rather than
+    blank, so it's visibly distinct from an unreconciled one (which is
+    None here, rendered as blank)."""
+    if row["status"] != "reconciled":
+        return None
+    labels = [*row["category_names"], *row["transfer_names"]]
+    return ", ".join(labels) if labels else "No category"
+
+
+def build_transaction_statement(
+    rows: list[dict],
+    *,
+    from_date: date | None,
+    to_date: date | None,
+    status_filter: str | None,
+    category_id: UUID | None = None,
+) -> dict:
+    """Pure-Python aggregation over fetch_transaction_statement_rows' own
+    result set (2026-10-02's Transaction Statement report) - every
+    transaction mixes two sources (a bank statement's own balance_after,
+    only known for 'statement' rows, vs. a manual entry's unknown one), so
+    the Balance column is COMPUTED by replaying each row's own credit/
+    debit in chronological order, anchored to whichever row has the
+    earliest known balance_after, rather than ever trusting a stored
+    balance_after directly. This is the one place in the codebase that
+    computes a derived running balance (every other balance figure here -
+    accounts.py's own account.balance - just reads the latest transaction's
+    stored balance_after) - deliberately so, per product feedback: a
+    manual entry changes the balance the same way a statement-sourced one
+    does.
+
+    Algorithm: find the earliest row with a non-null balance_after (the
+    "anchor"). Back-calculate the TRUE balance immediately before the
+    account's very first transaction ever (position 0) by undoing the
+    anchor's own delta, then undoing every delta between position 0 and
+    the anchor. From that one true starting point, a single forward pass
+    assigns every row (including any before the anchor, and every manual
+    one) its own computed post-transaction balance. If NO row has a known
+    balance_after at all (an all-manual account, never uploaded a
+    statement), there's no anchor and nothing is computable - every
+    balance is None ("—" to the caller), matching "the b/f row only
+    appears if we've uploaded a statement."
+
+    Filtering (from_date/to_date/status_filter/category_id) only controls
+    which rows are DISPLAYED - the balance itself is computed from the
+    account's FULL, unfiltered history, since a hidden transaction
+    (outside the date window, the wrong reconciliation status, or
+    reconciled under a different category) still really moved the
+    account's balance. opening_balance is therefore the true computed
+    balance immediately before the first DISPLAYED row, not simply
+    from_date's own boundary. category_id matches a transaction whose
+    allocations touch that category at all (category_ids, from
+    fetch_transaction_statement_rows) - never a transfer reason, which
+    this filter doesn't cover.
+    """
+    anchor_index = next((i for i, row in enumerate(rows) if row["balance_after"] is not None), None)
+
+    if anchor_index is not None:
+        anchor = rows[anchor_index]
+        balance_before_anchor = anchor["balance_after"] - _signed_amount(anchor)
+        cumulative_before_anchor = sum((_signed_amount(row) for row in rows[:anchor_index]), ZERO)
+        starting_balance: Decimal | None = balance_before_anchor - cumulative_before_anchor
+    else:
+        starting_balance = None
+
+    computed = []
+    running = starting_balance
+    for row in rows:
+        if running is not None:
+            running = running + _signed_amount(row)
+        status = "reconciled" if row["allocated_total"] >= row["txn_amount"] else "unreconciled"
+        enriched = {**row, "balance": running, "status": status}
+        enriched["reconciled_category"] = _reconciled_category(enriched)
+        computed.append(enriched)
+
+    def _matches(row: dict) -> bool:
+        if from_date is not None and row["txn_date"] < from_date:
+            return False
+        if to_date is not None and row["txn_date"] > to_date:
+            return False
+        if status_filter is not None and row["status"] != status_filter:
+            return False
+        if category_id is not None and category_id not in row["category_ids"]:
+            return False
+        return True
+
+    displayed = [row for row in computed if _matches(row)]
+
+    opening_balance = starting_balance
+    if displayed:
+        first_id = displayed[0]["transaction_id"]
+        first_index = next(i for i, row in enumerate(computed) if row["transaction_id"] == first_id)
+        if first_index > 0:
+            opening_balance = computed[first_index - 1]["balance"]
+
+    total_credit = sum((row["txn_amount"] for row in displayed if row["direction"] == "in"), ZERO)
+    total_debit = sum((row["txn_amount"] for row in displayed if row["direction"] == "out"), ZERO)
+    closing_balance = displayed[-1]["balance"] if displayed else opening_balance
+
+    return {
+        "opening_balance": opening_balance,
+        "rows": [
+            {
+                # 2026-10-02 feedback: when neither the bank nor the user
+                # gave this transaction any text, name it by its own
+                # nature ("Money In"/"Money Out") rather than a bare "—",
+                # which told the viewer nothing.
+                "description": row["description"]
+                or row["counterparty"]
+                or ("Money In" if row["direction"] == "in" else "Money Out"),
+                "date": row["txn_date"],
+                "balance": row["balance"],
+                "credit": row["txn_amount"] if row["direction"] == "in" else None,
+                "debit": row["txn_amount"] if row["direction"] == "out" else None,
+                "status": row["status"],
+                "reconciled_category": row["reconciled_category"],
+            }
+            for row in displayed
+        ],
+        "total_credit": total_credit,
+        "total_debit": total_debit,
+        "closing_balance": closing_balance,
+    }
+
+
+async def get_transaction_statement(
+    pool: asyncpg.Pool,
+    *,
+    user_id: UUID,
+    account_id: UUID,
+    from_date: date | None,
+    to_date: date | None,
+    status_filter: str | None,
+    category_id: UUID | None = None,
+) -> dict:
+    """Transaction Statement's own data (2026-10-02) - fetches one
+    account's full transaction history and aggregates it in one pass,
+    same convention as every other get_*/build_* pair above."""
+    rows = await fetch_transaction_statement_rows(pool, user_id=user_id, account_id=account_id)
+    return build_transaction_statement(
+        rows, from_date=from_date, to_date=to_date, status_filter=status_filter, category_id=category_id
+    )
