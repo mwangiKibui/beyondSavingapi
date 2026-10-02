@@ -3,28 +3,33 @@ of a report's data, NOT a transaction-level ledger. Kept as pure functions
 (data in, PDF bytes out) so they're testable without a DB.
 
 Branding (2026-10-02 feedback): the product is Centrail, not beyondSaving -
-every PDF leads with a left-aligned "Centrail" wordmark in the brand green,
-a left-aligned report title naming the date range actually used, and brand-
-green table headers, instead of reportlab's centered, uncolored defaults.
+every PDF leads with a left-aligned "Centrail" wordmark (black "Cen",
+green "trail") over a two-tone black-to-green rule, a centered report
+title with the date range actually used, and brand-green table headers,
+instead of reportlab's centered, uncolored defaults.
 """
 
 import io
 from datetime import date
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
-from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Flowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 # Same brand green as the shipped app's design system (docs/design-system.md
 # - green-600, #16a34a, the only accent color) and a pale tint of it for
 # summary-table cells, so an exported PDF reads as the same product as the
-# app it came from.
-BRAND_GREEN = colors.HexColor("#16a34a")
+# app it came from. Kept as hex strings too (not just HexColor objects) -
+# the wordmark needs them inline in Paragraph markup to get two colors in
+# one line of text.
+BRAND_GREEN_HEX = "#16a34a"
+INK_HEX = "#1f2937"
+BRAND_GREEN = colors.HexColor(BRAND_GREEN_HEX)
 BRAND_GREEN_SOFT = colors.HexColor("#eafbf1")
-INK = colors.HexColor("#1f2937")
+INK = colors.HexColor(INK_HEX)
 MUTED = colors.HexColor("#6b7280")
 GRID_LINE = colors.HexColor("#e5e7eb")
 
@@ -47,19 +52,47 @@ TABLE_STYLE = TableStyle(
 )
 
 
+class _TwoToneRule(Flowable):
+    """A horizontal rule that starts black and continues in brand green
+    (2026-10-02 feedback) - HRFlowable only draws a single color, so the
+    wordmark's underline is drawn by hand instead: one black segment, one
+    green segment, split at the same proportion as "Cen"/"trail" in the
+    wordmark above it (35%/65%) so the color change roughly lines up with
+    the text above.
+    """
+
+    def __init__(self, thickness: float = 1.6, split: float = 0.35):
+        super().__init__()
+        self.thickness = thickness
+        self.split = split
+        self.width = 0
+
+    def wrap(self, available_width: float, available_height: float) -> tuple[float, float]:
+        self.width = available_width
+        return available_width, self.thickness
+
+    def draw(self) -> None:
+        split_x = self.width * self.split
+        self.canv.setLineWidth(self.thickness)
+        self.canv.setStrokeColor(INK)
+        self.canv.line(0, 0, split_x, 0)
+        self.canv.setStrokeColor(BRAND_GREEN)
+        self.canv.line(split_x, 0, self.width, 0)
+
+
 def _styles() -> dict:
     base = getSampleStyleSheet()
     return {
         "brand": ParagraphStyle(
             "Brand", parent=base["Normal"], fontName="Helvetica-Bold", fontSize=18,
-            textColor=BRAND_GREEN, alignment=TA_LEFT, spaceAfter=2,
+            alignment=TA_LEFT,
         ),
         "title": ParagraphStyle(
             "ReportTitle", parent=base["Normal"], fontName="Helvetica-Bold", fontSize=14,
-            textColor=INK, alignment=TA_LEFT, spaceBefore=10, spaceAfter=4,
+            textColor=INK, alignment=TA_CENTER, spaceAfter=4,
         ),
         "meta": ParagraphStyle(
-            "Meta", parent=base["Normal"], fontSize=9.5, textColor=MUTED, alignment=TA_LEFT,
+            "Meta", parent=base["Normal"], fontSize=9.5, textColor=MUTED, alignment=TA_CENTER,
         ),
         "heading": ParagraphStyle(
             "SectionHeading", parent=base["Heading2"], fontSize=12, textColor=INK, alignment=TA_LEFT,
@@ -68,32 +101,43 @@ def _styles() -> dict:
     }
 
 
-def _format_date_range(from_date: date | None, to_date: date | None) -> str:
-    if from_date is None and to_date is None:
-        return "All dates"
-    start = from_date.isoformat() if from_date else "the start"
-    end = to_date.isoformat() if to_date else "today"
-    return f"{start} to {end}"
-
-
 def _report_title(report_name: str, from_date: date | None, to_date: date | None) -> str:
-    """"<Report name> report from <from> to <to>" - the exact phrasing
+    """"<Report name> Report from <from> to <to>" - the exact phrasing
     requested, with graceful fallbacks for a report that has no date
     filter at all (Account Summary) versus one whose date filter simply
     wasn't set for this export."""
     if from_date is None and to_date is None:
-        return f"{report_name} report"
+        return f"{report_name} Report"
     if from_date is not None and to_date is not None:
-        return f"{report_name} report from {from_date.isoformat()} to {to_date.isoformat()}"
+        return f"{report_name} Report from {from_date.isoformat()} to {to_date.isoformat()}"
     if from_date is not None:
-        return f"{report_name} report from {from_date.isoformat()} onward"
-    return f"{report_name} report through {to_date.isoformat()}"
+        return f"{report_name} Report from {from_date.isoformat()} onward"
+    return f"{report_name} Report through {to_date.isoformat()}"
+
+
+def _filter_description(*, account_name: str | None, from_date: date | None, to_date: date | None) -> str | None:
+    """"For Account <Account>, From <from> To <to>" (2026-10-02 feedback) -
+    reflects whatever filter was actually applied, directly below the
+    title. Returns None (render nothing) when no filter was applied at
+    all, rather than claiming a scope the export doesn't actually have.
+    """
+    parts: list[str] = []
+    if account_name:
+        parts.append(f"For Account {account_name}")
+    if from_date is not None or to_date is not None:
+        start = from_date.isoformat() if from_date else "the start"
+        end = to_date.isoformat() if to_date else "today"
+        date_part = f"From {start} To {end}"
+        parts.append(f", {date_part}" if parts else date_part)
+    return "".join(parts) if parts else None
 
 
 def _brand_header(styles: dict) -> list:
     return [
-        Paragraph("Centrail", styles["brand"]),
-        HRFlowable(width="100%", thickness=1.4, color=BRAND_GREEN, spaceBefore=2, spaceAfter=0),
+        Paragraph(f'<font color="{INK_HEX}">Cen</font><font color="{BRAND_GREEN_HEX}">trail</font>', styles["brand"]),
+        Spacer(1, 12),
+        _TwoToneRule(),
+        Spacer(1, 14),
     ]
 
 
@@ -114,14 +158,15 @@ def build_report_pdf(
     styles = _styles()
     currency = report["currency"]
 
+    filter_text = _filter_description(account_name=account_name, from_date=from_date, to_date=to_date)
+    meta_parts = [filter_text] if filter_text else []
+    meta_parts.append(f"Type: {direction or 'All'}")
+    meta_parts.append(f"Currency: {currency}")
+
     elements = [
         *_brand_header(styles),
         Paragraph(_report_title("Report", from_date, to_date), styles["title"]),
-        Paragraph(
-            f"Account: {account_name or 'All accounts'} &nbsp;|&nbsp; "
-            f"Type: {direction or 'All'} &nbsp;|&nbsp; Currency: {currency}",
-            styles["meta"],
-        ),
+        Paragraph(" &nbsp;|&nbsp; ".join(meta_parts), styles["meta"]),
         Spacer(1, 16),
     ]
 
@@ -163,17 +208,19 @@ def build_simple_table_pdf(
     rows: list[list[str]],
     *,
     subtitle: str | None = None,
+    account_name: str | None = None,
     from_date: date | None = None,
     to_date: date | None = None,
 ) -> bytes:
     """Generic Centrail-branded title + table PDF, shared by every ab-152
     export (Account Summary, Budget Plans, Category/Expense/Income
     Summary, Transfers). `title` is the report's own name (e.g. "Budget
-    Plans") - the page heading becomes "<title> report[ from X to Y]" via
-    _report_title. Pass from_date/to_date whenever the export actually
-    has a date filter (every one of these except Account Summary, which
-    has none at all); leaving both None renders just "<title> report"
-    rather than claiming a date range that was never applied.
+    Plans") - the page heading becomes "<title> Report[ from X to Y]" via
+    _report_title. Pass account_name/from_date/to_date whenever the
+    export actually has that filter applied (not every report has an
+    account filter, and Account Summary has no date filter at all) - the
+    line below the title (2026-10-02 feedback) then reads "For Account X"
+    and/or "From Y To Z", reflecting only the filters actually in play.
     """
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, title=f"Centrail - {title}", **PAGE_MARGINS)
@@ -183,6 +230,9 @@ def build_simple_table_pdf(
         *_brand_header(styles),
         Paragraph(_report_title(title, from_date, to_date), styles["title"]),
     ]
+    filter_text = _filter_description(account_name=account_name, from_date=from_date, to_date=to_date)
+    if filter_text:
+        elements.append(Paragraph(filter_text, styles["meta"]))
     if subtitle:
         elements.append(Paragraph(subtitle, styles["meta"]))
     elements.append(Spacer(1, 16))

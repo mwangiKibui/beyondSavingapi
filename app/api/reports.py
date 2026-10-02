@@ -399,6 +399,10 @@ async def export_account_summary_pdf_endpoint(
 
     try:
         items = await get_account_summary(pool, user_id=user_id, account_id=account_id)
+        account_name = None
+        if account_id is not None:
+            account = await get_account(pool, account_id=account_id, user_id=user_id)
+            account_name = account["nickname"] if account else None
     except HTTPException:
         raise
     except Exception:
@@ -409,7 +413,9 @@ async def export_account_summary_pdf_endpoint(
         ) from None
 
     rows = [[item["account_nickname"], str(item["money_in"]), str(item["money_out"])] for item in items]
-    pdf_bytes = build_simple_table_pdf("Account Summary", ["Account", "Money In", "Money Out"], rows)
+    pdf_bytes = build_simple_table_pdf(
+        "Account Summary", ["Account", "Money In", "Money Out"], rows, account_name=account_name
+    )
     return _pdf_response(pdf_bytes, filename="account-summary.pdf")
 
 
@@ -637,6 +643,10 @@ async def export_transfers_pdf_endpoint(
             from_date=from_date,
             to_date=to_date,
         )
+        account_name = None
+        if account_id is not None:
+            account = await get_account(pool, account_id=account_id, user_id=user_id)
+            account_name = account["nickname"] if account else None
     except HTTPException:
         raise
     except Exception:
@@ -660,6 +670,7 @@ async def export_transfers_pdf_endpoint(
         "Transfers Summary",
         ["Transfer Nature", "Source Account", "Destination Account", "Amount", "Date"],
         rows,
+        account_name=account_name,
         from_date=from_date,
         to_date=to_date,
     )
