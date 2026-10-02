@@ -230,3 +230,183 @@ async def get_report_csv_rows(pool: asyncpg.Pool, filters: ReportFilters) -> lis
     GET /reports, shaped per-transaction instead of aggregated."""
     rows = await fetch_report_rows(pool, filters)
     return build_csv_rows(rows)
+
+
+async def fetch_account_summary_rows(pool: asyncpg.Pool, *, user_id: UUID, account_id: UUID | None) -> list[dict]:
+    """One row per (account, transaction) pair backing Account Summary
+    (ab-150, GET /reports/accounts) - LEFT JOIN so an account with zero
+    transactions still appears once, with every transaction-side column
+    NULL. **All-time, no date filter at all** - unlike fetch_report_rows
+    above, this report is explicitly scoped to "every account we have,"
+    not a date window. has_transfer_allocation is computed per-transaction
+    here (not filtered out in SQL) so build_account_summary below can
+    apply the same "exclude transfers from real income/expense"
+    exclusion build_report applies, in pure Python, the same
+    fetch-then-aggregate split as fetch_report_rows/build_report.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT
+            a.id AS account_id,
+            a.nickname AS account_nickname,
+            t.id AS transaction_id,
+            t.amount AS txn_amount,
+            t.direction,
+            EXISTS (
+                SELECT 1 FROM allocations al
+                WHERE al.transaction_id = t.id AND al.transfer_reason_id IS NOT NULL
+            ) AS has_transfer_allocation
+        FROM accounts a
+        LEFT JOIN transactions t ON t.account_id = a.id
+        WHERE a.user_id = $1
+          AND ($2::uuid IS NULL OR a.id = $2)
+        ORDER BY a.nickname
+        """,
+        user_id,
+        account_id,
+    )
+    return [dict(row) for row in rows]
+
+
+def build_account_summary(rows: list[dict]) -> list[dict]:
+    """Pure-Python aggregation over fetch_account_summary_rows' own result
+    set (ab-150) - mirrors build_report's own fetch-then-aggregate split
+    above. money_in/money_out are each account's own transactions summed
+    by direction, EXCLUDING any transaction with a transfer-shaped
+    allocation (has_transfer_allocation) - same "exclude transfers from
+    real income/expense" convention as build_report's total_in/total_out
+    and budget_plans.py's own totals. An account has exactly one
+    currency, so there's no cross-currency rollup to do here, unlike
+    build_report.
+    """
+    summary: dict[UUID, dict] = {}
+    for row in rows:
+        bucket = summary.setdefault(
+            row["account_id"],
+            {
+                "account_id": row["account_id"],
+                "account_nickname": row["account_nickname"],
+                "money_in": ZERO,
+                "money_out": ZERO,
+            },
+        )
+        if row["transaction_id"] is None or row["has_transfer_allocation"]:
+            continue
+        if row["direction"] == "in":
+            bucket["money_in"] += row["txn_amount"]
+        else:
+            bucket["money_out"] += row["txn_amount"]
+
+    return sorted(summary.values(), key=lambda b: b["account_nickname"])
+
+
+async def get_account_summary(pool: asyncpg.Pool, *, user_id: UUID, account_id: UUID | None) -> list[dict]:
+    """Account Summary's own data (ab-150) - fetches the shared row set
+    and aggregates it in one pass, same convention as get_report above."""
+    rows = await fetch_account_summary_rows(pool, user_id=user_id, account_id=account_id)
+    return build_account_summary(rows)
+
+
+def _resolve_transfer_source_label(row: dict) -> str:
+    """Resolves a transfer-shaped allocation's source to a display label
+    (ab-150) - exactly one of source_account_id, source_sub_ledger_id, or
+    source_description is ever set (the mutual exclusivity Create-
+    allocations/ab-134 enforces on write), checked in that priority
+    order. The "-" fallback shouldn't normally happen (a transfer-shaped
+    allocation always has at least a description), but is kept for
+    defense in depth rather than letting a None through to the response.
+    """
+    if row["source_account_id"] is not None:
+        return row["source_account_nickname"]
+    if row["source_sub_ledger_id"] is not None:
+        return f"{row['source_sub_ledger_account_nickname']} / {row['source_sub_ledger_name']}"
+    if row["source_description"]:
+        return row["source_description"]
+    return "—"
+
+
+async def get_transfers(
+    pool: asyncpg.Pool,
+    *,
+    user_id: UUID,
+    account_id: UUID | None,
+    from_date: date | None,
+    to_date: date | None,
+) -> list[dict]:
+    """Account-to-Account Transfer list (ab-150, GET /reports/transfers) -
+    one row per transfer-shaped allocation (transfer_reason_id IS NOT
+    NULL), newest first. Scoped to the caller's own accounts via the
+    destination account's own user_id (dest_acc.user_id = $1) - same
+    "join through accounts to enforce ownership" convention as every
+    other endpoint in this codebase; a transfer's source side (when it's
+    a tracked account/sub-ledger rather than a free-text description) is
+    already guaranteed to belong to the same user by Create-allocations'
+    own write-time validation (ab-134), so it needs no separate scoping
+    here.
+
+    account_id (optional) matches a transfer where this account is
+    EITHER the source (source_account_id directly, or via
+    source_sub_ledger_id's parent account - ssl.account_id) OR the
+    destination (t.account_id, the account the allocation's own
+    transaction landed on). from/to filter transactions.txn_date, same
+    optional-filter convention as fetch_report_rows above.
+
+    amount/currency are the allocation's own amount/currency columns -
+    not original_amount/original_currency - mirroring fetch_report_rows'
+    own alloc_amount/alloc_currency choice above; the two pairs are
+    identical today since insert_allocations sets amount/currency equal
+    to original_amount/original_currency (no FX conversion exists yet),
+    but this keeps both reports reading from the same pair should that
+    change.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT
+            al.id,
+            tr.name AS transfer_reason_name,
+            al.source_account_id,
+            sa.nickname AS source_account_nickname,
+            al.source_sub_ledger_id,
+            ssl.name AS source_sub_ledger_name,
+            ssl_acc.nickname AS source_sub_ledger_account_nickname,
+            al.source_description,
+            dest_acc.nickname AS destination_account_name,
+            al.amount,
+            al.currency,
+            t.txn_date AS date
+        FROM allocations al
+        JOIN transactions t ON t.id = al.transaction_id
+        JOIN accounts dest_acc ON dest_acc.id = t.account_id
+        LEFT JOIN transfer_reasons tr ON tr.id = al.transfer_reason_id
+        LEFT JOIN accounts sa ON sa.id = al.source_account_id
+        LEFT JOIN sub_ledgers ssl ON ssl.id = al.source_sub_ledger_id
+        LEFT JOIN accounts ssl_acc ON ssl_acc.id = ssl.account_id
+        WHERE dest_acc.user_id = $1
+          AND al.transfer_reason_id IS NOT NULL
+          AND (
+              $2::uuid IS NULL
+              OR al.source_account_id = $2
+              OR ssl.account_id = $2
+              OR t.account_id = $2
+          )
+          AND ($3::date IS NULL OR t.txn_date >= $3)
+          AND ($4::date IS NULL OR t.txn_date <= $4)
+        ORDER BY t.txn_date DESC, al.created_at DESC
+        """,
+        user_id,
+        account_id,
+        from_date,
+        to_date,
+    )
+    return [
+        {
+            "id": row["id"],
+            "transfer_reason_name": row["transfer_reason_name"],
+            "source_label": _resolve_transfer_source_label(row),
+            "destination_account_name": row["destination_account_name"],
+            "amount": row["amount"],
+            "currency": row["currency"],
+            "date": row["date"],
+        }
+        for row in (dict(row) for row in rows)
+    ]
