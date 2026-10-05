@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -15,6 +15,7 @@ from app.repositories.accounts import (
     create_account,
     deactivate_account,
     get_account,
+    get_book_balance,
     get_currency_summary,
     list_accounts,
     update_account,
@@ -92,6 +93,11 @@ class CurrencySubtotal(BaseModel):
 
 class AccountsSummaryResponse(BaseModel):
     subtotals: list[CurrencySubtotal]
+
+
+class BookBalanceResponse(BaseModel):
+    balance: float
+    as_of: date
 
 
 class UpdateAccountRequest(BaseModel):
@@ -351,3 +357,34 @@ async def deactivate_account_endpoint(
         ) from None
 
     return account
+
+
+@router.get("/{account_id}/book-balance", response_model=BookBalanceResponse)
+async def book_balance_endpoint(
+    account_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+    as_of: date = Query(default_factory=date.today),
+) -> dict:
+    if pool is None:
+        logger.error("Database pool unavailable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
+        )
+
+    try:
+        balance = await get_book_balance(pool, account_id=account_id, user_id=user_id, as_of=as_of)
+        if balance is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error(
+            "Unexpected error computing book balance for account %s, user %s", account_id, user_id, exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=GENERIC_ERROR_MESSAGE,
+        ) from None
+
+    return {"balance": balance, "as_of": as_of}

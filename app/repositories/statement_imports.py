@@ -119,17 +119,45 @@ async def mark_import_parsed(
     period_start: date | None,
     period_end: date | None,
     row_count: int,
+    opening_balance: float | None = None,
+    opening_balance_date: date | None = None,
 ) -> None:
     await pool.execute(
         """
         UPDATE statement_imports
-        SET status = 'parsed', period_start = $1, period_end = $2, row_count = $3
-        WHERE id = $4
+        SET status = 'parsed', period_start = $1, period_end = $2, row_count = $3,
+            opening_balance = $4, opening_balance_date = $5
+        WHERE id = $6
         """,
         period_start,
         period_end,
         row_count,
+        opening_balance,
+        opening_balance_date,
         import_id,
+    )
+
+
+async def set_sub_ledger_opening_balances(
+    pool: asyncpg.Pool, *, import_id: UUID, opening_balances: list[tuple[UUID, float, date]]
+) -> None:
+    """Records each selected sub-ledger's own opening balance (book
+    balance's BBF anchor) against the statement_import_sub_ledgers row
+    add_import_sub_ledgers already inserted for this import - one entry
+    per (sub_ledger_id, opening_balance, opening_balance_date) tuple.
+    """
+    if not opening_balances:
+        return
+    await pool.executemany(
+        """
+        UPDATE statement_import_sub_ledgers
+        SET opening_balance = $1, opening_balance_date = $2
+        WHERE import_id = $3 AND sub_ledger_id = $4
+        """,
+        [
+            (opening_balance, opening_balance_date, import_id, sub_ledger_id)
+            for sub_ledger_id, opening_balance, opening_balance_date in opening_balances
+        ],
     )
 
 
