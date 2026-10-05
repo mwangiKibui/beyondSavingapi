@@ -99,3 +99,25 @@ def statement_period(transactions: list[ParsedTransaction]) -> tuple[date, date]
     """
     dates = [txn["txn_date"] for txn in transactions]
     return min(dates), max(dates)
+
+
+def derive_opening_balance(transactions: list[ParsedTransaction]) -> tuple[float | None, date | None]:
+    """Recovers the statement's own stated opening balance (and the date
+    it applied as of) from `transactions` (oldest first), for the book
+    balance feature's balance-brought-forward anchor.
+
+    validate_running_balance already guarantees a parser's own
+    opening_balance replays exactly to every row's balance_after, so it's
+    always safe to reverse it back out of the oldest transaction here -
+    `opening_balance = first.balance_after -+ first.amount` - rather than
+    threading a second value through every parser's return type. Returns
+    (None, None) when there's nothing to anchor on: no transactions, or
+    the oldest one has no balance_after (a manual-only account, or a
+    provider whose statement doesn't state a running balance at all).
+    """
+    if not transactions or transactions[0]["balance_after"] is None:
+        return None, None
+
+    first = transactions[0]
+    delta = first["amount"] if first["direction"] == "in" else -first["amount"]
+    return round(first["balance_after"] - delta, 2), first["txn_date"]

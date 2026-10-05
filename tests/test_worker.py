@@ -123,7 +123,13 @@ async def test_process_job_fetches_content_and_calls_a_registered_parser(fake_po
     mock_parser.assert_called_once_with(b"file content")
     mock_insert.assert_called_once_with(fake_pool, account_id=account_id, import_id=import_id, transactions=[])
     mock_mark_parsed.assert_called_once_with(
-        fake_pool, import_id=import_id, period_start=None, period_end=None, row_count=0
+        fake_pool,
+        import_id=import_id,
+        period_start=None,
+        period_end=None,
+        row_count=0,
+        opening_balance=None,
+        opening_balance_date=None,
     )
     mock_mark_failed.assert_not_called()
 
@@ -172,12 +178,17 @@ async def test_process_job_writes_transactions_and_marks_parsed_with_real_period
     # row_count reflects everything the parser found (matches
     # docs/schema.sql's own "transactions parsed from this file"
     # comment), not just what survived the dedupe skip.
+    # opening_balance/opening_balance_date: derived from the oldest
+    # transaction (_txn defaults balance_after to its own amount), not
+    # re-parsed - see derive_opening_balance.
     mock_mark_parsed.assert_called_once_with(
         fake_pool,
         import_id=import_id,
         period_start=date(2026, 1, 5),
         period_end=date(2026, 1, 20),
         row_count=2,
+        opening_balance=0.0,
+        opening_balance_date=date(2026, 1, 5),
     )
 
 
@@ -225,6 +236,8 @@ async def test_process_job_routes_mentor_sacco_sections_to_their_selected_sub_le
     mock_mark_parsed = AsyncMock()
     monkeypatch.setattr("app.worker.mark_import_parsed", mock_mark_parsed)
     monkeypatch.setattr("app.worker.mark_import_failed", AsyncMock())
+    mock_set_opening_balances = AsyncMock()
+    monkeypatch.setattr("app.worker.set_sub_ledger_opening_balances", mock_set_opening_balances)
 
     mock_body = MagicMock()
     mock_body.read.return_value = b"file content"
@@ -261,6 +274,17 @@ async def test_process_job_routes_mentor_sacco_sections_to_their_selected_sub_le
         period_end=date(2026, 1, 10),
         row_count=2,
     )
+    # Each sub-ledger's opening balance is derived from its OWN section's
+    # oldest transaction (_txn defaults balance_after to its own amount,
+    # direction "in"), not the combined/account-level list.
+    mock_set_opening_balances.assert_called_once_with(
+        fake_pool,
+        import_id=import_id,
+        opening_balances=[
+            (ordinary_deposit_id, 0.0, date(2026, 1, 5)),
+            (savings_account_id, 0.0, date(2026, 1, 10)),
+        ],
+    )
 
 
 async def test_process_job_merges_both_instant_loan_instances_into_one_sub_ledger(fake_pool, monkeypatch):
@@ -296,6 +320,7 @@ async def test_process_job_merges_both_instant_loan_instances_into_one_sub_ledge
     monkeypatch.setattr("app.worker.insert_transactions", mock_insert)
     monkeypatch.setattr("app.worker.mark_import_parsed", AsyncMock())
     monkeypatch.setattr("app.worker.mark_import_failed", AsyncMock())
+    monkeypatch.setattr("app.worker.set_sub_ledger_opening_balances", AsyncMock())
 
     mock_body = MagicMock()
     mock_body.read.return_value = b"file content"

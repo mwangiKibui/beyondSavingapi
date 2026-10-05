@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import date
 from uuid import UUID
 
 import asyncpg
@@ -9,13 +10,14 @@ from app.core.queues import PARSE_JOBS_QUEUE
 from app.core.redis import get_redis
 from app.core.storage import get_storage_client
 from app.parsers import PARSERS
-from app.parsers.base import ParsedTransaction, StatementParseError, statement_period
+from app.parsers.base import ParsedTransaction, StatementParseError, derive_opening_balance, statement_period
 from app.parsers.mentor_sacco import SubLedgerStatement, parse_mentor_sacco_statement
 from app.repositories.statement_imports import (
     get_import_for_processing,
     get_import_sub_ledgers,
     mark_import_failed,
     mark_import_parsed,
+    set_sub_ledger_opening_balances,
 )
 from app.repositories.transactions import insert_transactions
 
@@ -56,12 +58,15 @@ async def _write_single_account_import(
         )
 
     period_start, period_end = statement_period(transactions) if transactions else (None, None)
+    opening_balance, opening_balance_date = derive_opening_balance(transactions)
     await mark_import_parsed(
         pool,
         import_id=import_id,
         period_start=period_start,
         period_end=period_end,
         row_count=len(transactions),
+        opening_balance=opening_balance,
+        opening_balance_date=opening_balance_date,
     )
 
 
@@ -100,6 +105,7 @@ async def _write_sub_ledger_import(
 
     all_transactions: list[ParsedTransaction] = []
     total_inserted = 0
+    opening_balances: list[tuple[UUID, float, date]] = []
     for sub_ledger_id, transactions in resolved:
         total_inserted += await insert_transactions(
             pool,
@@ -110,6 +116,13 @@ async def _write_sub_ledger_import(
         )
         all_transactions.extend(transactions)
 
+        # Each sub-ledger is its own independent balance sequence (see
+        # SubLedgerStatement), so its opening balance is derived from its
+        # OWN oldest transaction, not the combined list below.
+        opening_balance, opening_balance_date = derive_opening_balance(transactions)
+        if opening_balance is not None and opening_balance_date is not None:
+            opening_balances.append((sub_ledger_id, opening_balance, opening_balance_date))
+
     skipped = len(all_transactions) - total_inserted
     if skipped:
         logger.info(
@@ -117,6 +130,9 @@ async def _write_sub_ledger_import(
             import_id,
             skipped,
         )
+
+    if opening_balances:
+        await set_sub_ledger_opening_balances(pool, import_id=import_id, opening_balances=opening_balances)
 
     period_start, period_end = statement_period(all_transactions) if all_transactions else (None, None)
     await mark_import_parsed(
