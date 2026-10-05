@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.db import get_pool
-from app.core.security import get_current_user_id
+from app.core.security import AuthContext, get_auth_context
 from app.main import app
 
 USER_PROFILE = {
@@ -17,6 +17,7 @@ USER_PROFILE = {
     "default_currency": "KES",
     "near_threshold": 0.80,
     "created_at": "2026-01-01T00:00:00+00:00",
+    "role": "user",
 }
 
 
@@ -36,9 +37,11 @@ def fake_pool():
 @pytest.fixture
 def fake_user():
     user_id = uuid4()
-    app.dependency_overrides[get_current_user_id] = lambda: user_id
+    app.dependency_overrides[get_auth_context] = lambda: AuthContext(
+        user_id=user_id, impersonated_by=None, imp_session_id=None, read_only=False
+    )
     yield user_id
-    app.dependency_overrides.pop(get_current_user_id, None)
+    app.dependency_overrides.pop(get_auth_context, None)
 
 
 def test_get_me_requires_auth(client):
@@ -96,3 +99,43 @@ def test_get_me_logs_and_returns_generic_500_on_unexpected_error(client, fake_us
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(error_records) == 1
     assert error_records[0].exc_info is not None
+
+
+def test_get_me_omits_impersonating_for_a_normal_session(client, fake_user, fake_pool, monkeypatch):
+    mock_get = AsyncMock(return_value={**USER_PROFILE, "id": str(fake_user)})
+    monkeypatch.setattr("app.api.users.get_user_by_id", mock_get)
+
+    response = client.get("/users/me")
+
+    assert response.status_code == 200
+    assert response.json()["impersonating"] is None
+
+
+def test_get_me_includes_impersonating_for_an_impersonation_session(client, fake_pool, monkeypatch):
+    target_id = uuid4()
+    admin_id = uuid4()
+    app.dependency_overrides[get_auth_context] = lambda: AuthContext(
+        user_id=target_id, impersonated_by=admin_id, imp_session_id=uuid4(), read_only=True
+    )
+
+    async def fake_get_user_by_id(pool, user_id):
+        if user_id == target_id:
+            return {**USER_PROFILE, "id": str(target_id)}
+        if user_id == admin_id:
+            return {**USER_PROFILE, "id": str(admin_id), "email": "admin@example.com", "role": "admin"}
+        return None
+
+    monkeypatch.setattr("app.api.users.get_user_by_id", AsyncMock(side_effect=fake_get_user_by_id))
+
+    try:
+        response = client.get("/users/me")
+    finally:
+        app.dependency_overrides.pop(get_auth_context, None)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["impersonating"] == {
+        "admin_id": str(admin_id),
+        "admin_email": "admin@example.com",
+        "read_only": True,
+    }

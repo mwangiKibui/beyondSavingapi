@@ -59,13 +59,48 @@ async def get_user_by_email(pool: asyncpg.Pool, email: str) -> dict | None:
 async def get_user_by_id(pool: asyncpg.Pool, user_id: UUID) -> dict | None:
     row = await pool.fetchrow(
         """
-        SELECT id, email, first_name, last_name, default_currency, near_threshold, created_at
+        SELECT id, email, first_name, last_name, default_currency, near_threshold, created_at, role
         FROM users
         WHERE id = $1
         """,
         user_id,
     )
     return dict(row) if row else None
+
+
+async def list_users(
+    pool: asyncpg.Pool, *, page: int, page_size: int, search: str | None
+) -> tuple[list[dict], int]:
+    """Paginated/searchable user list for the admin panel - same
+    count-then-page + conditional-filter shape as list_accounts (see
+    app/repositories/accounts.py). search matches against email or full
+    name."""
+    base_query = """
+        SELECT id, email, first_name, last_name, role, created_at
+        FROM users
+        WHERE
+            $1::text IS NULL
+            OR email ILIKE '%' || $1 || '%'
+            OR (first_name || ' ' || last_name) ILIKE '%' || $1 || '%'
+    """
+    params = [search]
+
+    count_row = await pool.fetchrow(
+        f"SELECT COUNT(*) AS total FROM ({base_query}) counted", *params
+    )
+    total = count_row["total"]
+
+    rows = await pool.fetch(
+        f"""
+        {base_query}
+        ORDER BY created_at DESC
+        LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
+        """,
+        *params,
+        page_size,
+        (page - 1) * page_size,
+    )
+    return [dict(row) for row in rows], total
 
 
 async def update_user_profile(
@@ -77,7 +112,7 @@ async def update_user_profile(
             UPDATE users
             SET first_name = $1, last_name = $2, email = $3, updated_at = now()
             WHERE id = $4
-            RETURNING id, email, first_name, last_name, default_currency, near_threshold, created_at
+            RETURNING id, email, first_name, last_name, default_currency, near_threshold, created_at, role
             """,
             first_name,
             last_name,
@@ -124,7 +159,7 @@ async def update_user_preferences(
         UPDATE users
         SET default_currency = $1, near_threshold = $2, updated_at = now()
         WHERE id = $3
-        RETURNING id, email, first_name, last_name, default_currency, near_threshold, created_at
+        RETURNING id, email, first_name, last_name, default_currency, near_threshold, created_at, role
         """,
         default_currency,
         near_threshold,

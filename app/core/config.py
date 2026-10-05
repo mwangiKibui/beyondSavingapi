@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     jwt_secret: str
     jwt_algorithm: str = "HS256"
     jwt_expires_minutes: int = 60 * 24
+    # Impersonation tokens are short-lived - bounds the blast radius of a
+    # leaked/copy-pasted one; cheap to re-impersonate if it expires
+    # mid-session since the admin's own session is untouched.
+    jwt_impersonation_expires_minutes: int = 30
     # Public URL of beyondSavingUI, used to construct links (e.g. the
     # password reset link logged/emailed to a user).
     frontend_url: str = "http://localhost:3000"
