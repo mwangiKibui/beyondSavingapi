@@ -636,6 +636,8 @@ def build_transaction_statement(
     to_date: date | None,
     status_filter: str | None,
     category_id: UUID | None = None,
+    page: int | None = None,
+    page_size: int | None = None,
 ) -> dict:
     """Pure-Python aggregation over fetch_transaction_statement_rows' own
     result set (2026-10-02's Transaction Statement report) - every
@@ -674,6 +676,15 @@ def build_transaction_statement(
     allocations touch that category at all (category_ids, from
     fetch_transaction_statement_rows) - never a transfer reason, which
     this filter doesn't cover.
+
+    page/page_size (optional, both or neither): slices the OUTPUT rows
+    list only, for a caller that lazy-loads (ab-? Account Statement
+    drawer) rather than rendering/exporting the whole filtered range at
+    once (every existing caller - the Transaction Statement report and
+    its CSV/PDF export - omits them and gets every displayed row, same
+    as before). total_credit/total_debit/closing_balance still reflect
+    the FULL filtered range regardless of paging, since those are
+    report-wide totals, not per-page ones.
     """
     anchor_index = next((i for i, row in enumerate(rows) if row["balance_after"] is not None), None)
 
@@ -719,10 +730,16 @@ def build_transaction_statement(
     total_debit = sum((row["txn_amount"] for row in displayed if row["direction"] == "out"), ZERO)
     closing_balance = displayed[-1]["balance"] if displayed else opening_balance
 
+    paged = displayed
+    if page is not None and page_size is not None:
+        start = (page - 1) * page_size
+        paged = displayed[start : start + page_size]
+
     return {
         "opening_balance": opening_balance,
         "rows": [
             {
+                "id": row["transaction_id"],
                 # 2026-10-02 feedback: when neither the bank nor the user
                 # gave this transaction any text, name it by its own
                 # nature ("Money In"/"Money Out") rather than a bare "—",
@@ -737,8 +754,9 @@ def build_transaction_statement(
                 "status": row["status"],
                 "reconciled_category": row["reconciled_category"],
             }
-            for row in displayed
+            for row in paged
         ],
+        "total": len(displayed),
         "total_credit": total_credit,
         "total_debit": total_debit,
         "closing_balance": closing_balance,
@@ -754,11 +772,19 @@ async def get_transaction_statement(
     to_date: date | None,
     status_filter: str | None,
     category_id: UUID | None = None,
+    page: int | None = None,
+    page_size: int | None = None,
 ) -> dict:
     """Transaction Statement's own data (2026-10-02) - fetches one
     account's full transaction history and aggregates it in one pass,
     same convention as every other get_*/build_* pair above."""
     rows = await fetch_transaction_statement_rows(pool, user_id=user_id, account_id=account_id)
     return build_transaction_statement(
-        rows, from_date=from_date, to_date=to_date, status_filter=status_filter, category_id=category_id
+        rows,
+        from_date=from_date,
+        to_date=to_date,
+        status_filter=status_filter,
+        category_id=category_id,
+        page=page,
+        page_size=page_size,
     )

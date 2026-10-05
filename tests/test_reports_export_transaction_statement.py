@@ -49,6 +49,7 @@ def _statement():
         "opening_balance": Decimal("1000.00"),
         "rows": [
             {
+                "id": uuid4(),
                 "description": "Naivas",
                 "date": "2026-09-05",
                 "balance": Decimal("800.00"),
@@ -58,6 +59,7 @@ def _statement():
                 "reconciled_category": "Groceries",
             },
             {
+                "id": uuid4(),
                 "description": "Salary",
                 "date": "2026-09-10",
                 "balance": Decimal("1800.00"),
@@ -67,6 +69,7 @@ def _statement():
                 "reconciled_category": None,
             },
         ],
+        "total": 2,
         "total_credit": Decimal("1000.00"),
         "total_debit": Decimal("200.00"),
         "closing_balance": Decimal("1800.00"),
@@ -109,9 +112,11 @@ def test_get_transaction_statement_success_shape(client, fake_user, fake_pool, m
     body = response.json()
     assert body["opening_balance"] == "1000.00"
     assert body["closing_balance"] == "1800.00"
+    assert body["total"] == 2
     assert body["total_credit"] == "1000.00"
     assert body["total_debit"] == "200.00"
     assert len(body["rows"]) == 2
+    assert body["rows"][0]["id"] is not None
     assert body["rows"][0]["description"] == "Naivas"
     assert body["rows"][0]["debit"] == "200.00"
     assert body["rows"][0]["credit"] is None
@@ -134,6 +139,8 @@ def test_get_transaction_statement_forwards_filters(client, fake_user, fake_pool
             "to": "2026-09-30",
             "status": "reconciled",
             "category_id": category_id,
+            "page": 2,
+            "page_size": 10,
         },
     )
 
@@ -145,6 +152,24 @@ def test_get_transaction_statement_forwards_filters(client, fake_user, fake_pool
     assert str(kwargs["to_date"]) == "2026-09-30"
     assert kwargs["status_filter"] == "reconciled"
     assert str(kwargs["category_id"]) == category_id
+    assert kwargs["page"] == 2
+    assert kwargs["page_size"] == 10
+
+
+def test_get_transaction_statement_page_and_page_size_default_to_unset(client, fake_user, fake_pool, monkeypatch):
+    """The Transaction Statement report's own page (and its CSV/PDF
+    export, which call get_transaction_statement directly, bypassing
+    this endpoint) never send page/page_size - only the Account
+    Statement drawer does, via this same endpoint."""
+    monkeypatch.setattr("app.api.reports.get_account", AsyncMock(return_value=_account()))
+    mock = AsyncMock(return_value=_statement())
+    monkeypatch.setattr("app.api.reports.get_transaction_statement", mock)
+
+    client.get("/reports/transaction-statement", params={"account_id": str(uuid4())})
+
+    _, kwargs = mock.call_args
+    assert kwargs["page"] is None
+    assert kwargs["page_size"] is None
 
 
 def test_get_transaction_statement_rejects_an_invalid_status(client, fake_user, fake_pool):
