@@ -129,6 +129,7 @@ class TransferListResponse(BaseModel):
 
 
 class TransactionStatementRow(BaseModel):
+    id: UUID
     description: str
     date: date
     balance: Decimal | None
@@ -141,6 +142,11 @@ class TransactionStatementRow(BaseModel):
 class TransactionStatementResponse(BaseModel):
     opening_balance: Decimal | None
     rows: list[TransactionStatementRow]
+    # Every row matching the filters, regardless of page/page_size - lets
+    # a paginated caller (the Account Statement drawer) know when it's
+    # loaded everything. Equals len(rows) for an unpaginated call (the
+    # Transaction Statement report and its CSV/PDF export).
+    total: int
     total_credit: Decimal
     total_debit: Decimal
     closing_balance: Decimal | None
@@ -768,6 +774,12 @@ async def get_transaction_statement_endpoint(
     to_date: date | None = Query(default=None, alias="to"),
     txn_status: TransactionStatementStatus | None = Query(default=None, alias="status"),
     category_id: UUID | None = Query(default=None),
+    # Optional, both or neither - the Account Statement drawer lazy-loads
+    # a page at a time; the Transaction Statement report itself (and its
+    # CSV/PDF export, which call get_transaction_statement directly, not
+    # through this endpoint) omit them and get every row.
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=100),
 ) -> dict:
     """account_id is required (unlike every other /reports filter) - a
     running balance is inherently a single-account concept, so there's no
@@ -784,6 +796,8 @@ async def get_transaction_statement_endpoint(
             to_date=to_date,
             status_filter=txn_status,
             category_id=category_id,
+            page=page,
+            page_size=page_size,
         )
     except HTTPException:
         raise

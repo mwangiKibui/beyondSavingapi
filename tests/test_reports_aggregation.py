@@ -801,3 +801,51 @@ def test_build_transaction_statement_category_filter_hides_non_matching_rows_but
     # (1000 - 100 = 900).
     assert statement["rows"][0]["balance"] == Decimal("900.00")
     assert statement["total_debit"] == Decimal("140.00")
+
+
+def test_build_transaction_statement_includes_each_row_s_transaction_id():
+    txn_id = uuid4()
+    rows = [_statement_row(transaction_id=txn_id, txn_date=date(2026, 9, 1), txn_amount=Decimal("100.00"))]
+
+    statement = build_transaction_statement(rows, from_date=None, to_date=None, status_filter=None)
+
+    assert statement["rows"][0]["id"] == txn_id
+
+
+def test_build_transaction_statement_total_counts_every_displayed_row_regardless_of_paging():
+    rows = [
+        _statement_row(txn_date=date(2026, 9, i), txn_amount=Decimal("10.00"), direction="in")
+        for i in range(1, 6)
+    ]
+
+    unpaged = build_transaction_statement(rows, from_date=None, to_date=None, status_filter=None)
+    assert unpaged["total"] == 5
+    assert len(unpaged["rows"]) == 5
+
+    paged = build_transaction_statement(rows, from_date=None, to_date=None, status_filter=None, page=1, page_size=2)
+    assert paged["total"] == 5
+    assert len(paged["rows"]) == 2
+
+
+def test_build_transaction_statement_pages_without_changing_totals_or_closing_balance():
+    """page/page_size only slices which rows come back - total_credit/
+    total_debit/closing_balance stay report-wide, computed from every
+    displayed row, not just the current page."""
+    rows = [
+        _statement_row(
+            txn_date=date(2026, 9, 1), txn_amount=Decimal("1000.00"), direction="in", balance_after=Decimal("1000.00")
+        ),
+        _statement_row(txn_date=date(2026, 9, 2), txn_amount=Decimal("100.00"), direction="out"),
+        _statement_row(txn_date=date(2026, 9, 3), txn_amount=Decimal("50.00"), direction="out"),
+    ]
+
+    full = build_transaction_statement(rows, from_date=None, to_date=None, status_filter=None)
+    page1 = build_transaction_statement(rows, from_date=None, to_date=None, status_filter=None, page=1, page_size=2)
+    page2 = build_transaction_statement(rows, from_date=None, to_date=None, status_filter=None, page=2, page_size=2)
+
+    assert [row["balance"] for row in page1["rows"]] == [Decimal("1000.00"), Decimal("900.00")]
+    assert [row["balance"] for row in page2["rows"]] == [Decimal("850.00")]
+    for statement in (page1, page2):
+        assert statement["total"] == full["total"] == 3
+        assert statement["closing_balance"] == full["closing_balance"] == Decimal("850.00")
+        assert statement["total_debit"] == full["total_debit"] == Decimal("150.00")
