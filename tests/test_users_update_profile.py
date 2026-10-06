@@ -86,6 +86,7 @@ def test_update_profile_success(client, fake_user, fake_pool, monkeypatch):
         "default_currency": "KES",
         "near_threshold": 0.80,
         "created_at": "2026-01-01T00:00:00+00:00",
+        "role": "user",
     }
     mock_update = AsyncMock(return_value=updated)
     monkeypatch.setattr("app.api.users.update_user_profile", mock_update)

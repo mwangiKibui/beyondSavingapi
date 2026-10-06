@@ -9,7 +9,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from app.core.db import get_pool
 from app.core.errors import GENERIC_ERROR_MESSAGE
-from app.core.security import get_current_user_id
+from app.core.security import AuthContext, get_auth_context, get_current_user_id
 from app.repositories.users import (
     EmailAlreadyExists,
     IncorrectPassword,
@@ -24,6 +24,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["users"])
 
 
+class ImpersonationInfo(BaseModel):
+    admin_id: UUID
+    admin_email: str
+    read_only: bool
+
+
 class UserProfileResponse(BaseModel):
     id: UUID
     email: str
@@ -32,6 +38,8 @@ class UserProfileResponse(BaseModel):
     default_currency: str
     near_threshold: float
     created_at: datetime
+    role: str
+    impersonating: ImpersonationInfo | None = None
 
 
 class UpdateProfileRequest(BaseModel):
@@ -77,19 +85,32 @@ def _require_pool(pool: asyncpg.Pool | None) -> None:
 
 @router.get("/me", response_model=UserProfileResponse)
 async def get_me(
-    user_id: UUID = Depends(get_current_user_id),
+    ctx: AuthContext = Depends(get_auth_context),
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
+    # Deliberately uses get_auth_context, not get_current_user_id, so a
+    # read-only impersonation session can still load its own profile (to
+    # render the impersonation banner) without tripping the write-blocking
+    # check - viewing this isn't "acting on the impersonated user's data".
     _require_pool(pool)
 
     try:
-        user = await get_user_by_id(pool, user_id)
+        user = await get_user_by_id(pool, ctx.user_id)
         if user is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+        if ctx.impersonated_by is not None:
+            admin = await get_user_by_id(pool, ctx.impersonated_by)
+            if admin is not None:
+                user["impersonating"] = {
+                    "admin_id": admin["id"],
+                    "admin_email": admin["email"],
+                    "read_only": ctx.read_only,
+                }
     except HTTPException:
         raise
     except Exception:
-        logger.error("Unexpected error fetching profile for user %s", user_id, exc_info=True)
+        logger.error("Unexpected error fetching profile for user %s", ctx.user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
         ) from None

@@ -80,6 +80,7 @@ def test_update_preferences_uppercases_currency_code(client, fake_user, fake_poo
         "default_currency": "USD",
         "near_threshold": 0.75,
         "created_at": "2026-01-01T00:00:00+00:00",
+        "role": "user",
     }
     mock_update = AsyncMock(return_value=updated)
     monkeypatch.setattr("app.api.users.update_user_preferences", mock_update)
@@ -108,6 +109,7 @@ def test_update_preferences_success(client, fake_user, fake_pool, monkeypatch):
         "default_currency": "USD",
         "near_threshold": 0.75,
         "created_at": "2026-01-01T00:00:00+00:00",
+        "role": "user",
     }
     mock_update = AsyncMock(return_value=updated)
     monkeypatch.setattr("app.api.users.update_user_preferences", mock_update)
