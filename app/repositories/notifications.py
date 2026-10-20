@@ -55,8 +55,9 @@ async def generate_budget_alerts(
 
     Income categories have no near/at/over scale (derive_budget_state
     only ever returns on_track/good for them) so they're skipped up
-    front - state only ever worsens for an expense category's allocation,
-    since allocations are append-only (consumed never decreases here).
+    front - state only ever worsens for an expense category's allocation
+    here, since callers only pass what an insert or edit ADDED (ab-155's
+    edit/delete can lower consumed, but never calls this for a decrease).
     Caller is expected to wrap this in a try/except - a failure here must
     never break the reconciliation response that triggered it.
     """

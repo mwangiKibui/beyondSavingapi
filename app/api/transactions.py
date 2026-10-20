@@ -17,6 +17,8 @@ from app.repositories.notifications import generate_budget_alerts
 from app.repositories.statement_imports import get_import_owned_by_user
 from app.repositories.sub_ledgers import get_sub_ledgers_by_ids, list_sub_ledgers
 from app.repositories.transactions import (
+    delete_allocation,
+    delete_allocations_for_transaction,
     get_allocations,
     get_transaction,
     get_transactions_with_allocated,
@@ -24,6 +26,7 @@ from app.repositories.transactions import (
     insert_bulk_allocations,
     insert_manual_transactions,
     list_transactions,
+    update_allocation,
 )
 from app.repositories.transfer_reasons import get_transfer_reasons_by_ids
 
@@ -400,6 +403,238 @@ async def create_allocations_endpoint(
     except Exception:
         logger.error(
             "Unexpected error creating allocations for transaction %s, user %s", transaction_id, user_id, exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=GENERIC_ERROR_MESSAGE,
+        ) from None
+
+    return {**transaction, "allocations": allocations}
+
+
+class UpdateAllocationRequest(BaseModel):
+    # Partial update - only the fields actually sent change (checked via
+    # model_fields_set, so an explicit null category_id/note is a real
+    # "clear it", distinct from leaving the field out).
+    category_id: UUID | None = None
+    amount: float | None = None
+    note: str | None = None
+
+
+@router.patch(
+    "/{transaction_id}/allocations/{allocation_id}",
+    response_model=TransactionDetailResponse,
+)
+async def update_allocation_endpoint(
+    transaction_id: UUID,
+    allocation_id: UUID,
+    body: UpdateAllocationRequest,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    if pool is None:
+        logger.error("Database pool unavailable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
+        )
+
+    try:
+        transaction = await get_transaction(pool, transaction_id=transaction_id, user_id=user_id)
+        if transaction is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+
+        existing_allocations = await get_allocations(pool, transaction_id=transaction_id)
+        current = next(
+            (allocation for allocation in existing_allocations if str(allocation["id"]) == str(allocation_id)),
+            None,
+        )
+        if current is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Allocation not found")
+
+        sent = body.model_fields_set
+        current_category_id = current["category_id"]
+        current_amount = float(current["original_amount"])
+        category_id = body.category_id if "category_id" in sent else current_category_id
+        amount = body.amount if "amount" in sent and body.amount is not None else current_amount
+        note = body.note if "note" in sent else current["note"]
+
+        if amount <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Amount must be greater than zero",
+            )
+
+        # Same mutual exclusivity as create (ab-134) - a transfer-shaped
+        # split can't also gain a category.
+        if category_id is not None and current["transfer_reason_id"] is not None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Can't set both a category and a transfer reason",
+            )
+
+        if category_id is not None and str(category_id) != str(current_category_id):
+            found = await get_categories_by_ids(pool, category_ids=[category_id], user_id=user_id)
+            if not found:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
+            # ab-60: category type must match the transaction's direction.
+            if found[0]["type"] != _CATEGORY_TYPE_FOR_DIRECTION[transaction["direction"]]:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Category type doesn't match this transaction's direction",
+                )
+
+        # ab-59: every OTHER split plus this one's new amount can't exceed
+        # the transaction - this split's own current amount is left out,
+        # or it would be counted twice.
+        allocated_elsewhere = sum(
+            float(allocation["original_amount"])
+            for allocation in existing_allocations
+            if str(allocation["id"]) != str(allocation_id)
+        )
+        transaction_amount = float(transaction["amount"])
+        if allocated_elsewhere + amount > transaction_amount:
+            remaining = transaction_amount - allocated_elsewhere
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Amount can't exceed the remaining {remaining:.2f} {transaction['currency']}",
+            )
+
+        # Closed reconciliation periods (ab-166/ab-169) will add a 409 here.
+
+        await update_allocation(
+            pool,
+            allocation_id=allocation_id,
+            transaction_id=transaction_id,
+            category_id=category_id,
+            amount=amount,
+            note=note,
+        )
+
+        # ab-77: alert only on what this edit ADDS to a category - the full
+        # amount when the split moved to a new category, the increase when
+        # it stayed. A decrease or a move to no-category raises nothing.
+        # Never allowed to break the response itself.
+        try:
+            if category_id is not None:
+                if str(category_id) == str(current_category_id):
+                    added = Decimal(str(amount)) - Decimal(str(current_amount))
+                else:
+                    added = Decimal(str(amount))
+                if added > 0:
+                    await generate_budget_alerts(
+                        pool,
+                        user_id=user_id,
+                        category_id=category_id,
+                        txn_date=transaction["txn_date"],
+                        currency=transaction["currency"],
+                        new_amount=added,
+                    )
+        except Exception:
+            logger.error(
+                "Unexpected error generating budget alerts for allocation %s, user %s",
+                allocation_id,
+                user_id,
+                exc_info=True,
+            )
+
+        transaction = await get_transaction(pool, transaction_id=transaction_id, user_id=user_id)
+        allocations = await get_allocations(pool, transaction_id=transaction_id)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error(
+            "Unexpected error updating allocation %s for transaction %s, user %s",
+            allocation_id,
+            transaction_id,
+            user_id,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=GENERIC_ERROR_MESSAGE,
+        ) from None
+
+    return {**transaction, "allocations": allocations}
+
+
+@router.delete(
+    "/{transaction_id}/allocations/{allocation_id}",
+    response_model=TransactionDetailResponse,
+)
+async def delete_allocation_endpoint(
+    transaction_id: UUID,
+    allocation_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    if pool is None:
+        logger.error("Database pool unavailable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
+        )
+
+    try:
+        transaction = await get_transaction(pool, transaction_id=transaction_id, user_id=user_id)
+        if transaction is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+
+        # Closed reconciliation periods (ab-166/ab-169) will add a 409 here.
+
+        deleted = await delete_allocation(pool, allocation_id=allocation_id, transaction_id=transaction_id)
+        if not deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Allocation not found")
+
+        transaction = await get_transaction(pool, transaction_id=transaction_id, user_id=user_id)
+        allocations = await get_allocations(pool, transaction_id=transaction_id)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error(
+            "Unexpected error deleting allocation %s for transaction %s, user %s",
+            allocation_id,
+            transaction_id,
+            user_id,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=GENERIC_ERROR_MESSAGE,
+        ) from None
+
+    return {**transaction, "allocations": allocations}
+
+
+@router.delete("/{transaction_id}/allocations", response_model=TransactionDetailResponse)
+async def clear_allocations_endpoint(
+    transaction_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    if pool is None:
+        logger.error("Database pool unavailable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
+        )
+
+    try:
+        transaction = await get_transaction(pool, transaction_id=transaction_id, user_id=user_id)
+        if transaction is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+
+        # Closed reconciliation periods (ab-166/ab-169) will add a 409 here.
+
+        await delete_allocations_for_transaction(pool, transaction_id=transaction_id)
+
+        transaction = await get_transaction(pool, transaction_id=transaction_id, user_id=user_id)
+        allocations = await get_allocations(pool, transaction_id=transaction_id)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error(
+            "Unexpected error clearing allocations for transaction %s, user %s",
+            transaction_id,
+            user_id,
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

@@ -239,6 +239,60 @@ async def insert_allocations(
     )
 
 
+async def update_allocation(
+    pool: asyncpg.Pool,
+    *,
+    allocation_id: UUID,
+    transaction_id: UUID,
+    category_id: UUID | None,
+    amount: float,
+    note: str | None,
+) -> None:
+    """Overwrites one split's category, amount, and note (ab-155) with the
+    caller's already-merged values - a field the request didn't send is
+    passed through unchanged, not as NULL. amount and original_amount move
+    together, same "no FX yet" convention as insert_allocations. Transfer
+    fields are left alone: editing a transfer-shaped split's reason or
+    source isn't supported (remove it and re-reconcile instead). Caller
+    must already have confirmed ownership and run the same guards as
+    create.
+    """
+    await pool.execute(
+        """
+        UPDATE allocations
+        SET category_id = $3, original_amount = $4, amount = $4, note = $5
+        WHERE id = $1 AND transaction_id = $2
+        """,
+        allocation_id,
+        transaction_id,
+        category_id,
+        amount,
+        note,
+    )
+
+
+async def delete_allocation(pool: asyncpg.Pool, *, allocation_id: UUID, transaction_id: UUID) -> bool:
+    """Removes one split (ab-155). Returns False when no split with this id
+    belongs to this transaction, so the caller can 404. Caller must
+    already have confirmed transaction ownership.
+    """
+    result = await pool.execute(
+        "DELETE FROM allocations WHERE id = $1 AND transaction_id = $2",
+        allocation_id,
+        transaction_id,
+    )
+    return result != "DELETE 0"
+
+
+async def delete_allocations_for_transaction(pool: asyncpg.Pool, *, transaction_id: UUID) -> int:
+    """Clears every split on a transaction (ab-155), returning it to
+    unreconciled. Returns how many were removed - zero is not an error.
+    Caller must already have confirmed transaction ownership.
+    """
+    result = await pool.execute("DELETE FROM allocations WHERE transaction_id = $1", transaction_id)
+    return int(result.split()[-1])
+
+
 async def get_transactions_with_allocated(
     pool: asyncpg.Pool, *, transaction_ids: list[UUID], user_id: UUID
 ) -> list[dict]:
