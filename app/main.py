@@ -12,6 +12,7 @@ from app.api import (
     budget_plans,
     categories,
     dashboard,
+    money_plans,
     notifications,
     reports,
     statement_imports,
@@ -69,6 +70,7 @@ app.include_router(admin.router)
 app.include_router(budget_plans.router)
 app.include_router(categories.router)
 app.include_router(dashboard.router)
+app.include_router(money_plans.router)
 app.include_router(notifications.router)
 app.include_router(reports.router)
 app.include_router(statement_imports.router)
