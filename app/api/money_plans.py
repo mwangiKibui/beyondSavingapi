@@ -11,7 +11,7 @@ from pydantic import BaseModel, field_validator, model_validator
 from app.core.db import get_pool
 from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.security import get_current_user_id
-from app.repositories.money_plans import create_money_plan, list_money_plans
+from app.repositories.money_plans import create_money_plan, delete_draft_money_plan, list_money_plans
 
 logger = logging.getLogger(__name__)
 
@@ -123,3 +123,26 @@ async def list_money_plans_endpoint(
         ) from None
 
     return {"items": plans}
+
+
+@router.delete("/money-plans/{plan_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_money_plan_endpoint(
+    plan_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> None:
+    _require_pool(pool)
+
+    try:
+        outcome = await delete_draft_money_plan(pool, user_id=user_id, plan_id=plan_id)
+    except Exception:
+        logger.error("Unexpected error deleting money plan %s", plan_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
+        ) from None
+
+    if outcome == "not_found":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Money plan not found")
+    if outcome == "not_draft":
+        # Converted plans back a budget plan; archived ones are kept on purpose.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only draft plans can be deleted")
