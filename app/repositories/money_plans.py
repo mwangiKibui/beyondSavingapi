@@ -76,3 +76,24 @@ async def list_money_plans(pool: asyncpg.Pool, *, user_id: UUID, status: str | N
         )
         plans.append(plan)
     return plans
+
+
+async def delete_draft_money_plan(pool: asyncpg.Pool, *, user_id: UUID, plan_id: UUID) -> str:
+    """Deletes the plan (and, by cascade, its entries) only while it's a draft.
+
+    Returns "deleted", "not_found" (missing or another user's), or "not_draft".
+    The status check sits in the DELETE itself, so a plan converted in another
+    tab between the two queries is never removed.
+    """
+    result = await pool.execute(
+        "DELETE FROM money_plans WHERE id = $1 AND user_id = $2 AND status = 'draft'",
+        plan_id,
+        user_id,
+    )
+    if result != "DELETE 0":
+        return "deleted"
+
+    exists = await pool.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM money_plans WHERE id = $1 AND user_id = $2)", plan_id, user_id
+    )
+    return "not_draft" if exists else "not_found"
