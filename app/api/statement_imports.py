@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import asyncpg
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
 from app.core.db import get_pool
@@ -15,12 +15,27 @@ from app.core.redis import get_redis
 from app.core.security import get_current_user_id
 from app.core.storage import get_storage_client
 from app.repositories.accounts import get_account
+from app.repositories.category_suggestions import (
+    get_approved_directory,
+    get_blocked_numbers,
+    get_import_for_preview,
+    get_import_rows,
+    get_user_categories,
+    get_user_rules,
+)
 from app.repositories.statement_imports import (
     add_import_sub_ledgers,
     create_statement_import,
     list_statement_imports,
 )
 from app.repositories.sub_ledgers import list_sub_ledgers
+from app.services.category_suggestions import (
+    Directory,
+    build_preview_rows,
+    extract_keys,
+    new_category_names,
+    rule_lookup_pairs,
+)
 from app.services.statement_files import (
     IncorrectStatementPassword,
     check_password,
@@ -69,6 +84,60 @@ class StatementImportListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class PreviewImport(BaseModel):
+    id: UUID
+    account_id: UUID
+    account_nickname: str
+    provider: str
+    file_name: str
+    status: str
+    period_start: date | None = None
+    period_end: date | None = None
+    row_count: int | None = None
+    created_at: datetime
+
+
+class PreviewSuggestion(BaseModel):
+    # None when is_new_category: the category is created on confirm.
+    category_id: UUID | None = None
+    category_name: str
+    is_new_category: bool
+    source: Literal["your_rule", "this_statement", "directory"]
+    merchant_name: str | None = None
+
+
+class PreviewRow(BaseModel):
+    transaction_id: UUID
+    txn_date: date
+    amount: float
+    currency: str
+    direction: str
+    description: str | None = None
+    display_name: str
+    label: str | None = None
+    # Same value = same payee; the UI offers one choice for the whole group.
+    group_key: str | None = None
+    key_kind: str | None = None
+    number_kind: str | None = None
+    number: str | None = None
+    is_business: bool
+    is_transfer_hint: bool
+    suggestion: PreviewSuggestion | None = None
+
+
+class PreviewSummary(BaseModel):
+    open_rows: int
+    suggested: int
+    new_categories: list[str]
+
+
+class StatementImportPreviewResponse(BaseModel):
+    # "import" is a Python keyword, hence the alias.
+    import_: PreviewImport = Field(alias="import", serialization_alias="import")
+    rows: list[PreviewRow]
+    summary: PreviewSummary
 
 
 @router.get("", response_model=StatementImportListResponse)
@@ -225,3 +294,72 @@ async def upload_statement_endpoint(
         ) from None
 
     return statement_import
+
+
+@router.get(
+    "/{import_id}/preview",
+    response_model=StatementImportPreviewResponse,
+    response_model_by_alias=True,
+)
+async def preview_statement_import_endpoint(
+    import_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """The import's open rows (nothing allocated yet, not a transfer) with
+    a suggested category each where one is known (ab-253). Read-only:
+    categories are only saved by the confirm step."""
+    if pool is None:
+        logger.error("Database pool unavailable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
+        )
+
+    try:
+        statement_import = await get_import_for_preview(pool, import_id=import_id, user_id=user_id)
+        if statement_import is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Statement import not found")
+        if statement_import["status"] != "parsed":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This statement hasn't finished processing yet",
+            )
+
+        rows = await get_import_rows(
+            pool,
+            import_id=import_id,
+            account_id=statement_import["account_id"],
+            period_start=statement_import["period_start"],
+            period_end=statement_import["period_end"],
+        )
+        keys = extract_keys(
+            rows, provider=statement_import["provider"], secret=get_settings().suggestion_key_secret
+        )
+        rules = await get_user_rules(pool, user_id=user_id, pairs=rule_lookup_pairs(keys.values()))
+        directory = Directory.from_rows(
+            await get_approved_directory(pool), blocked=await get_blocked_numbers(pool)
+        )
+        categories = await get_user_categories(pool, user_id=user_id)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error(
+            "Unexpected error building preview for import %s, user %s", import_id, user_id, exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=GENERIC_ERROR_MESSAGE,
+        ) from None
+
+    preview_rows = build_preview_rows(
+        rows, keys=keys, rules=rules, directory=directory, categories=categories
+    )
+    return {
+        "import": statement_import,
+        "rows": preview_rows,
+        "summary": {
+            "open_rows": len(preview_rows),
+            "suggested": sum(1 for r in preview_rows if r["suggestion"]),
+            "new_categories": new_category_names(preview_rows),
+        },
+    }
