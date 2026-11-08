@@ -11,6 +11,7 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      SUGGESTION_KEY_SECRET: ${SUGGESTION_KEY_SECRET:-dev-suggestion-secret-change-me}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
     volumes:
       - ./app:/srv/app
@@ -35,6 +36,7 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      SUGGESTION_KEY_SECRET: ${SUGGESTION_KEY_SECRET:-dev-suggestion-secret-change-me}
     volumes:
       - ./app:/srv/app
     restart: unless-stopped

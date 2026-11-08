@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     minio_bucket: str = "statements"
     jwt_secret: str
     jwt_algorithm: str = "HS256"
+    # Keys the HMAC that hashes private category-suggestion keys (account
+    # references, people on transfers) before they're stored (ab-253).
+    # NEVER change it once set in an environment: every stored hash would
+    # stop matching and users would lose their remembered categories.
+    suggestion_key_secret: str
     jwt_expires_minutes: int = 60 * 24
     # Impersonation tokens are short-lived - bounds the blast radius of a
     # leaked/copy-pasted one; cheap to re-impersonate if it expires
