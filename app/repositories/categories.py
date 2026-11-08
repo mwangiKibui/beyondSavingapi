@@ -39,6 +39,15 @@ DEFAULT_CATEGORIES: list[tuple[str, str]] = [
     ("Freelance", "income"),
     ("Rental Income", "income"),
     ("Gifts Received", "income"),
+    # ab-258: common Kenyan payments none of the above fit, found while
+    # building the starter merchant list (ab-257). Existing users get
+    # these via beyondSavingdb migration 000017.
+    ("Bank & mobile charges", "expense"),
+    ("Taxes & government fees", "expense"),
+    ("Statutory contributions", "expense"),
+    ("Insurance", "expense"),
+    ("Books & stationery", "expense"),
+    ("Winnings", "income"),
 ]
 
 
