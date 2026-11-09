@@ -26,6 +26,12 @@ from app.repositories.transactions import (
     list_transactions,
 )
 from app.repositories.transfer_reasons import get_transfer_reasons_by_ids
+from app.services.allocations import (
+    CATEGORY_TYPE_FOR_DIRECTION,
+    AllocationRejected,
+    alert_groups,
+    plan_bulk_allocation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +43,7 @@ ReconciliationStatus = Literal["reconciled", "partial", "unreconciled"]
 # expense categories only ever apply to a money-out transaction, income
 # only to money-in (ab-60) - category_id: null (reconciled, no category,
 # ab-124) skips this check entirely, since there's no type to compare.
-_CATEGORY_TYPE_FOR_DIRECTION = {"out": "expense", "in": "income"}
+_CATEGORY_TYPE_FOR_DIRECTION = CATEGORY_TYPE_FOR_DIRECTION
 SortBy = Literal["txn_date", "amount"]
 SortDir = Literal["asc", "desc"]
 
@@ -466,8 +472,7 @@ async def bulk_allocate_endpoint(
             pool, transaction_ids=list(category_by_transaction.keys()), user_id=user_id
         )
         transactions_by_id = {transaction["id"]: transaction for transaction in transactions}
-        missing = category_by_transaction.keys() - transactions_by_id.keys()
-        if missing:
+        if category_by_transaction.keys() - transactions_by_id.keys():
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
 
         category_ids = {cid for cid in category_by_transaction.values() if cid is not None}
@@ -475,78 +480,27 @@ async def bulk_allocate_endpoint(
         if category_ids:
             found = await get_categories_by_ids(pool, category_ids=list(category_ids), user_id=user_id)
             categories_by_id = {category["id"]: category for category in found}
-            missing_categories = category_ids - categories_by_id.keys()
-            if missing_categories:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
 
-        # ab-60, checked for every transaction/category pair before any
-        # writes happen - one mismatch rejects the whole request, same
-        # all-or-nothing timing as the single-transaction endpoint.
-        for transaction_id, category_id in category_by_transaction.items():
-            if category_id is None:
-                continue
-            transaction = transactions_by_id[transaction_id]
-            expected_type = _CATEGORY_TYPE_FOR_DIRECTION[transaction["direction"]]
-            if categories_by_id[category_id]["type"] != expected_type:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="A category's type doesn't match one of the selected transactions' direction",
-                )
+        # Checks (ab-60 type vs direction) and amounts (ab-59 remaining
+        # balance only) are shared with the statement confirm step (ab-253).
+        try:
+            plan = plan_bulk_allocation(
+                category_by_transaction, transactions_by_id=transactions_by_id, categories_by_id=categories_by_id
+            )
+        except AllocationRejected as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
 
-        # ab-59: each transaction gets exactly its own remaining balance,
-        # never the full original amount - a row already partly reconciled
-        # only gets the rest filled in. Nothing remaining (already fully
-        # reconciled) is skipped, not errored.
-        insert_transaction_ids: list[UUID] = []
-        insert_category_ids: list[UUID | None] = []
-        insert_amounts: list[float] = []
-        insert_currencies: list[str] = []
-        updated: list[UUID] = []
-        skipped: list[UUID] = []
-
-        for transaction_id, category_id in category_by_transaction.items():
-            transaction = transactions_by_id[transaction_id]
-            remaining = float(transaction["amount"]) - float(transaction["allocated"])
-            if remaining <= 0:
-                skipped.append(transaction_id)
-                continue
-            insert_transaction_ids.append(transaction_id)
-            insert_category_ids.append(category_id)
-            insert_amounts.append(remaining)
-            insert_currencies.append(transaction["currency"])
-            updated.append(transaction_id)
-
-        if insert_transaction_ids:
+        if plan.transaction_ids:
             await insert_bulk_allocations(
                 pool,
-                transaction_ids=insert_transaction_ids,
-                category_ids=insert_category_ids,
-                amounts=insert_amounts,
-                currencies=insert_currencies,
+                transaction_ids=plan.transaction_ids,
+                category_ids=plan.category_ids,
+                amounts=plan.amounts,
+                currencies=plan.currencies,
             )
 
-            # ab-77: same alert generation as create_allocations_endpoint,
-            # grouped by (category_id, txn_date, currency) since a bulk
-            # batch can span many transactions/dates/categories at once -
-            # unlike the single-transaction endpoint, which only ever has
-            # one txn_date/currency to group by. txn_date is absent from a
-            # transaction row the caller mocked out directly (tests only -
-            # get_transactions_with_allocated always selects it for real),
-            # so that transaction's group is skipped rather than raising.
             try:
-                alert_groups: dict[tuple[UUID, object, str], Decimal] = {}
-                for txn_id, category_id, amount, currency in zip(
-                    insert_transaction_ids, insert_category_ids, insert_amounts, insert_currencies
-                ):
-                    if category_id is None:
-                        continue
-                    txn_date = transactions_by_id[txn_id].get("txn_date")
-                    if txn_date is None:
-                        continue
-                    key = (category_id, txn_date, currency)
-                    alert_groups[key] = alert_groups.get(key, Decimal(0)) + Decimal(str(amount))
-
-                for (category_id, txn_date, currency), amount in alert_groups.items():
+                for (category_id, txn_date, currency), amount in alert_groups(plan, transactions_by_id).items():
                     await generate_budget_alerts(
                         pool,
                         user_id=user_id,
@@ -570,7 +524,7 @@ async def bulk_allocate_endpoint(
             detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
-    return {"updated": updated, "skipped": skipped}
+    return {"updated": plan.updated, "skipped": plan.skipped}
 
 
 class TransactionCreateItem(BaseModel):

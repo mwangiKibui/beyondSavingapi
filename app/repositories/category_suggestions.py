@@ -1,5 +1,7 @@
-"""Reads for the statement-import preview's category suggestions (ab-253).
-Read-only: nothing here writes."""
+"""Storage for statement-import category suggestions (ab-253): reads for
+the preview, and the confirm step's writes. Functions take a pool or a
+connection (same fetch/execute API); confirm passes one connection inside
+a transaction so all its writes land or none do."""
 
 from datetime import date
 from uuid import UUID
@@ -13,7 +15,8 @@ async def get_import_for_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id
     row = await pool.fetchrow(
         """
         SELECT si.id, si.account_id, a.nickname AS account_nickname, a.provider,
-               si.file_name, si.status, si.period_start, si.period_end, si.row_count, si.created_at
+               si.file_name, si.status, si.period_start, si.period_end, si.row_count, si.created_at,
+               si.reviewed_at
         FROM statement_imports si
         JOIN accounts a ON a.id = si.account_id
         WHERE si.id = $1 AND a.user_id = $2
@@ -25,7 +28,7 @@ async def get_import_for_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id
 
 
 async def get_import_rows(
-    pool: asyncpg.Pool,
+    pool: asyncpg.Pool | asyncpg.Connection,
     *,
     import_id: UUID,
     account_id: UUID,
@@ -124,3 +127,159 @@ async def get_blocked_numbers(pool: asyncpg.Pool) -> list[dict]:
 async def get_user_categories(pool: asyncpg.Pool, *, user_id: UUID) -> list[dict]:
     rows = await pool.fetch("SELECT id, name, type FROM categories WHERE user_id = $1", user_id)
     return [dict(row) for row in rows]
+
+
+# --- confirm (writes) -----------------------------------------------------
+
+# Distinct users who must agree on a business name's category before it
+# becomes an admin candidate in the shared list.
+CANDIDATE_THRESHOLD = 3
+
+
+async def lock_transactions(conn: asyncpg.Connection, *, transaction_ids: list[UUID]) -> None:
+    """Row locks until the confirm transaction ends, so two confirms of the
+    same rows can't both see them unallocated and allocate twice."""
+    await conn.execute(
+        "SELECT 1 FROM transactions WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE", transaction_ids
+    )
+
+
+async def create_categories(
+    conn: asyncpg.Connection, *, user_id: UUID, categories: list[tuple[str, str]]
+) -> list[dict]:
+    """Creates (name, type) categories. The caller has already matched
+    names against the user's existing ones ignoring case; a clash anyway
+    (a race) returns the existing row, unchanged, instead of failing the
+    transaction. Uniqueness is idx_categories_user_type_lower_name
+    (beyondSavingdb 000005), not the UNIQUE (user_id, name, type) that
+    docs/schema.sql still shows."""
+    if not categories:
+        return []
+    rows = await conn.fetch(
+        """
+        INSERT INTO categories (user_id, name, type)
+        SELECT $1, name, type FROM unnest($2::text[], $3::text[]) AS c(name, type)
+        ON CONFLICT (user_id, type, lower(name)) DO UPDATE SET name = categories.name
+        RETURNING id, name, type
+        """,
+        user_id,
+        [name for name, _ in categories],
+        [category_type for _, category_type in categories],
+    )
+    return [dict(row) for row in rows]
+
+
+async def upsert_rules(conn: asyncpg.Connection, *, user_id: UUID, rules: list[dict]) -> None:
+    """One row per (key, account, direction, category): times_used grows by
+    this confirm's row count and avg_amount stays a running average."""
+    if not rules:
+        return
+    await conn.executemany(
+        """
+        INSERT INTO user_category_rules AS r
+            (user_id, key_kind, key_value, provider, account_hash, direction, category_id,
+             times_used, avg_amount, last_used_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::int, round($9::numeric / $8::int, 2), now())
+        ON CONFLICT ON CONSTRAINT user_category_rules_one_row_per_category DO UPDATE SET
+            times_used = r.times_used + EXCLUDED.times_used,
+            avg_amount = round(
+                (COALESCE(r.avg_amount, EXCLUDED.avg_amount) * r.times_used + $9::numeric)
+                / (r.times_used + EXCLUDED.times_used), 2),
+            last_used_at = now(),
+            updated_at = now()
+        """,
+        [
+            (user_id, r["key_kind"], r["key_value"], r["provider"], r["account_hash"], r["direction"],
+             r["category_id"], r["times"], r["total"])
+            for r in rules
+        ],
+    )
+
+
+async def set_rule_labels(conn: asyncpg.Connection, *, user_id: UUID, labels: list[dict]) -> None:
+    """A label names the payee, so it goes on every category row for the
+    key. user_entered_paybill is only ever kept on reference rows."""
+    if not labels:
+        return
+    await conn.executemany(
+        """
+        UPDATE user_category_rules
+        SET label = COALESCE($6, label),
+            user_entered_paybill = CASE WHEN key_kind = 'reference'
+                                        THEN COALESCE($7, user_entered_paybill)
+                                        ELSE user_entered_paybill END,
+            updated_at = now()
+        WHERE user_id = $1 AND key_kind = $2 AND key_value = $3
+          AND provider IS NOT DISTINCT FROM $4 AND direction = $5
+        """,
+        [
+            (user_id, x["key_kind"], x["key_value"], x["provider"], x["direction"], x["label"],
+             x["user_entered_paybill"])
+            for x in labels
+        ],
+    )
+
+
+async def upsert_merchant_votes(conn: asyncpg.Connection, *, user_id: UUID, votes: list[dict]) -> None:
+    """One vote per user per business name and direction (a later confirm
+    replaces it), then refreshes the candidate for each voted name: when
+    CANDIDATE_THRESHOLD+ distinct users agree on a category name (ignoring
+    case), a 'users' candidate is created or updated for an admin. A name
+    an admin already handled, or a starter/AI entry, is left alone."""
+    if not votes:
+        return
+    await conn.executemany(
+        """
+        INSERT INTO merchant_directory_votes (merchant_key, direction, user_id, category_name)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (merchant_key, direction, user_id) DO UPDATE
+            SET category_name = EXCLUDED.category_name, updated_at = now()
+        """,
+        [(v["merchant_key"], v["direction"], user_id, v["category_name"]) for v in votes],
+    )
+    await conn.executemany(
+        """
+        WITH top AS (
+            SELECT min(category_name) AS category_name, count(*) AS n
+            FROM merchant_directory_votes
+            WHERE merchant_key = $1 AND direction = $2
+            GROUP BY lower(category_name)
+            ORDER BY n DESC, min(category_name)
+            LIMIT 1
+        ), m AS (
+            INSERT INTO merchant_directory AS md
+                (display_name, category_name, direction, source, status, agreeing_users)
+            SELECT $1, category_name, $2, 'users', 'candidate', n FROM top WHERE n >= $3
+            ON CONFLICT (lower(display_name), direction) DO UPDATE
+                SET category_name = EXCLUDED.category_name,
+                    agreeing_users = EXCLUDED.agreeing_users,
+                    updated_at = now()
+                WHERE md.source = 'users' AND md.status = 'candidate'
+            RETURNING id, direction
+        )
+        INSERT INTO merchant_directory_keys (merchant_id, direction, key_kind, key_value)
+        SELECT id, direction, 'name_pattern', $1 FROM m
+        ON CONFLICT (key_kind, key_value, direction) DO NOTHING
+        """,
+        [(v["merchant_key"], v["direction"], CANDIDATE_THRESHOLD) for v in votes],
+    )
+
+
+async def upsert_number_votes(conn: asyncpg.Connection, *, user_id: UUID, votes: list[dict]) -> None:
+    if not votes:
+        return
+    await conn.executemany(
+        """
+        INSERT INTO unknown_number_votes (number_kind, number, direction, user_id, category_name)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (number_kind, number, direction, user_id) DO UPDATE
+            SET category_name = EXCLUDED.category_name, updated_at = now()
+        """,
+        [(v["number_kind"], v["number"], v["direction"], user_id, v["category_name"]) for v in votes],
+    )
+
+
+async def mark_import_reviewed(conn: asyncpg.Connection, *, import_id: UUID):
+    return await conn.fetchval(
+        "UPDATE statement_imports SET reviewed_at = now() WHERE id = $1 RETURNING reviewed_at", import_id
+    )

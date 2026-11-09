@@ -90,6 +90,12 @@ class Directory:
                 numbers[(r["key_kind"], r["key_value"], r["direction"])] = (r["merchant_id"], r["requires_text"])
         return cls(merchants, numbers, {(b["number_kind"], b["number"]) for b in blocked})
 
+    def is_blocked(self, number_kind: str | None, number: str | None) -> bool:
+        return (number_kind, number) in self._blocked
+
+    def knows_number(self, number_kind: str | None, number: str | None, direction: str) -> bool:
+        return (number_kind, number, direction) in self._numbers
+
     def match(self, key: RowKey, direction: str) -> Merchant | None:
         if key.number and (key.number_kind, key.number) not in self._blocked:
             hit = self._numbers.get((key.number_kind, key.number, direction))
@@ -160,9 +166,24 @@ def extract_keys(rows: list[dict], *, provider: str, secret: str) -> dict[UUID, 
     }
 
 
-def rule_lookup_pairs(keys: Iterable[RowKey]) -> list[tuple[str, str]]:
+def rule_key(key: RowKey, directory: "Directory") -> tuple[str, str, str | None] | None:
+    """(key_kind, key_value, provider) a user's rule for this row is stored
+    under - the same for preview lookups and confirm learning.
+
+    A blocked number (shared collection Paybill like 222222 eCitizen)
+    never keys a rule on its own: the rule uses the row's name instead,
+    so one eCitizen payment doesn't decide every other one. provider is
+    kept for reference keys only."""
+    if not key.kind:
+        return None
+    if key.kind in ("paybill", "till") and directory.is_blocked(key.number_kind, key.number):
+        return ("name", key.name, None) if key.name else None
+    return (key.kind, key.value, key.provider if key.kind == "reference" else None)
+
+
+def rule_lookup_pairs(keys: Iterable[RowKey], directory: "Directory") -> list[tuple[str, str]]:
     """Distinct (key_kind, key_value) pairs to fetch the user's rules for."""
-    pairs = {(k.kind, k.value) for k in keys if k.kind}
+    pairs = {(rk[0], rk[1]) for k in keys if (rk := rule_key(k, directory))}
     return sorted(pairs)
 
 
@@ -216,10 +237,10 @@ def build_preview_rows(
         g = group_key(key, direction)
         suggestion, label = None, None
 
-        if key.kind:
-            provider = key.provider if key.kind == "reference" else None
+        rk = rule_key(key, directory)
+        if rk:
             candidates = [
-                r for r in rules_by_key.get((key.kind, key.value, provider, direction), [])
+                r for r in rules_by_key.get((*rk, direction), [])
                 if r["category_id"] in by_id and by_id[r["category_id"]]["type"] == wanted_type
             ]
             picked = pick_rule(candidates, account_hash=key.account_hash, amount=row["amount"])
