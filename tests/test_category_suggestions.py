@@ -10,6 +10,7 @@ from app.services.category_suggestions import (
     build_preview_rows,
     extract_keys,
     pick_rule,
+    rule_key,
     rule_lookup_pairs,
 )
 from app.services.merchant_keys import RowKey
@@ -298,10 +299,50 @@ def test_rule_lookup_pairs_are_unique_kind_value_pairs():
     rows = [txn("Pay Bill to 888880 - KPLC PREPAID"), txn("Pay Bill to 888880 - KPLC PREPAID"),
             txn("OverDraft of Credit Party", direction="in")]
     keys = extract_keys(rows, provider="M-Pesa", secret=SECRET)
-    assert rule_lookup_pairs(keys.values()) == [("paybill", "888880")]
+    assert rule_lookup_pairs(keys.values(), Directory.from_rows([], blocked=[])) == [("paybill", "888880")]
 
 
 def test_trailing_star_after_a_space_keeps_the_word_boundary():
     d = Directory.from_rows(merchant("Google", "Subscriptions", patterns=["GOOGLE *"]), blocked=[])
     assert d.match(name_key("GOOGLE *YOUTUBE"), "out") is not None
     assert d.match(name_key("GOOGLEPLEX CAFE"), "out") is None
+
+
+# --- rule keys for blocked numbers (ab-253 PR 2) --------------------------
+
+BLOCKED = [{"number_kind": "paybill", "number": "222222"}]
+
+
+def test_rule_key_uses_the_number_normally():
+    d = Directory.from_rows([], blocked=BLOCKED)
+    assert rule_key(number_key("paybill", "888880", "KPLC PREPAID"), d) == ("paybill", "888880", None)
+
+
+def test_rule_key_for_a_blocked_number_falls_back_to_the_name():
+    d = Directory.from_rows([], blocked=BLOCKED)
+    assert rule_key(number_key("paybill", "222222", "ECITIZEN"), d) == ("name", "ECITIZEN", None)
+    assert rule_key(number_key("paybill", "222222"), d) is None
+
+
+def test_rule_key_keeps_the_provider_for_references_only():
+    d = Directory.from_rows([], blocked=[])
+    ref = RowKey(kind="reference", value="h:abc", provider="NCBA Bank")
+    assert rule_key(ref, d) == ("reference", "h:abc", "NCBA Bank")
+    assert rule_key(RowKey(kind=None, value=None), d) is None
+
+
+def test_preview_uses_the_name_rule_for_a_blocked_number():
+    rows = [txn("Pay Bill Online to 222222 - ECITIZEN Acc. ABC")]
+    keys = extract_keys(rows, provider="M-Pesa", secret=SECRET)
+    d = Directory.from_rows([], blocked=BLOCKED)
+    assert rule_lookup_pairs(keys.values(), d) == [("name", "ECITIZEN")]
+    out = build_preview_rows(rows, keys=keys, directory=d, categories=CATEGORIES,
+                             rules=[stored_rule(UTILITIES, kind="name", value="ECITIZEN")])
+    assert out[0]["suggestion"]["source"] == "your_rule"
+
+
+def test_directory_knows_number():
+    d = Directory.from_rows(merchant("KPLC", "Utilities", numbers=[("paybill", "888880")]), blocked=[])
+    assert d.knows_number("paybill", "888880", "out")
+    assert not d.knows_number("paybill", "888880", "in")
+    assert not d.knows_number("till", "888880", "out")

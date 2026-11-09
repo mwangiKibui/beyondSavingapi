@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import asyncpg
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import get_settings
 from app.core.db import get_pool
@@ -28,7 +28,9 @@ from app.repositories.statement_imports import (
     create_statement_import,
     list_statement_imports,
 )
+from app.repositories.notifications import generate_budget_alerts
 from app.repositories.sub_ledgers import list_sub_ledgers
+from app.services.allocations import AllocationRejected, alert_groups
 from app.services.category_suggestions import (
     Directory,
     build_preview_rows,
@@ -36,6 +38,7 @@ from app.services.category_suggestions import (
     new_category_names,
     rule_lookup_pairs,
 )
+from app.services.import_confirm import ConfirmItem, confirm_import
 from app.services.statement_files import (
     IncorrectStatementPassword,
     check_password,
@@ -97,6 +100,7 @@ class PreviewImport(BaseModel):
     period_end: date | None = None
     row_count: int | None = None
     created_at: datetime
+    reviewed_at: datetime | None = None
 
 
 class PreviewSuggestion(BaseModel):
@@ -335,10 +339,10 @@ async def preview_statement_import_endpoint(
         keys = extract_keys(
             rows, provider=statement_import["provider"], secret=get_settings().suggestion_key_secret
         )
-        rules = await get_user_rules(pool, user_id=user_id, pairs=rule_lookup_pairs(keys.values()))
         directory = Directory.from_rows(
             await get_approved_directory(pool), blocked=await get_blocked_numbers(pool)
         )
+        rules = await get_user_rules(pool, user_id=user_id, pairs=rule_lookup_pairs(keys.values(), directory))
         categories = await get_user_categories(pool, user_id=user_id)
     except HTTPException:
         raise
@@ -362,4 +366,149 @@ async def preview_statement_import_endpoint(
             "suggested": sum(1 for r in preview_rows if r["suggestion"]),
             "new_categories": new_category_names(preview_rows),
         },
+    }
+
+
+def _blank_to_none(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+class ConfirmItemRequest(BaseModel):
+    transaction_id: UUID
+    # Exactly one of category_id / new_category_name (checked in the
+    # handler, like bulk-allocate's shape check).
+    category_id: UUID | None = None
+    new_category_name: str | None = None
+    # The user's private "Who is this?" for the payee.
+    label: str | None = None
+    # Only for rows showing an account reference (NCBA PayBill rows).
+    user_entered_paybill: str | None = Field(default=None, pattern=r"^[0-9]{5,8}$")
+
+    @field_validator("new_category_name", "label", mode="before")
+    @classmethod
+    def _strip(cls, value):
+        return _blank_to_none(value) if isinstance(value, str) else value
+
+    @field_validator("new_category_name")
+    @classmethod
+    def _name_length(cls, value):
+        if value is not None and len(value) > 60:
+            raise ValueError("Category name must be 60 characters or fewer")
+        return value
+
+    @field_validator("label")
+    @classmethod
+    def _label_length(cls, value):
+        if value is not None and len(value) > 40:
+            raise ValueError("Label must be 40 characters or fewer")
+        return value
+
+
+class ConfirmRequest(BaseModel):
+    items: list[ConfirmItemRequest] = Field(min_length=1, max_length=5000)
+
+
+class CreatedCategory(BaseModel):
+    id: UUID
+    name: str
+    type: str
+
+
+class ConfirmResponse(BaseModel):
+    allocated: list[UUID]
+    # Rows already fully allocated (e.g. confirmed in an earlier sitting).
+    skipped: list[UUID]
+    created_categories: list[CreatedCategory]
+    # Rows that taught the user's rules.
+    learned: int
+    reviewed_at: datetime | None = None
+
+
+@router.post("/{import_id}/confirm", response_model=ConfirmResponse)
+async def confirm_statement_import_endpoint(
+    import_id: UUID,
+    body: ConfirmRequest,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """Saves the categories chosen in the preview (ab-253): creates any new
+    categories, allocates the rows, learns the user's rules and shared-list
+    votes, and marks the import reviewed - all in one transaction. Rows
+    left out stay unreconciled; confirming again later is fine."""
+    if pool is None:
+        logger.error("Database pool unavailable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
+        )
+
+    seen: set[UUID] = set()
+    for entry in body.items:
+        if (entry.category_id is None) == (entry.new_category_name is None):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Each row needs exactly one of category_id or new_category_name",
+            )
+        if entry.transaction_id in seen:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="A row appears more than once",
+            )
+        seen.add(entry.transaction_id)
+
+    try:
+        statement_import = await get_import_for_preview(pool, import_id=import_id, user_id=user_id)
+        if statement_import is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Statement import not found")
+        if statement_import["status"] != "parsed":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This statement hasn't finished processing yet",
+            )
+
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                result = await confirm_import(
+                    conn,
+                    user_id=user_id,
+                    statement_import=statement_import,
+                    items=[ConfirmItem(**entry.model_dump()) for entry in body.items],
+                    secret=get_settings().suggestion_key_secret,
+                )
+    except AllocationRejected as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error confirming import %s, user %s", import_id, user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=GENERIC_ERROR_MESSAGE,
+        ) from None
+
+    # After commit, same as bulk-allocate (ab-77): a failure here is logged,
+    # never undoes the saved categories.
+    try:
+        for (category_id, txn_date, currency), amount in alert_groups(
+            result.plan, result.transactions_by_id
+        ).items():
+            await generate_budget_alerts(
+                pool,
+                user_id=user_id,
+                category_id=category_id,
+                txn_date=txn_date,
+                currency=currency,
+                new_amount=amount,
+            )
+    except Exception:
+        logger.error("Unexpected error generating budget alerts after confirm, user %s", user_id, exc_info=True)
+
+    return {
+        "allocated": result.allocated,
+        "skipped": result.skipped,
+        "created_categories": result.created_categories,
+        "learned": result.learned,
+        "reviewed_at": result.reviewed_at,
     }
