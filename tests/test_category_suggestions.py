@@ -10,8 +10,10 @@ from app.services.category_suggestions import (
     build_preview_rows,
     extract_keys,
     pick_rule,
+    pick_shared,
     rule_key,
     rule_lookup_pairs,
+    vote_keys,
 )
 from app.services.merchant_keys import RowKey
 
@@ -172,11 +174,12 @@ def txn(description, *, amount=1000.0, direction="out", allocated=0.0, category_
             "description": description, "allocated": allocated, "category_id": category_id, "is_transfer": is_transfer}
 
 
-def preview(rows, *, provider="M-Pesa", rules=(), directory_rows=(), categories=CATEGORIES):
+def preview(rows, *, provider="M-Pesa", rules=(), directory_rows=(), categories=CATEGORIES, shared_votes=None,
+            blocked=()):
     keys = extract_keys(rows, provider=provider, secret=SECRET)
     return build_preview_rows(
-        rows, keys=keys, rules=list(rules), directory=Directory.from_rows(list(directory_rows), blocked=[]),
-        categories=categories,
+        rows, keys=keys, rules=list(rules), directory=Directory.from_rows(list(directory_rows), blocked=list(blocked)),
+        categories=categories, shared_votes=shared_votes or {},
     )
 
 
@@ -341,8 +344,120 @@ def test_preview_uses_the_name_rule_for_a_blocked_number():
     assert out[0]["suggestion"]["source"] == "your_rule"
 
 
-def test_directory_knows_number():
-    d = Directory.from_rows(merchant("KPLC", "Utilities", numbers=[("paybill", "888880")]), blocked=[])
-    assert d.knows_number("paybill", "888880", "out")
-    assert not d.knows_number("paybill", "888880", "in")
-    assert not d.knows_number("till", "888880", "out")
+
+
+# --- others: what most users chose (ab-253 PR 3, no admin gate) -----------
+
+
+def votes(*pairs):
+    return [{"category_name": name, "users": n} for name, n in pairs]
+
+
+def test_pick_shared_needs_three_voters_and_a_clear_winner():
+    assert pick_shared(votes(("Groceries", 2))) is None                       # only 2 voters
+    assert pick_shared(votes(("Groceries", 3))) == "Groceries"
+    assert pick_shared(votes(("Groceries", 2), ("Household", 1))) == "Groceries"
+    assert pick_shared(votes(("Groceries", 2), ("Household", 2))) is None     # tie
+    assert pick_shared(votes(("A", 1), ("B", 1), ("C", 1))) is None           # nobody agrees
+    assert pick_shared([]) is None
+
+
+def test_vote_keys_follow_the_voting_rules():
+    d = Directory.from_rows([], blocked=[{"number_kind": "paybill", "number": "222222"}])
+    biz = RowKey(kind="till", value="5555555", number_kind="till", number="5555555", name="RUBIS ENERGY LTD",
+                 match_text="RUBIS ENERGY LTD", is_business=True)
+    assert vote_keys(biz, "out", d) == (("name", "RUBIS ENERGY LTD", "out"), ("till", "5555555", "out"))
+    person = RowKey(kind="till", value="7286859", number_kind="till", number="7286859", name="PETER OMONDI",
+                    match_text="PETER OMONDI")
+    assert vote_keys(person, "out", d) == (None, None)
+    nameless = RowKey(kind="till", value="9120385", number_kind="till", number="9120385")
+    assert vote_keys(nameless, "out", d) == (None, ("till", "9120385", "out"))
+    blocked = RowKey(kind="paybill", value="222222", number_kind="paybill", number="222222", name="ECITIZEN LTD",
+                     match_text="ECITIZEN LTD", is_business=True)
+    assert vote_keys(blocked, "out", d) == (("name", "ECITIZEN LTD", "out"), None)
+    assert vote_keys(RowKey(kind="reference", value="h:x", provider="M-Pesa"), "out", d) == (None, None)
+
+
+RUBIS = "Merchant Payment to 6123456 - RUBIS ENERGY LTD"
+FUEL = {"id": uuid4(), "name": "Fuel", "type": "expense"}
+TRANSPORT = {"id": uuid4(), "name": "Transport", "type": "expense"}
+
+
+def test_others_override_the_starter_list():
+    out = preview([txn(RUBIS)], categories=[FUEL, TRANSPORT],
+                  directory_rows=merchant("Rubis", "Transport", patterns=["RUBIS"]),
+                  shared_votes={("name", "RUBIS ENERGY LTD", "out"): votes(("fuel", 3), ("Transport", 1))})
+    s = out[0]["suggestion"]
+    assert (s["source"], s["category_id"], s["is_new_category"]) == ("others", FUEL["id"], False)
+
+
+def test_too_few_voters_falls_back_to_the_starter_list():
+    out = preview([txn(RUBIS)], categories=[FUEL, TRANSPORT],
+                  directory_rows=merchant("Rubis", "Transport", patterns=["RUBIS"]),
+                  shared_votes={("name", "RUBIS ENERGY LTD", "out"): votes(("Fuel", 2))})
+    assert out[0]["suggestion"]["source"] == "directory"
+    assert out[0]["suggestion"]["category_id"] == TRANSPORT["id"]
+
+
+def test_number_votes_beat_name_votes():
+    out = preview([txn(RUBIS)], categories=[FUEL, TRANSPORT], shared_votes={
+        ("name", "RUBIS ENERGY LTD", "out"): votes(("Transport", 5)),
+        ("till", "6123456", "out"): votes(("Fuel", 3)),
+    })
+    assert out[0]["suggestion"]["category_name"] == "Fuel"
+
+
+def test_name_votes_used_when_the_number_has_too_few():
+    out = preview([txn(RUBIS)], categories=[FUEL, TRANSPORT], shared_votes={
+        ("name", "RUBIS ENERGY LTD", "out"): votes(("Transport", 3)),
+        ("till", "6123456", "out"): votes(("Fuel", 2)),
+    })
+    assert out[0]["suggestion"]["category_name"] == "Transport"
+
+
+def test_others_category_the_user_lacks_is_new():
+    out = preview([txn(RUBIS)], categories=[GROCERIES],
+                  shared_votes={("till", "6123456", "out"): votes(("Fuel", 4))})
+    s = out[0]["suggestion"]
+    assert (s["category_id"], s["category_name"], s["is_new_category"]) == (None, "Fuel", True)
+
+
+def test_users_own_rule_and_this_statement_beat_others():
+    shared = {("till", "6123456", "out"): votes(("Fuel", 9))}
+    ruled = preview([txn(RUBIS)], categories=[FUEL, TRANSPORT], shared_votes=shared,
+                    rules=[stored_rule(TRANSPORT, kind="till", value="6123456")])
+    assert ruled[0]["suggestion"]["source"] == "your_rule"
+    done = txn(RUBIS, allocated=1000.0, category_id=TRANSPORT["id"])
+    out = preview([done, txn(RUBIS)], categories=[FUEL, TRANSPORT], shared_votes=shared)
+    assert out[0]["suggestion"]["source"] == "this_statement"
+
+
+def test_person_named_till_never_uses_others():
+    out = preview([txn("Merchant Payment to 7286859 - PETER OMONDI")],
+                  shared_votes={("till", "7286859", "out"): votes(("Groceries", 5))})
+    assert out[0]["suggestion"] is None
+
+
+# --- reference row with a Paybill the user typed (ab-253 item 4) ------------
+
+
+def test_typed_paybill_on_the_list_shows_that_merchants_name():
+    rows = [txn("IB Outgoing Mobile Payments PayBill FTX26232ABCDE 123456")]
+    keys = extract_keys(rows, provider="NCBA Bank", secret=SECRET)
+    rule = {**stored_rule(UTILITIES, kind="reference", value=keys[rows[0]["id"]].value, provider="NCBA Bank"),
+            "user_entered_paybill": "888880"}
+    out = preview(rows, provider="NCBA Bank", rules=[rule],
+                  directory_rows=merchant("KPLC", "Utilities", numbers=[("paybill", "888880")]))
+    assert out[0]["suggestion"]["source"] == "your_rule"
+    assert out[0]["suggestion"]["merchant_name"] == "KPLC"
+    assert out[0]["display_name"] == "KPLC"
+
+
+def test_label_still_beats_the_typed_paybills_merchant_name():
+    rows = [txn("IB Outgoing Mobile Payments PayBill FTX26232ABCDE 123456")]
+    keys = extract_keys(rows, provider="NCBA Bank", secret=SECRET)
+    rule = {**stored_rule(UTILITIES, kind="reference", value=keys[rows[0]["id"]].value, provider="NCBA Bank",
+                          label="Home tokens"), "user_entered_paybill": "888880"}
+    out = preview(rows, provider="NCBA Bank", rules=[rule],
+                  directory_rows=merchant("KPLC", "Utilities", numbers=[("paybill", "888880")]))
+    assert out[0]["display_name"] == "Home tokens"

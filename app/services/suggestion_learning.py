@@ -4,10 +4,12 @@ write; repositories.category_suggestions writes them.
   rules          the user's own memory, one per (key, account, direction,
                  category), with how many rows and their total amount
   labels         the user's "Who is this?" label / typed Paybill, per key
-  merchant_votes one vote per business name not already on the approved
-                 list - 3+ users agreeing makes an admin candidate
-  number_votes   Paybill/Till numbers the list doesn't know, for the admin
-                 "Unknown numbers" lead (counts only)
+  merchant_votes one vote per business name
+  number_votes   one vote per Paybill/Till number
+Votes are read back at preview time: once 3+ distinct users voted and one
+category clearly leads, it's suggested to everyone (source "others") and
+overrides the shared list - no admin gate (2026-11-10). Numbers the list
+doesn't know also feed the admin "Unknown numbers" lead (counts only).
 
 Person-named Tills and reference rows (transfers, NCBA account refs)
 never vote: their keys stay private to the user.
@@ -17,7 +19,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from app.services.category_suggestions import Directory, rule_key
+from app.services.category_suggestions import Directory, rule_key, vote_keys
 from app.services.merchant_keys import RowKey
 
 
@@ -75,16 +77,10 @@ def plan_learning(rows: list[ConfirmedRow], directory: Directory) -> Learning:
             entry["label"] = r.label or entry["label"]
             entry["user_entered_paybill"] = r.user_entered_paybill or entry["user_entered_paybill"]
 
-        if key.kind == "reference":
-            continue
-        if key.is_business and key.name and directory.match(key, r.direction) is None:
+        name_key, number_key = vote_keys(key, r.direction, directory)
+        if name_key:
             merchant.setdefault((key.name, r.direction), Counter())[r.category_name] += 1
-        if (
-            key.number
-            and not directory.is_blocked(key.number_kind, key.number)
-            and not directory.knows_number(key.number_kind, key.number, r.direction)
-            and (key.is_business or not key.name)
-        ):
+        if number_key:
             numbers.setdefault((key.number_kind, key.number, r.direction), Counter())[r.category_name] += 1
 
     return Learning(
