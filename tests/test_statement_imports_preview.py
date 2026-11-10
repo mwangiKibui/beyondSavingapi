@@ -55,7 +55,8 @@ def directory_row(name, category, pattern):
             "key_kind": "name_pattern", "key_value": pattern, "requires_text": False}
 
 
-def patch_reads(monkeypatch, *, imp=None, rows=(), rules=(), directory=(), categories=(GROCERIES,)):
+def patch_reads(monkeypatch, *, imp=None, rows=(), rules=(), directory=(), categories=(GROCERIES,),
+                shared_votes=None):
     mocks = {
         "get_import_for_preview": AsyncMock(return_value=imp),
         "get_import_rows": AsyncMock(return_value=list(rows)),
@@ -63,6 +64,7 @@ def patch_reads(monkeypatch, *, imp=None, rows=(), rules=(), directory=(), categ
         "get_approved_directory": AsyncMock(return_value=list(directory)),
         "get_blocked_numbers": AsyncMock(return_value=[]),
         "get_user_categories": AsyncMock(return_value=list(categories)),
+        "get_shared_votes": AsyncMock(return_value=dict(shared_votes or {})),
     }
     for name, mock in mocks.items():
         monkeypatch.setattr(f"{API}.{name}", mock)
@@ -150,3 +152,61 @@ def test_preview_reads_rows_by_account_and_period_so_reuploads_still_show(client
     kwargs = mocks["get_import_rows"].call_args.kwargs
     assert kwargs == {"import_id": IMPORT_ID, "account_id": imp["account_id"],
                       "period_start": imp["period_start"], "period_end": imp["period_end"]}
+
+
+
+def test_preview_suggests_what_most_users_chose(client, fake_user, fake_pool, monkeypatch):
+    row = txn("Merchant Payment to 6123456 - RUBIS ENERGY LTD")
+    mocks = patch_reads(
+        monkeypatch, imp=import_row(), rows=[row],
+        directory=[directory_row("Rubis", "Transport", "RUBIS")],
+        shared_votes={("till", "6123456", "out"): [{"category_name": "Groceries", "users": 3}]},
+    )
+    body = client.get(f"/statement-imports/{IMPORT_ID}/preview").json()
+    assert body["rows"][0]["suggestion"]["source"] == "others"
+    assert body["rows"][0]["suggestion"]["category_id"] == str(GROCERIES["id"])
+    kwargs = mocks["get_shared_votes"].call_args.kwargs
+    assert kwargs["name_keys"] == [("name", "RUBIS ENERGY LTD", "out")]
+    assert kwargs["number_keys"] == [("till", "6123456", "out")]
+
+
+
+# --- preview.csv ----------------------------------------------------------
+
+CSV_URL = f"/statement-imports/{IMPORT_ID}/preview.csv"
+
+
+def test_csv_requires_auth(client):
+    assert client.get(CSV_URL).status_code == 401
+
+
+def test_csv_returns_503_when_db_unreachable(client, fake_user):
+    assert client.get(CSV_URL).status_code == 503
+
+
+def test_csv_404_and_409_like_the_preview(client, fake_user, fake_pool, monkeypatch):
+    patch_reads(monkeypatch, imp=None)
+    assert client.get(CSV_URL).status_code == 404
+    patch_reads(monkeypatch, imp=import_row(status="pending"))
+    assert client.get(CSV_URL).status_code == 409
+
+
+def test_csv_download_has_every_row_and_a_safe_filename(client, fake_user, fake_pool, monkeypatch):
+    imp = {**import_row(), "file_name": "NCBA Oct/2026 \"statement\".pdf"}
+    open_row = {**txn("Merchant Payment to 5555555 - NAIVAS WESTLANDS"), "balance_after": 900.0,
+                "category_count": 0, "has_uncategorised": False}
+    done = {**txn("=SUM(1)", allocated=1000.0, category_id=GROCERIES["id"]), "balance_after": None,
+            "category_count": 1, "has_uncategorised": False}
+    patch_reads(monkeypatch, imp=imp, rows=[open_row, done],
+                directory=[directory_row("Naivas", "Groceries", "NAIVAS")])
+
+    response = client.get(CSV_URL)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert response.headers["content-disposition"] == 'attachment; filename="NCBA-Oct-2026-statement-suggestions.csv"'
+    lines = response.text.splitlines()
+    assert lines[0].startswith("date,description,payee")
+    assert len(lines) == 3
+    assert "Groceries,no,directory,Naivas," in lines[1]
+    assert lines[2].startswith("2026-10-05,'=SUM(1)") and lines[2].endswith(",Groceries")

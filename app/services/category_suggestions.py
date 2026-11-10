@@ -8,10 +8,14 @@ Order, first hit wins:
   1. your_rule       the user's own memory for this key (user_category_rules)
   2. this_statement  a category the user already gave the same key in this
                      same import
-  3. directory       an approved shared-list merchant, mapped by category
-                     NAME to the user's own category, or suggested as a new
-                     category when the user has none by that name
-(AI suggestions, ab-256, will slot in after 3.)
+  3. others          what most users chose for this Till/Paybill or business
+                     name, once SHARED_MIN_VOTERS+ distinct users voted and
+                     one category clearly leads (no admin gate, 2026-11-10);
+                     overrides the shared list
+  4. directory       an approved shared-list merchant (starter or admin)
+Shared categories (3 and 4) are mapped by NAME to the user's own category,
+or suggested as a new category when the user has none by that name.
+(AI suggestions, ab-256, will slot in after 4.)
 """
 
 import hashlib
@@ -24,6 +28,10 @@ from uuid import UUID
 from app.services.merchant_keys import RowKey, extract_key
 
 CATEGORY_TYPE_FOR_DIRECTION = {"out": "expense", "in": "income"}
+
+# Distinct users who must have voted on a merchant before what they chose
+# is suggested to anyone else.
+SHARED_MIN_VOTERS = 3
 
 
 # --- shared list ----------------------------------------------------------
@@ -93,8 +101,15 @@ class Directory:
     def is_blocked(self, number_kind: str | None, number: str | None) -> bool:
         return (number_kind, number) in self._blocked
 
-    def knows_number(self, number_kind: str | None, number: str | None, direction: str) -> bool:
-        return (number_kind, number, direction) in self._numbers
+    def merchant_for_number(self, number_kind: str, number: str, direction: str) -> Merchant | None:
+        """The merchant a number alone identifies - not blocked, and not a
+        number that only counts together with the merchant's name."""
+        if (number_kind, number) in self._blocked:
+            return None
+        hit = self._numbers.get((number_kind, number, direction))
+        if not hit or hit[1]:
+            return None
+        return self._merchants[hit[0]]
 
     def match(self, key: RowKey, direction: str) -> Merchant | None:
         if key.number and (key.number_kind, key.number) not in self._blocked:
@@ -187,6 +202,55 @@ def rule_lookup_pairs(keys: Iterable[RowKey], directory: "Directory") -> list[tu
     return sorted(pairs)
 
 
+def vote_keys(key: RowKey, direction: str, directory: "Directory") -> tuple[tuple | None, tuple | None]:
+    """(name_key, number_key) a row votes under and reads others' votes by -
+    the same for confirm (votes) and preview (others).
+
+    name_key   ('name', business name, direction): business-looking names only
+    number_key (kind, number, direction): a Paybill/Till that isn't blocked,
+               on a business-looking or nameless row
+    A Till under a person's name, and reference rows (transfers, NCBA
+    account references), never vote or read votes."""
+    if not key.kind or key.kind == "reference":
+        return None, None
+    name_key = ("name", key.name, direction) if key.is_business and key.name else None
+    number_key = (
+        (key.number_kind, key.number, direction)
+        if key.number
+        and not directory.is_blocked(key.number_kind, key.number)
+        and (key.is_business or not key.name)
+        else None
+    )
+    return name_key, number_key
+
+
+def shared_vote_lookups(
+    rows: list[dict], keys: dict[UUID, RowKey], directory: "Directory"
+) -> tuple[list[tuple], list[tuple]]:
+    """Distinct (name_keys, number_keys) to load vote totals for."""
+    names, numbers = set(), set()
+    for row in rows:
+        name_key, number_key = vote_keys(keys[row["id"]], row["direction"], directory)
+        if name_key:
+            names.add(name_key)
+        if number_key:
+            numbers.add(number_key)
+    return sorted(names), sorted(numbers)
+
+
+def pick_shared(votes: list[dict]) -> str | None:
+    """votes: [{category_name, users}] for one merchant. The category most
+    distinct users chose, once SHARED_MIN_VOTERS+ voted and it clearly
+    leads (a tie, or nobody agreeing, gives nothing - so one person's own
+    category name never spreads)."""
+    if sum(v["users"] for v in votes) < SHARED_MIN_VOTERS:
+        return None
+    ranked = sorted(votes, key=lambda v: v["users"], reverse=True)
+    if ranked[0]["users"] < 2 or (len(ranked) > 1 and ranked[1]["users"] == ranked[0]["users"]):
+        return None
+    return ranked[0]["category_name"]
+
+
 def group_key(key: RowKey, direction: str) -> str | None:
     """Opaque id shared by rows the UI should treat as the same payee
     (pick a category for one, offer it for the rest). Hashed so names,
@@ -208,11 +272,14 @@ def build_preview_rows(
     rules: list[dict],
     directory: Directory,
     categories: list[dict],
+    shared_votes: dict[tuple, list[dict]] | None = None,
 ) -> list[dict]:
     """rows: every transaction in the import, each with its allocated
     total and (when its allocations use exactly one category) category_id.
+    shared_votes: vote totals keyed by vote_keys() tuples.
     Returns the open rows - nothing allocated yet, not a transfer - each
     with its suggestion or None."""
+    shared_votes = shared_votes or {}
     by_id = {c["id"]: c for c in categories}
     by_name = {(c["name"].strip().lower(), c["type"]): c for c in categories}
 
@@ -235,7 +302,7 @@ def build_preview_rows(
         direction = row["direction"]
         wanted_type = CATEGORY_TYPE_FOR_DIRECTION[direction]
         g = group_key(key, direction)
-        suggestion, label = None, None
+        suggestion, label, known_as = None, None, None
 
         rk = rule_key(key, directory)
         if rk:
@@ -247,6 +314,13 @@ def build_preview_rows(
             if picked:
                 label = next((r["label"] for r in candidates if r["label"]), None)
                 suggestion = _existing(by_id[picked["category_id"]], "your_rule")
+                # A Paybill the user typed for a reference row names the
+                # merchant for them, if the shared list knows it.
+                typed = next((r.get("user_entered_paybill") for r in candidates if r.get("user_entered_paybill")), None)
+                merchant = typed and directory.merchant_for_number("paybill", typed, direction)
+                if merchant:
+                    known_as = merchant.display_name
+                    suggestion["merchant_name"] = merchant.display_name
 
         if suggestion is None and g in chosen:
             ranked = chosen[g].most_common(2)
@@ -256,15 +330,17 @@ def build_preview_rows(
                     suggestion = _existing(category, "this_statement")
 
         if suggestion is None:
+            name_key, number_key = vote_keys(key, direction, directory)
+            for vote_key in (number_key, name_key):
+                chosen_name = vote_key and pick_shared(shared_votes.get(vote_key, []))
+                if chosen_name:
+                    suggestion = _shared(chosen_name, by_name, wanted_type, "others")
+                    break
+
+        if suggestion is None:
             merchant = directory.match(key, direction)
             if merchant:
-                category = by_name.get((merchant.category_name.strip().lower(), wanted_type))
-                suggestion = (
-                    _existing(category, "directory")
-                    if category
-                    else {"category_id": None, "category_name": merchant.category_name,
-                          "is_new_category": True, "source": "directory"}
-                )
+                suggestion = _shared(merchant.category_name, by_name, wanted_type, "directory")
                 suggestion["merchant_name"] = merchant.display_name
 
         out.append({
@@ -274,7 +350,7 @@ def build_preview_rows(
             "currency": row["currency"],
             "direction": direction,
             "description": row["description"],
-            "display_name": label or key.name or key.display or row["description"] or "",
+            "display_name": label or key.name or known_as or key.display or row["description"] or "",
             "label": label,
             "group_key": g,
             "key_kind": key.kind,
@@ -285,6 +361,16 @@ def build_preview_rows(
             "suggestion": suggestion,
         })
     return out
+
+
+def _shared(category_name: str, by_name: dict, wanted_type: str, source: str) -> dict:
+    """A shared category name mapped to the user's own category (ignoring
+    case, same type), or suggested as a new one."""
+    category = by_name.get((category_name.strip().lower(), wanted_type))
+    if category:
+        return _existing(category, source)
+    return {"category_id": None, "category_name": category_name.strip(), "is_new_category": True,
+            "source": source, "merchant_name": None}
 
 
 def _existing(category: dict, source: str) -> dict:

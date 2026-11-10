@@ -1,10 +1,11 @@
 import logging
+import re
 from datetime import date, datetime
 from typing import Literal
 from uuid import UUID, uuid4
 
 import asyncpg
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import get_settings
@@ -20,6 +21,7 @@ from app.repositories.category_suggestions import (
     get_blocked_numbers,
     get_import_for_preview,
     get_import_rows,
+    get_shared_votes,
     get_user_categories,
     get_user_rules,
 )
@@ -37,8 +39,10 @@ from app.services.category_suggestions import (
     extract_keys,
     new_category_names,
     rule_lookup_pairs,
+    shared_vote_lookups,
 )
 from app.services.import_confirm import ConfirmItem, confirm_import
+from app.services.preview_csv import build_preview_csv
 from app.services.statement_files import (
     IncorrectStatementPassword,
     check_password,
@@ -108,7 +112,9 @@ class PreviewSuggestion(BaseModel):
     category_id: UUID | None = None
     category_name: str
     is_new_category: bool
-    source: Literal["your_rule", "this_statement", "directory"]
+    # others = what most users chose (3+ voted, a clear leader); overrides
+    # directory (the starter/admin list).
+    source: Literal["your_rule", "this_statement", "others", "directory"]
     merchant_name: str | None = None
 
 
@@ -300,25 +306,9 @@ async def upload_statement_endpoint(
     return statement_import
 
 
-@router.get(
-    "/{import_id}/preview",
-    response_model=StatementImportPreviewResponse,
-    response_model_by_alias=True,
-)
-async def preview_statement_import_endpoint(
-    import_id: UUID,
-    user_id: UUID = Depends(get_current_user_id),
-    pool: asyncpg.Pool | None = Depends(get_pool),
-) -> dict:
-    """The import's open rows (nothing allocated yet, not a transfer) with
-    a suggested category each where one is known (ab-253). Read-only:
-    categories are only saved by the confirm step."""
-    if pool is None:
-        logger.error("Database pool unavailable")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
-        )
-
+async def _load_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id: UUID) -> dict:
+    """Everything the preview and its CSV are built from. Raises the 404 /
+    409 / 500 HTTPExceptions both endpoints share."""
     try:
         statement_import = await get_import_for_preview(pool, import_id=import_id, user_id=user_id)
         if statement_import is None:
@@ -344,6 +334,8 @@ async def preview_statement_import_endpoint(
         )
         rules = await get_user_rules(pool, user_id=user_id, pairs=rule_lookup_pairs(keys.values(), directory))
         categories = await get_user_categories(pool, user_id=user_id)
+        name_keys, number_keys = shared_vote_lookups(rows, keys, directory)
+        shared_votes = await get_shared_votes(pool, name_keys=name_keys, number_keys=number_keys)
     except HTTPException:
         raise
     except Exception:
@@ -356,10 +348,43 @@ async def preview_statement_import_endpoint(
         ) from None
 
     preview_rows = build_preview_rows(
-        rows, keys=keys, rules=rules, directory=directory, categories=categories
+        rows, keys=keys, rules=rules, directory=directory, categories=categories, shared_votes=shared_votes
     )
     return {
         "import": statement_import,
+        "rows": rows,
+        "keys": keys,
+        "categories": categories,
+        "preview_rows": preview_rows,
+    }
+
+
+def _require_pool(pool: asyncpg.Pool | None) -> None:
+    if pool is None:
+        logger.error("Database pool unavailable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
+        )
+
+
+@router.get(
+    "/{import_id}/preview",
+    response_model=StatementImportPreviewResponse,
+    response_model_by_alias=True,
+)
+async def preview_statement_import_endpoint(
+    import_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """The import's open rows (nothing allocated yet, not a transfer) with
+    a suggested category each where one is known (ab-253). Read-only:
+    categories are only saved by the confirm step."""
+    _require_pool(pool)
+    loaded = await _load_preview(pool, import_id=import_id, user_id=user_id)
+    preview_rows = loaded["preview_rows"]
+    return {
+        "import": loaded["import"],
         "rows": preview_rows,
         "summary": {
             "open_rows": len(preview_rows),
@@ -367,6 +392,31 @@ async def preview_statement_import_endpoint(
             "new_categories": new_category_names(preview_rows),
         },
     }
+
+
+@router.get("/{import_id}/preview.csv", response_class=Response)
+async def preview_statement_import_csv_endpoint(
+    import_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> Response:
+    """The preview as a CSV download (ab-253): every row the statement
+    covers, with its suggestion while open and its chosen category once
+    categorised, to compare with the user's own records."""
+    _require_pool(pool)
+    loaded = await _load_preview(pool, import_id=import_id, user_id=user_id)
+    content = build_preview_csv(
+        loaded["rows"],
+        preview_rows=loaded["preview_rows"],
+        categories=loaded["categories"],
+        keys=loaded["keys"],
+    )
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", loaded["import"]["file_name"].rsplit(".", 1)[0]).strip("-") or "statement"
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{stem}-suggestions.csv"'},
+    )
 
 
 def _blank_to_none(value: str | None) -> str | None:

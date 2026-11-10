@@ -8,6 +8,7 @@ import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
+from app.core.config import get_settings
 from app.core.db import get_pool
 from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.security import get_current_user_id
@@ -26,6 +27,7 @@ from app.repositories.transactions import (
     list_transactions,
 )
 from app.repositories.transfer_reasons import get_transfer_reasons_by_ids
+from app.services.rule_updates import remember_preferred
 from app.services.allocations import (
     CATEGORY_TYPE_FOR_DIRECTION,
     AllocationRejected,
@@ -216,6 +218,9 @@ class AllocationCreateItem(BaseModel):
 
 class CreateAllocationsRequest(BaseModel):
     allocations: list[AllocationCreateItem] = Field(min_length=1)
+    # ab-253 "use this from now on": when every split uses one category,
+    # make it the category suggested for this payee on future statements.
+    update_rule: bool = False
 
 
 @router.post(
@@ -399,6 +404,16 @@ async def create_allocations_endpoint(
                 exc_info=True,
             )
 
+        # ab-253: never breaks the allocation either.
+        split_categories = {item.category_id for item in body.allocations}
+        if (
+            body.update_rule
+            and len(split_categories) == 1
+            and None not in split_categories
+            and all(item.transfer_reason_id is None for item in body.allocations)
+        ):
+            await _remember(pool, user_id=user_id, category_by_transaction={transaction_id: split_categories.pop()})
+
         transaction = await get_transaction(pool, transaction_id=transaction_id, user_id=user_id)
         allocations = await get_allocations(pool, transaction_id=transaction_id)
     except HTTPException:
@@ -415,6 +430,22 @@ async def create_allocations_endpoint(
     return {**transaction, "allocations": allocations}
 
 
+async def _remember(pool: asyncpg.Pool, *, user_id: UUID, category_by_transaction: dict[UUID, UUID]) -> None:
+    """update_rule (ab-253): logged on failure, never fails the request -
+    the allocations are already saved."""
+    if not category_by_transaction:
+        return
+    try:
+        await remember_preferred(
+            pool,
+            user_id=user_id,
+            category_by_transaction=category_by_transaction,
+            secret=get_settings().suggestion_key_secret,
+        )
+    except Exception:
+        logger.error("Unexpected error remembering categories for user %s", user_id, exc_info=True)
+
+
 class BulkAllocationMapping(BaseModel):
     transaction_id: UUID
     category_id: UUID | None = None
@@ -429,6 +460,8 @@ class BulkAllocateRequest(BaseModel):
     transaction_ids: list[UUID] | None = None
     category_id: UUID | None = None
     allocations: list[BulkAllocationMapping] | None = None
+    # ab-253 "use this from now on" for every row given a category.
+    update_rule: bool = False
 
 
 class BulkAllocateResponse(BaseModel):
@@ -523,6 +556,15 @@ async def bulk_allocate_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=GENERIC_ERROR_MESSAGE,
         ) from None
+
+    if body.update_rule:
+        await _remember(
+            pool,
+            user_id=user_id,
+            category_by_transaction={
+                tid: cid for tid, cid in zip(plan.transaction_ids, plan.category_ids) if cid is not None
+            },
+        )
 
     return {"updated": plan.updated, "skipped": plan.skipped}
 

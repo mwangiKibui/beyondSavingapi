@@ -93,9 +93,9 @@ def test_unmatched_business_name_votes():
     assert learning.merchant_votes == [{"merchant_key": "RUBIS ENERGY LTD", "direction": "out", "category_name": "Fuel"}]
 
 
-def test_name_already_on_the_approved_list_does_not_vote():
+def test_name_already_on_the_shared_list_still_votes_so_users_can_override_it():
     learning = plan_learning([row(business_till())], directory(known("Rubis", "Transport", patterns=["RUBIS"])))
-    assert learning.merchant_votes == []
+    assert learning.merchant_votes == [{"merchant_key": "RUBIS ENERGY LTD", "direction": "out", "category_name": "Fuel"}]
 
 
 def test_person_named_till_never_votes():
@@ -131,6 +131,13 @@ def test_nameless_number_votes():
     assert len(plan_learning([row(key)], directory()).number_votes) == 1
 
 
-def test_number_already_on_the_list_does_not_vote():
+def test_number_already_on_the_list_still_votes():
     d = directory(known("Rubis", "Transport", numbers=[("till", "5555555")]))
-    assert plan_learning([row(business_till())], d).number_votes == []
+    assert len(plan_learning([row(business_till())], d).number_votes) == 1
+
+
+def test_blocked_number_never_votes_but_its_business_name_does():
+    key = RowKey(kind="paybill", value="222222", number_kind="paybill", number="222222", name="ECITIZEN LTD",
+                 match_text="ECITIZEN LTD", is_business=True)
+    learning = plan_learning([row(key)], directory())
+    assert learning.number_votes == [] and len(learning.merchant_votes) == 1
