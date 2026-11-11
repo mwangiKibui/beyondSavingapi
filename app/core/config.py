@@ -9,10 +9,14 @@ class Settings(BaseSettings):
     app_env: str = "development"
     database_url: str
     redis_url: str
-    minio_endpoint: str
-    minio_access_key: str
-    minio_secret_key: str
-    minio_bucket: str = "statements"
+    # Any S3-compatible store: RustFS locally (docker-compose `storage`),
+    # DigitalOcean Spaces in test/prod (e.g. https://fra1.digitaloceanspaces.com,
+    # region fra1). Switching is env-only - see README "Object storage" (ab-263).
+    storage_endpoint: str = "http://localhost:9000"
+    storage_region: str = "us-east-1"
+    storage_access_key: str
+    storage_secret_key: str
+    storage_bucket: str = "statements"
     jwt_secret: str
     jwt_algorithm: str = "HS256"
     # Keys the HMAC that hashes private category-suggestion keys (account

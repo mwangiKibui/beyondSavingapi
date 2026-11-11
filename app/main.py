@@ -38,9 +38,9 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     settings = get_settings()
     try:
-        ensure_bucket(settings.minio_bucket)
+        ensure_bucket(settings.storage_bucket)
     except Exception:
-        logger.warning("Could not reach MinIO at startup; continuing in a degraded state.", exc_info=True)
+        logger.warning("Could not reach object storage at startup; continuing in a degraded state.", exc_info=True)
 
     try:
         app.state.db_pool = await asyncpg.create_pool(settings.database_url, timeout=5)
@@ -93,7 +93,7 @@ async def health():
         redis_status = "unreachable"
 
     try:
-        get_storage_client().head_bucket(Bucket=settings.minio_bucket)
+        get_storage_client().head_bucket(Bucket=settings.storage_bucket)
         storage_status = "ok"
     except Exception:
         storage_status = "unreachable"

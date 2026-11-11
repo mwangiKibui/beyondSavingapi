@@ -289,7 +289,7 @@ async def upload_statement_endpoint(
 
         settings = get_settings()
         get_storage_client().put_object(
-            Bucket=settings.minio_bucket, Key=storage_key, Body=content
+            Bucket=settings.storage_bucket, Key=storage_key, Body=content
         )
 
         statement_import = await create_statement_import(

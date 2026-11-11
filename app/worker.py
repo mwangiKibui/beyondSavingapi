@@ -177,7 +177,7 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
         settings = get_settings()
         content = (
             get_storage_client()
-            .get_object(Bucket=settings.minio_bucket, Key=record["storage_key"])["Body"]
+            .get_object(Bucket=settings.storage_bucket, Key=record["storage_key"])["Body"]
             .read()
         )
         try:
