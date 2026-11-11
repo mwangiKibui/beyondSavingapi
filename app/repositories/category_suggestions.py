@@ -16,7 +16,7 @@ async def get_import_for_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id
         """
         SELECT si.id, si.account_id, a.nickname AS account_nickname, a.provider,
                si.file_name, si.status, si.period_start, si.period_end, si.row_count, si.created_at,
-               si.reviewed_at
+               si.reviewed_at, si.error_detail
         FROM statement_imports si
         JOIN accounts a ON a.id = si.account_id
         WHERE si.id = $1 AND a.user_id = $2

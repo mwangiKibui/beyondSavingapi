@@ -617,6 +617,8 @@ class ProgressResponse(BaseModel):
     reviewed_count: int
     total_count: int
     updated_at: datetime | None = None
+    # Why the parse failed, for the wizard's Processing step (ab-266).
+    error_detail: str | None = None
 
 
 class SaveProgressRequest(BaseModel):
@@ -659,8 +661,14 @@ async def get_import_progress_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
         ) from None
     if saved is not None:
-        return saved
-    return {"step": _derived_step(statement_import), "draft": Draft(), "reviewed_count": 0, "total_count": 0}
+        return {**saved, "error_detail": None}
+    return {
+        "step": _derived_step(statement_import),
+        "draft": Draft(),
+        "reviewed_count": 0,
+        "total_count": 0,
+        "error_detail": statement_import.get("error_detail") if statement_import["status"] == "failed" else None,
+    }
 
 
 @router.put("/{import_id}/progress", response_model=ProgressResponse)

@@ -42,8 +42,8 @@ def fake_user():
     app.dependency_overrides.pop(get_current_user_id, None)
 
 
-def import_row(status="parsed", reviewed_at=None):
-    return {"id": IMPORT_ID, "account_id": uuid4(), "account_nickname": "My M-Pesa", "provider": "M-Pesa",
+def import_row(status="parsed", reviewed_at=None, error_detail=None):
+    return {"id": IMPORT_ID, "error_detail": error_detail, "account_id": uuid4(), "account_nickname": "My M-Pesa", "provider": "M-Pesa",
             "file_name": "statement.pdf", "status": status, "period_start": date(2026, 10, 1),
             "period_end": date(2026, 10, 31), "row_count": 3, "reviewed_at": reviewed_at,
             "created_at": datetime(2026, 11, 1, tzinfo=timezone.utc)}
@@ -120,7 +120,14 @@ def test_without_saved_progress_the_step_comes_from_the_import(client, fake_user
     patch_repo(monkeypatch, imp=import_row(status, reviewed_at))
     body = client.get(url()).json()
     assert body == {"step": step, "draft": {"rows": {}, "labels": {}, "paybills": {}},
-                    "reviewed_count": 0, "total_count": 0, "updated_at": None}
+                    "reviewed_count": 0, "total_count": 0, "updated_at": None, "error_detail": None}
+
+
+def test_a_failed_parse_says_why(client, fake_user, fake_pool, monkeypatch):
+    """ab-266: the wizard's Processing step shows the reason."""
+    patch_repo(monkeypatch, imp=import_row("failed", error_detail="This file doesn't look like an M-Pesa statement."))
+    body = client.get(url()).json()
+    assert (body["step"], body["error_detail"]) == ("failed", "This file doesn't look like an M-Pesa statement.")
 
 
 def test_saved_progress_is_returned(client, fake_user, fake_pool, monkeypatch):
