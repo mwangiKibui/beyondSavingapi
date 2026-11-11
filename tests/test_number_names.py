@@ -170,3 +170,9 @@ def test_a_nameless_number_the_list_owns_shows_the_merchant_name_whatever_the_su
     out = build_preview_rows([row], keys=keyed([row], "NCBA Bank"), rules=[rule], directory=d, categories=[cat])
     assert out[0]["suggestion"]["source"] == "your_rule"
     assert out[0]["display_name"] == "Naivas" and out[0]["name_learned"] is False
+
+
+def test_person_rows_are_never_sighted_ab269():
+    rows = [txn("Customer Transfer Fuliza MPesa to - 254700***000 JOHN DOE"),
+            txn("Funds received from - 254711***111 JANE ROE", direction="in")]
+    assert name_sightings(rows, keyed(rows, "M-Pesa"), EMPTY) == []

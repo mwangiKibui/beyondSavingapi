@@ -76,6 +76,9 @@ class RowKey:
     name_learned: bool = False  # name borrowed from other users' M-Pesa rows (ab-253 PR 4)
     row_kind: str | None = None  # see the module docstring (ab-260)
     paid_with_overdraft: bool = False  # Fuliza covered (part of) this purchase - informational only
+    # ab-269: a payment to/from a person (or an unnamed sender). The uploader
+    # sees the statement text as the payee; nothing about it is shared.
+    is_person: bool = False
 
 
 def normalize_text(text: str | None) -> str:
@@ -133,6 +136,7 @@ def _person_row(provider: str, identity: str, *, secret: str, match_text: str = 
         provider=provider,
         display="Transfer",
         match_text=match_text,
+        is_person=True,
     )
 
 

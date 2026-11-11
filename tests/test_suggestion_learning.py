@@ -141,3 +141,26 @@ def test_blocked_number_never_votes_but_its_business_name_does():
                  match_text="ECITIZEN LTD", is_business=True)
     learning = plan_learning([row(key)], directory())
     assert learning.number_votes == [] and len(learning.merchant_votes) == 1
+
+
+# --- ab-269: person rows show statement text to the uploader, never shared ---
+
+
+def test_person_rows_from_real_statement_text_never_vote_or_carry_the_text():
+    from app.services.merchant_keys import extract_key
+
+    texts = [
+        ("M-Pesa", "Customer Transfer Fuliza MPesa to - 254700***000 JOHN DOE", "out"),
+        ("M-Pesa", "Funds received from - 254711***111 JANE ROE", "in"),
+        ("NCBA Bank", "MPESA PAYBILL TRANSFER MPESA REF: TJK12AB34C JANE ROE", "in"),
+    ]
+    rows = [
+        row(extract_key(provider=p, description=t, direction=d, secret="s"), direction=d)
+        for p, t, d in texts
+    ]
+    learning = plan_learning(rows, directory())
+    assert learning.merchant_votes == [] and learning.number_votes == []
+    # Only the user's own rules are written, keyed by the private hash.
+    dumped = repr(learning)
+    for word in ("JOHN", "JANE", "254700", "254711", "Customer Transfer"):
+        assert word not in dumped
