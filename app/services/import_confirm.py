@@ -28,6 +28,7 @@ from app.repositories.category_suggestions import (
     upsert_number_votes,
     upsert_rules,
 )
+from app.repositories.import_progress import delete_progress
 from app.repositories.transactions import insert_bulk_allocations
 from app.services.allocations import (
     CATEGORY_TYPE_FOR_DIRECTION,
@@ -178,6 +179,8 @@ async def confirm_import(
     await upsert_merchant_votes(conn, user_id=user_id, votes=learning.merchant_votes)
     await upsert_number_votes(conn, user_id=user_id, votes=learning.number_votes)
     reviewed_at = await mark_import_reviewed(conn, import_id=statement_import["id"])
+    # ab-265: finished - the saved progress has done its job.
+    await delete_progress(conn, import_id=statement_import["id"])
 
     return ConfirmResult(
         allocated=plan.updated,

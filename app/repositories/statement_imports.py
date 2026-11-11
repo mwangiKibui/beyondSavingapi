@@ -22,9 +22,12 @@ async def list_statement_imports(
         SELECT
             si.id, si.account_id, a.nickname AS account_nickname, si.file_name,
             si.status, si.period_start, si.period_end, si.row_count,
-            si.error_detail, si.created_at
+            si.error_detail, si.created_at, si.reviewed_at,
+            p.step AS progress_step, p.reviewed_count AS progress_reviewed_count,
+            p.total_count AS progress_total_count, p.updated_at AS progress_updated_at
         FROM statement_imports si
         JOIN accounts a ON a.id = si.account_id
+        LEFT JOIN statement_import_progress p ON p.import_id = si.id
         WHERE a.user_id = $1
           AND ($2::text IS NULL OR si.file_name ILIKE '%' || $2 || '%')
           AND ($3::text IS NULL OR si.status = $3)

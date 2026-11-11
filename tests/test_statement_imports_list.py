@@ -62,7 +62,8 @@ def test_list_statement_imports_defaults(client, fake_user, fake_pool, monkeypat
 
     assert response.status_code == 200
     body = response.json()
-    assert body == {"items": [SAMPLE_ITEM], "total": 1, "page": 1, "page_size": 10}
+    assert body == {"items": [{**SAMPLE_ITEM, "reviewed_at": None, "progress": None}], "total": 1, "page": 1,
+                    "page_size": 10}
 
     _, kwargs = mock_list.call_args
     assert kwargs["user_id"] == fake_user
@@ -133,3 +134,20 @@ def test_list_statement_imports_logs_and_returns_generic_500_on_unexpected_error
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(error_records) == 1
     assert error_records[0].exc_info is not None
+
+
+def test_list_includes_review_progress(client, fake_user, fake_pool, monkeypatch):
+    """ab-265: the list shows where each import's review is."""
+    reviewing = {**SAMPLE_ITEM, "id": str(uuid4()), "status": "parsed", "reviewed_at": None,
+                 "progress_step": "review", "progress_reviewed_count": 12, "progress_total_count": 40,
+                 "progress_updated_at": "2026-11-11T12:00:00Z"}
+    done = {**SAMPLE_ITEM, "id": str(uuid4()), "status": "parsed", "reviewed_at": "2026-11-10T09:00:00Z",
+            "progress_step": None, "progress_reviewed_count": None, "progress_total_count": None,
+            "progress_updated_at": None}
+    monkeypatch.setattr("app.api.statement_imports.list_statement_imports",
+                        AsyncMock(return_value=([reviewing, done], 2)))
+    items = client.get("/statement-imports").json()["items"]
+    assert items[0]["progress"] == {"step": "review", "reviewed_count": 12, "total_count": 40,
+                                    "updated_at": "2026-11-11T12:00:00Z"}
+    assert items[0]["reviewed_at"] is None
+    assert items[1]["progress"] is None and items[1]["reviewed_at"] == "2026-11-10T09:00:00Z"
