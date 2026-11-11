@@ -137,6 +137,24 @@ def test_preview_uses_the_accounts_provider_for_parsing(client, fake_user, fake_
     assert body["rows"][0]["key_kind"] == "till"
 
 
+def test_preview_labels_loan_and_overdraft_rows(client, fake_user, fake_pool, monkeypatch):
+    # ab-260
+    repay = txn("M-Shwari Loan Repayment")
+    payout = txn("M-Shwari Loan Disburse", direction="in")
+    draw = txn("OverDraft of Credit Party", direction="in")
+    fuel = txn("Merchant Payment Fuliza M-Pesa to 5550001 - SAMPLE FUEL STATION LTD")
+    patch_reads(monkeypatch, imp=import_row(), rows=[repay, payout, draw, fuel],
+                directory=[directory_row("M-Shwari loan", "Loan Repayment", "M-SHWARI LOAN REPAYMENT")])
+    body = client.get(f"/statement-imports/{IMPORT_ID}/preview").json()
+    rows = {r["transaction_id"]: r for r in body["rows"]}
+    assert rows[str(repay["id"])]["suggestion"]["category_name"] == "Loan Repayment"
+    assert rows[str(repay["id"])]["row_kind"] is None
+    assert (rows[str(payout["id"])]["row_kind"], rows[str(payout["id"])]["suggestion"]) == ("loan_payout", None)
+    assert rows[str(draw["id"])]["row_kind"] == "overdraft_draw"
+    assert rows[str(fuel["id"])]["paid_with_overdraft"] is True
+    assert rows[str(repay["id"])]["paid_with_overdraft"] is False
+
+
 def test_preview_returns_generic_500_on_unexpected_error(client, fake_user, fake_pool, monkeypatch):
     patch_reads(monkeypatch, imp=import_row())
     monkeypatch.setattr(f"{API}.get_import_rows", AsyncMock(side_effect=RuntimeError("db exploded")))

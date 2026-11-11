@@ -466,6 +466,8 @@ def build_preview_rows(
             "is_business": key.is_business,
             "is_transfer_hint": key.is_transfer_hint,
             "name_learned": key.name_learned,
+            "row_kind": key.row_kind,
+            "paid_with_overdraft": key.paid_with_overdraft,
             "suggestion": suggestion,
         })
     return out

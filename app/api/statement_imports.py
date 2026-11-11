@@ -139,6 +139,13 @@ class PreviewRow(BaseModel):
     is_transfer_hint: bool
     # display_name was learned from other users' M-Pesa statements.
     name_learned: bool = False
+    # ab-260: set on rows that never get a category suggestion, so the UI
+    # can label them (borrowed money is not income; Fuliza is counted via
+    # the purchase it covered; SACCO loan-ledger rows are counted once on
+    # the savings ledger).
+    row_kind: Literal["loan_payout", "loan_request", "overdraft_draw", "overdraft_repayment", "loan_ledger"] | None = None
+    # Fuliza covered (part of) this purchase. Informational only.
+    paid_with_overdraft: bool = False
     suggestion: PreviewSuggestion | None = None
 
 
