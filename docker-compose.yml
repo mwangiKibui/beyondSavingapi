@@ -7,9 +7,9 @@ services:
       APP_ENV: ${APP_ENV:-development}
       DATABASE_URL: postgresql://${POSTGRES_USER:-beyondsaving}:${POSTGRES_PASSWORD:-beyondsaving}@postgres:5432/${POSTGRES_DB:-beyondsaving}
       REDIS_URL: redis://redis:6379/0
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      STORAGE_ENDPOINT: http://storage:9000
+      STORAGE_ACCESS_KEY: ${STORAGE_ACCESS_KEY:-storageadmin}
+      STORAGE_SECRET_KEY: ${STORAGE_SECRET_KEY:-storageadmin}
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
       SUGGESTION_KEY_SECRET: ${SUGGESTION_KEY_SECRET:-dev-suggestion-secret-change-me}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
@@ -20,7 +20,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
+      storage:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -32,9 +32,9 @@ services:
       APP_ENV: ${APP_ENV:-development}
       DATABASE_URL: postgresql://${POSTGRES_USER:-beyondsaving}:${POSTGRES_PASSWORD:-beyondsaving}@postgres:5432/${POSTGRES_DB:-beyondsaving}
       REDIS_URL: redis://redis:6379/0
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      STORAGE_ENDPOINT: http://storage:9000
+      STORAGE_ACCESS_KEY: ${STORAGE_ACCESS_KEY:-storageadmin}
+      STORAGE_SECRET_KEY: ${STORAGE_SECRET_KEY:-storageadmin}
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
       SUGGESTION_KEY_SECRET: ${SUGGESTION_KEY_SECRET:-dev-suggestion-secret-change-me}
     volumes:
@@ -45,7 +45,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
+      storage:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -90,19 +90,21 @@ services:
       timeout: 5s
       retries: 10
 
-  minio:
-    image: quay.io/minio/minio:latest
-    command: server /data --console-address ":9001"
+  # Local stand-in for DigitalOcean Spaces (test/prod). Any S3-compatible
+  # store works; MinIO's images stopped being published in 2026 (ab-263).
+  storage:
+    image: rustfs/rustfs:1.0.4
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      RUSTFS_ACCESS_KEY: ${STORAGE_ACCESS_KEY:-storageadmin}
+      RUSTFS_SECRET_KEY: ${STORAGE_SECRET_KEY:-storageadmin}
+      RUSTFS_CONSOLE_ENABLE: "true"
     ports:
-      - "${MINIO_API_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "${STORAGE_API_PORT:-9000}:9000"
+      - "${STORAGE_CONSOLE_PORT:-9001}:9001"
     volumes:
-      - minio_data:/data
+      - storage_data:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "curl", "-fs", "http://localhost:9000/health/ready"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -110,4 +112,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  minio_data:
+  storage_data:
