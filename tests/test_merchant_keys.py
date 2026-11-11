@@ -187,8 +187,11 @@ def test_ncba_charges_are_name_keys():
     assert key("NCBA Bank", "MOBILE PAYMENTS CHARGES 254700000000 FTC260813ABCD").value == "MOBILE PAYMENTS CHARGES"
 
 
-def test_ncba_loan_rows_get_no_key():
-    assert key("NCBA Bank", "AA LOAN REPAYMENT 1234567 AA26232ABCD FT26232ABCDE").kind is None
+def test_ncba_loan_rows_get_a_private_per_loan_key():
+    # ab-260: was keyless; now one private reference per loan account
+    # (more cases in tests/test_loan_rows.py).
+    k = key("NCBA Bank", "AA LOAN REPAYMENT 1234567 AA26232ABCD FT26232ABCDE")
+    assert k.kind == "reference" and "1234567" not in k.value
 
 
 def test_ncba_incoming_person_payment_is_private():

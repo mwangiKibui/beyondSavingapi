@@ -10,8 +10,15 @@ A row gets one key:
   reference  a keyed hash of something private: an NCBA account
              reference, or a person on the other side of a transfer.
              Only ever used for that user's own memory.
-  None       nothing to learn from (Fuliza overdrafts, loans, own-account
-             transfers) - no suggestion.
+  None       nothing to learn from (Fuliza overdrafts, loan payouts,
+             own-account transfers) - no suggestion.
+
+Some keyless rows also get a row_kind (ab-260) so the review screen can
+label them instead of offering a category: loan_payout (borrowed money
+is not income), loan_request, overdraft_draw / overdraft_repayment
+(Fuliza: the purchase it covered is already an expense) and loan_ledger
+(a SACCO loan ledger's own rows - the repayment is counted once, on the
+savings ledger).
 
 is_business decides whether a row may use and vote into the shared list.
 When unsure (e.g. a Till registered under a personal name) it is False:
@@ -26,10 +33,11 @@ transaction text.
 import hashlib
 import hmac
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 MPESA = "M-Pesa"
 NCBA = "NCBA Bank"
+MENTOR = "Mentor Sacco"
 
 _BUSINESS_TOKENS = {
     "LTD", "LIMITED", "PLC", "CO", "COMPANY", "ENTERPRISE", "ENTERPRISES", "SUPERMARKET", "SUPERMARKETS",
@@ -66,6 +74,8 @@ class RowKey:
     display: str = ""  # short label for rows with no readable name
     is_transfer_hint: bool = False
     name_learned: bool = False  # name borrowed from other users' M-Pesa rows (ab-253 PR 4)
+    row_kind: str | None = None  # see the module docstring (ab-260)
+    paid_with_overdraft: bool = False  # Fuliza covered (part of) this purchase - informational only
 
 
 def normalize_text(text: str | None) -> str:
@@ -142,13 +152,24 @@ _MPESA_TILL = re.compile(r"^MERCHANT PAYMENT TO (\d{4,8}) - (.+)$")
 _MPESA_B2C = re.compile(r"^BUSINESS PAYMENT FROM (\d{4,8}) - (.+?) VIA API\b")
 _MPESA_BUNDLE = re.compile(r"^(?:RECHARGE FOR CUSTOMER|CUSTOMER BUNDLE PURCHASE)(?: WITH)? TO (\d{4,8}) ?([A-Z].*?)(?: BY - .*)?$")
 _MPESA_PERSON = re.compile(r"^(?:CUSTOMER TRANSFER(?! OF FUNDS CHARGE)|CUSTOMER SEND MONEY|FUNDS RECEIVED FROM|SEND MONEY)\b.*?(?:TO|FROM)? ?(\d{9,12})? ?-? ?(.*)$")
-_MPESA_NO_KEY = re.compile(r"^(?:OVERDRAFT OF CREDIT PARTY|OD LOAN REPAYMENT|AGENT |CUSTOMER WITHDRAWAL|WITHDRAW)")
+_MPESA_NO_KEY = re.compile(r"^(?:AGENT |CUSTOMER WITHDRAWAL|WITHDRAW)")
+_MPESA_ROW_KINDS = (
+    (re.compile(r"^OVERDRAFT OF CREDIT PARTY"), "overdraft_draw"),
+    (re.compile(r"^OD LOAN REPAYMENT"), "overdraft_repayment"),
+    (re.compile(r"^M-?SHWARI LOAN DISBURSE"), "loan_payout"),
+    (re.compile(r"^M-?SHWARI LOAN REQUEST"), "loan_request"),
+)
 
 
 def _mpesa(text: str, secret: str) -> RowKey:
     cleaned = normalize_text(_FULIZA.sub("", text))
+    for pattern, row_kind in _MPESA_ROW_KINDS:
+        if pattern.match(cleaned):
+            return RowKey(kind=None, value=None, row_kind=row_kind)
     if _MPESA_NO_KEY.match(cleaned):
         return RowKey(kind=None, value=None)
+    if cleaned.startswith("M-SHWARI LOAN REPAYMENT"):
+        return _name_row("M-SHWARI LOAN REPAYMENT")
     if cleaned.startswith("AIRTIME PURCHASE"):
         return RowKey(kind="name", value="AIRTIME PURCHASE", is_business=True, name="AIRTIME PURCHASE", match_text="AIRTIME PURCHASE")
     if m := _MPESA_PAYBILL.match(cleaned):
@@ -173,7 +194,8 @@ _NCBA_IB_OUT = re.compile(r"^IB OUTGOING MOBILE PAYMENTS (PAYBILL|BUYGOODS) \S+ 
 _NCBA_UTILITY = re.compile(r"^UTILITY PAYMENT (.+)$")
 _NCBA_CARD = re.compile(r"^MERCHANT ATM TRANSACTION (.+)$")
 _NCBA_PERSON_IN = re.compile(r"^MPESA PAYBILL TRANSFER MPESA REF: \S+ (.+)$")
-_NCBA_NO_KEY = re.compile(r"^(?:AA LOAN REPAYMENT|INWARD CLEARING DIRECT DEBIT|IB OUTGOING MOBILE PAYMENTS (?!PAYBILL|BUYGOODS))")
+_NCBA_NO_KEY = re.compile(r"^(?:INWARD CLEARING DIRECT DEBIT|IB OUTGOING MOBILE PAYMENTS (?!PAYBILL|BUYGOODS))")
+_NCBA_LOAN = re.compile(r"^AA LOAN REPAYMENT\b ?(\d{6,})?")
 _NCBA_CHARGES = re.compile(r"^(MOBILE PAYMENTS CHARGES|KE EXCISE DUTY|EXCISE DUTY|DEBIT CARD CHARGE|TRANSFER CHARGES|INWARD DIRECT DEBIT COMMISSION)\b")
 
 
@@ -190,6 +212,20 @@ def _ncba(text: str, secret: str) -> RowKey:
             value=hash_value(NCBA, number, secret=secret),
             provider=NCBA,
             display=f"Paybill payment · ref {number}",
+        )
+    if m := _NCBA_LOAN.match(text):
+        account = m.group(1)
+        if not account:
+            return _name_row("AA LOAN REPAYMENT")
+        # One key per loan account, so a car loan and a personal loan keep
+        # their own memory. Prefixed so it can't equal a PayBill reference
+        # hash of the same digits.
+        return RowKey(
+            kind="reference",
+            value=hash_value(NCBA, f"LOAN {account}", secret=secret),
+            provider=NCBA,
+            display=f"Loan repayment · acc {account}",
+            match_text="AA LOAN REPAYMENT",
         )
     if _NCBA_NO_KEY.match(text):
         return RowKey(kind=None, value=None)
@@ -212,6 +248,36 @@ def _ncba(text: str, secret: str) -> RowKey:
     return _fallback(text)
 
 
+# --- Mentor Sacco -----------------------------------------------------------
+
+# Rows start with a document number token (ATRC-…, SJN-…, digits); the
+# meaning is in the words after it. Shared-list patterns match a
+# "SACCO LOAN …" match_text so generic words like "INSURANCE FEE" never hit
+# other providers' rows.
+_MENTOR_RECOVERY = re.compile(r"^LOAN RECOVERY:-\s*(.+)$")
+_MENTOR_LOAN_LEDGER = re.compile(r"^(?:LOAN RECOVERY\((?:INT|PRN)\. PAID|INTEREST DUE\b|OFFSETING PRINCIPAL\b)")
+_MENTOR_PAYOUT = re.compile(r"^[A-Z ]*LOAN\.\.\.")
+_MENTOR_FEE = re.compile(r"^(LOAN APPRA?ISAL FEE|LOAN FORM|SMS CHARGES|INSURANCE FEE|GUARANTOR NOTIFICATION|EXCISE DUTY PAYABLE)\b")
+
+
+def _mentor(text: str) -> RowKey:
+    first, _, rest = text.partition(" ")
+    words = rest if rest and re.search(r"\d", first) else text
+    if _MENTOR_LOAN_LEDGER.match(words):
+        return RowKey(kind=None, value=None, row_kind="loan_ledger")
+    if _MENTOR_PAYOUT.match(words):
+        return RowKey(kind=None, value=None, row_kind="loan_payout")
+    if m := _MENTOR_RECOVERY.match(words):
+        value = _clean_name(f"LOAN RECOVERY {_words_only(m.group(1))}")
+        return _name_row(value, match_text=f"SACCO {value}")
+    if m := _MENTOR_FEE.match(words):
+        fee = m.group(1)
+        return _name_row(fee, match_text=f"SACCO LOAN FEE {fee}")
+    # Mentor glues reference codes on with a hyphen ("…Charges-SSPSP…");
+    # split them off so the words survive strip_reference_codes.
+    return _fallback(re.sub(r"(?<=[A-Z])-(?=[A-Z])", " ", text))
+
+
 # --- everything else ------------------------------------------------------
 
 
@@ -229,7 +295,14 @@ def extract_key(*, provider: str, description: str | None, direction: str, secre
     if not text:
         return RowKey(kind=None, value=None)
     if provider == MPESA:
-        return _mpesa(text, secret)
+        key = _mpesa(text, secret)
+        # Same key either way: a purchase is categorised by what it
+        # bought, however it was paid. The flag only lets the UI say so.
+        if key.row_kind is None and _FULIZA.search(text):
+            key = replace(key, paid_with_overdraft=True)
+        return key
     if provider == NCBA:
         return _ncba(text, secret)
+    if provider == MENTOR:
+        return _mentor(text)
     return _fallback(text)
