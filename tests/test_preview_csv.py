@@ -85,3 +85,21 @@ def test_payee_of_a_categorised_row_comes_from_its_key():
     keys = {row["id"]: RowKey(kind="till", value="9120385", display="Till 9120385")}
     out = parse(build_preview_csv([row], preview_rows=[], categories=[GROCERIES], keys=keys))
     assert out[0]["payee"] == "Till 9120385"
+
+
+def test_payee_uses_the_users_label_then_the_display_name_ab269():
+    a, b = txn("Customer Transfer to - 254700***000 JOHN DOE"), txn("Customer Transfer to - 254711***111 JANE ROE")
+    rows = [{"transaction_id": a["id"], "display_name": a["description"], "label": "Mechanic", "suggestion": None},
+            {"transaction_id": b["id"], "display_name": b["description"], "label": None, "suggestion": None}]
+    out = parse(build_preview_csv([a, b], preview_rows=rows, categories=[]))
+    assert [r["payee"] for r in out] == ["Mechanic", "Customer Transfer to - 254711***111 JANE ROE"]
+
+
+def test_closed_person_row_shows_the_statement_text_not_transfer_ab269():
+    from app.services.merchant_keys import extract_key
+
+    done = txn("Customer Transfer to - 254700***000 JOHN DOE", allocated=1000.0, category_id=GROCERIES["id"],
+               categories=1)
+    key = extract_key(provider="M-Pesa", description=done["description"], direction="out", secret="s")
+    out = parse(build_preview_csv([done], preview_rows=[], categories=[GROCERIES], keys={done["id"]: key}))
+    assert out[0]["payee"] == "Customer Transfer to - 254700***000 JOHN DOE"

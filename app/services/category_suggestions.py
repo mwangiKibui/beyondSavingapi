@@ -457,7 +457,7 @@ def build_preview_rows(
             "currency": row["currency"],
             "direction": direction,
             "description": row["description"],
-            "display_name": label or key.name or known_as or key.display or row["description"] or "",
+            "display_name": _display_name(key, known_as, row["description"]),
             "label": label,
             "group_key": g,
             "key_kind": key.kind,
@@ -471,6 +471,17 @@ def build_preview_rows(
             "suggestion": suggestion,
         })
     return out
+
+
+def _display_name(key: RowKey, known_as: str | None, description: str | None) -> str:
+    """The payee as the uploader sees it. Person rows show the statement
+    text as printed (ab-269): only this user's preview carries it, and it
+    never feeds a shared key. The user's own label travels separately in
+    `label`, so the UI can show both."""
+    statement_text = " ".join((description or "").split())
+    if key.is_person:
+        return statement_text or key.display
+    return key.name or known_as or key.display or statement_text
 
 
 def _shared(category_name: str, by_name: dict, wanted_type: str, source: str) -> dict:

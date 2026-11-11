@@ -49,6 +49,16 @@ def _chosen(row: dict, category_names: dict[UUID, str]) -> str:
     return chosen
 
 
+def _closed_payee(key, description: str | None) -> str:
+    """Payee for a row that's no longer open (no preview row): person rows
+    show the statement text, as on screen (ab-269)."""
+    if key is None:
+        return ""
+    if key.is_person:
+        return " ".join((description or "").split()) or key.display
+    return key.name or key.display
+
+
 def build_preview_csv(
     rows: list[dict], *, preview_rows: list[dict], categories: list[dict], keys: dict | None = None
 ) -> str:
@@ -66,7 +76,8 @@ def build_preview_csv(
         p = by_id.get(row["id"])
         s = (p or {}).get("suggestion") or {}
         key = keys.get(row["id"])
-        payee = (p or {}).get("display_name") or (key and (key.name or key.display)) or ""
+        # The user's own label wins in the export, as it does on screen.
+        payee = (p or {}).get("label") or (p or {}).get("display_name") or _closed_payee(key, row["description"])
         values = [
             row["txn_date"].isoformat(),
             row["description"] or "",

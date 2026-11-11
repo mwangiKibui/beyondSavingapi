@@ -226,7 +226,9 @@ def test_users_rule_beats_the_directory_and_carries_the_label():
     assert out[0]["suggestion"]["source"] == "your_rule"
     assert out[0]["suggestion"]["category_id"] == GROCERIES["id"]
     assert out[0]["label"] == "Home tokens"
-    assert out[0]["display_name"] == "Home tokens"
+    # ab-269: the label travels in `label` only; display_name stays the
+    # statement's name so the UI can show it under the label.
+    assert out[0]["display_name"] == "KPLC PREPAID"
 
 
 def test_rule_for_another_direction_is_ignored():
@@ -460,4 +462,55 @@ def test_label_still_beats_the_typed_paybills_merchant_name():
                           label="Home tokens"), "user_entered_paybill": "888880"}
     out = preview(rows, provider="NCBA Bank", rules=[rule],
                   directory_rows=merchant("KPLC", "Utilities", numbers=[("paybill", "888880")]))
-    assert out[0]["display_name"] == "Home tokens"
+    assert out[0]["label"] == "Home tokens"
+    assert out[0]["display_name"] == "KPLC"
+
+
+# --- ab-269: person rows show the statement text, to the uploader only -----
+
+PERSON_ROWS = [
+    ("M-Pesa", "Customer Transfer to - 254700***000 JOHN DOE", "out"),
+    ("M-Pesa", "Customer Transfer Fuliza MPesa to - 254700***000 JOHN DOE", "out"),
+    ("M-Pesa", "Funds received from - 254711***111 JANE ROE", "in"),
+    ("NCBA Bank", "MPESA PAYBILL TRANSFER MPESA REF: TJK12AB34C JANE ROE", "in"),
+    ("NCBA Bank", "IB INCOMING MOBILE PAYMENTS FTX26216ABCDE JANE ROE", "in"),
+]
+
+
+@pytest.mark.parametrize("provider,description,direction", PERSON_ROWS)
+def test_person_rows_show_the_statement_text_not_transfer(provider, description, direction):
+    out = preview([txn(description, direction=direction)], provider=provider)
+    assert out[0]["display_name"] == description
+    assert out[0]["key_kind"] == "reference"
+
+
+def test_person_row_statement_text_is_tidied_but_otherwise_as_printed():
+    out = preview([txn("  Customer Transfer   to - 254700***000  JOHN DOE ")])
+    assert out[0]["display_name"] == "Customer Transfer to - 254700***000 JOHN DOE"
+
+
+@pytest.mark.parametrize("provider,description,direction", PERSON_ROWS)
+def test_person_rows_keep_the_text_out_of_name_and_match_text(provider, description, direction):
+    key = extract_keys([txn(description, direction=direction)], provider=provider, secret=SECRET)
+    (k,) = key.values()
+    assert k.is_person is True
+    assert k.name is None
+    assert "JOHN" not in k.match_text and "254" not in k.match_text
+    assert k.value.startswith("h:")
+
+
+def test_business_rows_are_not_person_rows():
+    rows = [txn("Merchant Payment to 7700590 - PAZA BARBER SPA"), txn("Pay Bill Online to 888880 - KPLC PREPAID")]
+    keys = extract_keys(rows, provider="M-Pesa", secret=SECRET)
+    assert not any(k.is_person for k in keys.values())
+    assert [r["display_name"] for r in preview(rows)] == ["PAZA BARBER SPA", "KPLC PREPAID"]
+
+
+def test_labelled_person_row_keeps_the_label_separate_from_the_statement_text():
+    rows = [txn("Customer Transfer to - 254700***000 JOHN DOE")]
+    keys = extract_keys(rows, provider="M-Pesa", secret=SECRET)
+    (k,) = keys.values()
+    rule = stored_rule(GROCERIES, kind="reference", value=k.value, provider="M-Pesa", label="Mechanic")
+    out = preview(rows, rules=[rule])
+    assert out[0]["label"] == "Mechanic"
+    assert out[0]["display_name"] == "Customer Transfer to - 254700***000 JOHN DOE"
