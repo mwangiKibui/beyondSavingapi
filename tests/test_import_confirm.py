@@ -41,6 +41,7 @@ def repo(monkeypatch):
         "upsert_merchant_votes": AsyncMock(),
         "upsert_number_votes": AsyncMock(),
         "mark_import_reviewed": AsyncMock(return_value="2026-11-09T10:00:00Z"),
+        "delete_progress": AsyncMock(return_value=True),
         "record_name_sightings": AsyncMock(),
         "get_learned_names": AsyncMock(return_value={}),
         "add_users_number_keys": AsyncMock(),
@@ -68,6 +69,8 @@ async def test_existing_category_is_allocated_and_learned(repo):
     rules = repo["upsert_rules"].call_args.kwargs["rules"]
     assert (rules[0]["key_kind"], rules[0]["key_value"], rules[0]["category_id"]) == ("till", "5555555", GROCERIES["id"])
     repo["mark_import_reviewed"].assert_awaited_once()
+    # ab-265: finishing clears the saved progress in the same transaction.
+    assert repo["delete_progress"].call_args.kwargs["import_id"] == IMPORT["id"]
     assert result.allocated == [row["id"]] and result.learned == 1 and result.created_categories == []
 
 

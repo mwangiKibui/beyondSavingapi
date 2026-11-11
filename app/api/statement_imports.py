@@ -26,6 +26,7 @@ from app.repositories.category_suggestions import (
     get_user_categories,
     get_user_rules,
 )
+from app.repositories.import_progress import delete_progress, get_progress, upsert_progress
 from app.repositories.statement_imports import (
     add_import_sub_ledgers,
     create_statement_import,
@@ -45,6 +46,7 @@ from app.services.category_suggestions import (
     shared_vote_lookups,
 )
 from app.services.import_confirm import ConfirmItem, confirm_import
+from app.services.import_progress import Draft, payee_keys, progress_counts
 from app.services.preview_csv import build_preview_csv
 from app.services.statement_files import (
     IncorrectStatementPassword,
@@ -76,6 +78,13 @@ class StatementImportResponse(BaseModel):
     created_at: datetime
 
 
+class ListProgress(BaseModel):
+    step: str
+    reviewed_count: int
+    total_count: int
+    updated_at: datetime
+
+
 class StatementImportListItem(BaseModel):
     id: UUID
     account_id: UUID
@@ -87,6 +96,20 @@ class StatementImportListItem(BaseModel):
     row_count: int | None = None
     error_detail: str | None = None
     created_at: datetime
+    # ab-265: set once the review was confirmed ("Done").
+    reviewed_at: datetime | None = None
+    # ab-265: an unfinished review's saved progress; null when none.
+    progress: ListProgress | None = None
+
+
+def _list_item(row: dict) -> dict:
+    step = row.pop("progress_step", None)
+    reviewed = row.pop("progress_reviewed_count", None)
+    total = row.pop("progress_total_count", None)
+    updated = row.pop("progress_updated_at", None)
+    if step is not None:
+        row["progress"] = {"step": step, "reviewed_count": reviewed, "total_count": total, "updated_at": updated}
+    return row
 
 
 class StatementImportListResponse(BaseModel):
@@ -207,7 +230,7 @@ async def list_statement_imports_endpoint(
             detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
-    return {"items": items, "total": total, "page": page, "page_size": page_size}
+    return {"items": [_list_item(dict(item)) for item in items], "total": total, "page": page, "page_size": page_size}
 
 
 @router.post("", response_model=StatementImportResponse, status_code=status.HTTP_201_CREATED)
@@ -578,3 +601,142 @@ async def confirm_statement_import_endpoint(
         "learned": result.learned,
         "reviewed_at": result.reviewed_at,
     }
+
+
+# --- saved progress (ab-265) ------------------------------------------------
+# The upload wizard (ab-266) saves the review as the user goes so it can be
+# resumed on any device; the uploads list (ab-267) shows "N of M". The row
+# is deleted on confirm (reviewed_at records "finished") or on discard.
+
+ProgressStep = Literal["processing", "review", "failed", "done"]
+
+
+class ProgressResponse(BaseModel):
+    step: ProgressStep
+    draft: Draft
+    reviewed_count: int
+    total_count: int
+    updated_at: datetime | None = None
+
+
+class SaveProgressRequest(BaseModel):
+    # Only the review step holds anything to save; processing/failed/done
+    # come from the import itself. ab-268 adds "transfers".
+    step: Literal["review"]
+    draft: Draft
+
+
+def _derived_step(statement_import: dict) -> str:
+    if statement_import["status"] == "pending":
+        return "processing"
+    if statement_import["status"] == "failed":
+        return "failed"
+    return "done" if statement_import.get("reviewed_at") else "review"
+
+
+async def _owned_import(pool: asyncpg.Pool, *, import_id: UUID, user_id: UUID) -> dict:
+    statement_import = await get_import_for_preview(pool, import_id=import_id, user_id=user_id)
+    if statement_import is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Statement import not found")
+    return statement_import
+
+
+@router.get("/{import_id}/progress", response_model=ProgressResponse)
+async def get_import_progress_endpoint(
+    import_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    _require_pool(pool)
+    try:
+        statement_import = await _owned_import(pool, import_id=import_id, user_id=user_id)
+        saved = await get_progress(pool, import_id=import_id)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error loading progress for import %s, user %s", import_id, user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
+        ) from None
+    if saved is not None:
+        return saved
+    return {"step": _derived_step(statement_import), "draft": Draft(), "reviewed_count": 0, "total_count": 0}
+
+
+@router.put("/{import_id}/progress", response_model=ProgressResponse)
+async def save_import_progress_endpoint(
+    import_id: UUID,
+    body: SaveProgressRequest,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """Replaces the whole saved draft. Last save wins."""
+    _require_pool(pool)
+    try:
+        statement_import = await _owned_import(pool, import_id=import_id, user_id=user_id)
+        if statement_import["status"] != "parsed":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="This statement hasn't finished processing yet"
+            )
+        rows = await get_import_rows(
+            pool,
+            import_id=import_id,
+            account_id=statement_import["account_id"],
+            period_start=statement_import["period_start"],
+            period_end=statement_import["period_end"],
+        )
+        keys = extract_keys(rows, provider=statement_import["provider"], secret=get_settings().suggestion_key_secret)
+        draft = body.draft
+        row_ids = {row["id"] for row in rows}
+        if not set(draft.rows) <= row_ids:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A saved row isn't part of this statement"
+            )
+        payees = payee_keys(rows, keys)
+        if not (set(draft.labels) | set(draft.paybills)) <= payees:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A saved payee isn't part of this statement"
+            )
+        picked = {entry.category_id for entry in draft.rows.values() if entry.category_id is not None}
+        if picked:
+            own = {category["id"] for category in await get_user_categories(pool, user_id=user_id)}
+            if not picked <= own:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unknown category")
+        reviewed_count, total_count = progress_counts(rows, keys, draft.model_dump())
+        return await upsert_progress(
+            pool,
+            import_id=import_id,
+            step=body.step,
+            draft=draft.model_dump(mode="json"),
+            reviewed_count=reviewed_count,
+            total_count=total_count,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error saving progress for import %s, user %s", import_id, user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
+        ) from None
+
+
+@router.delete("/{import_id}/progress", status_code=status.HTTP_204_NO_CONTENT)
+async def discard_import_progress_endpoint(
+    import_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> Response:
+    """Discard: drops the saved picks only. The transactions stay and can
+    still be categorised later."""
+    _require_pool(pool)
+    try:
+        await _owned_import(pool, import_id=import_id, user_id=user_id)
+        await delete_progress(pool, import_id=import_id)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error discarding progress for import %s, user %s", import_id, user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
+        ) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
