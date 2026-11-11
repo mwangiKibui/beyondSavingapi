@@ -1,6 +1,6 @@
 """ab-253 PR 2: confirm_import orchestration (repositories mocked)."""
 
-from datetime import date
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -41,6 +41,9 @@ def repo(monkeypatch):
         "upsert_merchant_votes": AsyncMock(),
         "upsert_number_votes": AsyncMock(),
         "mark_import_reviewed": AsyncMock(return_value="2026-11-09T10:00:00Z"),
+        "record_name_sightings": AsyncMock(),
+        "get_learned_names": AsyncMock(return_value={}),
+        "add_users_number_keys": AsyncMock(),
     }
     for name, mock in mocks.items():
         monkeypatch.setattr(f"{SVC}.{name}", mock)
@@ -148,3 +151,56 @@ async def test_entered_paybill_on_a_non_reference_row_is_rejected(repo):
         await confirm([ConfirmItem(transaction_id=row["id"], category_id=GROCERIES["id"],
                                    user_entered_paybill="247247")])
     assert exc.value.status_code == 422
+
+
+# --- ab-253 PR 4: number -> name learning ------------------------------------
+
+NCBA_IMPORT = {**IMPORT, "provider": "NCBA Bank"}
+SEEN = datetime(2026, 11, 1, tzinfo=timezone.utc)
+NAIVAS_DIR = [{"merchant_id": uuid4(), "display_name": "Naivas", "category_name": "Groceries", "direction": "out",
+               "key_kind": "name_pattern", "key_value": "NAIVAS", "requires_text": False}]
+
+
+async def test_sightings_cover_every_row_in_scope_not_just_confirmed_ones(repo):
+    a = txn("Merchant Payment to 5551234 - NAIVAS LTD")
+    b = txn("Pay Bill to 888880 - KPLC PREPAID Acc. 12345678901")
+    person = txn("Merchant Payment to 5559999 - JOHN KAMAU")
+    repo["get_import_rows"].return_value = [a, b, person]
+    user_id = uuid4()
+    await confirm([ConfirmItem(transaction_id=a["id"], category_id=GROCERIES["id"])], user_id=user_id)
+    kwargs = repo["record_name_sightings"].call_args.kwargs
+    assert kwargs["user_id"] == user_id
+    assert sorted(s["number"] for s in kwargs["sightings"]) == ["5551234", "888880"]
+
+
+async def test_learned_name_votes_like_a_printed_one(repo):
+    row = txn("IB Outgoing Mobile Payments BuyGoods FTX26232ABCDE 5551234")
+    repo["get_import_rows"].return_value = [row]
+    repo["get_learned_names"].return_value = {("till", "5551234", "out"): [
+        {"name": "NAIVAS WESTLANDS LTD", "users": 1, "last_seen": SEEN}]}
+    await confirm_import(object(), user_id=uuid4(), statement_import=NCBA_IMPORT,
+                         items=[ConfirmItem(transaction_id=row["id"], category_id=GROCERIES["id"])], secret=SECRET)
+    assert repo["upsert_merchant_votes"].call_args.kwargs["votes"][0]["merchant_key"] == "NAIVAS WESTLANDS LTD"
+    assert repo["record_name_sightings"].call_args.kwargs["sightings"] == []  # borrowed names aren't re-sighted
+
+
+async def test_three_users_seeing_a_listed_name_grow_the_list(repo):
+    row = txn("Merchant Payment to 5551234 - NAIVAS WESTLANDS")
+    repo["get_import_rows"].return_value = [row]
+    repo["get_approved_directory"].return_value = NAIVAS_DIR
+    repo["get_learned_names"].return_value = {("till", "5551234", "out"): [
+        {"name": "NAIVAS WESTLANDS", "users": 3, "last_seen": SEEN}]}
+    await confirm([ConfirmItem(transaction_id=row["id"], category_id=GROCERIES["id"])])
+    assert repo["get_learned_names"].call_args.kwargs["numbers"] == [("till", "5551234", "out")]
+    assert repo["add_users_number_keys"].call_args.kwargs["keys"] == [
+        {"merchant_id": NAIVAS_DIR[0]["merchant_id"], "direction": "out", "key_kind": "till", "key_value": "5551234"}]
+
+
+async def test_no_growth_below_three_users(repo):
+    row = txn("Merchant Payment to 5551234 - NAIVAS WESTLANDS")
+    repo["get_import_rows"].return_value = [row]
+    repo["get_approved_directory"].return_value = NAIVAS_DIR
+    repo["get_learned_names"].return_value = {("till", "5551234", "out"): [
+        {"name": "NAIVAS WESTLANDS", "users": 2, "last_seen": SEEN}]}
+    await confirm([ConfirmItem(transaction_id=row["id"], category_id=GROCERIES["id"])])
+    assert repo["add_users_number_keys"].call_args.kwargs["keys"] == []

@@ -90,6 +90,9 @@ class MerchantKeyOut(BaseModel):
     key_kind: str
     key_value: str
     requires_text: bool
+    # 'list' (starter/admin) or 'users' (added once 3+ users saw the number
+    # under this merchant's name - ab-253 PR 4).
+    added_from: str = "list"
 
 
 class VoteCount(BaseModel):
@@ -170,6 +173,8 @@ class VoteGroup(BaseModel):
     users: int
     votes: list[VoteCount]
     on_list: bool | None = None
+    # Unknown numbers: the name users' M-Pesa statements printed for it.
+    learned_name: str | None = None
 
 
 class VoteGroupListResponse(BaseModel):

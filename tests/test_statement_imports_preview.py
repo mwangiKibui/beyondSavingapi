@@ -56,7 +56,7 @@ def directory_row(name, category, pattern):
 
 
 def patch_reads(monkeypatch, *, imp=None, rows=(), rules=(), directory=(), categories=(GROCERIES,),
-                shared_votes=None):
+                shared_votes=None, learned_names=None):
     mocks = {
         "get_import_for_preview": AsyncMock(return_value=imp),
         "get_import_rows": AsyncMock(return_value=list(rows)),
@@ -65,6 +65,7 @@ def patch_reads(monkeypatch, *, imp=None, rows=(), rules=(), directory=(), categ
         "get_blocked_numbers": AsyncMock(return_value=[]),
         "get_user_categories": AsyncMock(return_value=list(categories)),
         "get_shared_votes": AsyncMock(return_value=dict(shared_votes or {})),
+        "get_learned_names": AsyncMock(return_value=dict(learned_names or {})),
     }
     for name, mock in mocks.items():
         monkeypatch.setattr(f"{API}.{name}", mock)
@@ -210,3 +211,37 @@ def test_csv_download_has_every_row_and_a_safe_filename(client, fake_user, fake_
     assert len(lines) == 3
     assert "Groceries,no,directory,Naivas," in lines[1]
     assert lines[2].startswith("2026-10-05,'=SUM(1)") and lines[2].endswith(",Groceries")
+
+
+# --- ab-253 PR 4: names learned from other users' M-Pesa rows ---------------
+
+
+def test_nameless_till_borrows_a_learned_name(client, fake_pool, fake_user, monkeypatch):
+    row = txn("IB Outgoing Mobile Payments BuyGoods FTX26232ABCDE 5551234")
+    seen = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    mocks = patch_reads(monkeypatch, imp=import_row(provider="NCBA Bank"), rows=[row],
+                        directory=[directory_row("Naivas", "Groceries", "NAIVAS")],
+                        learned_names={("till", "5551234", "out"): [{"name": "NAIVAS WESTLANDS", "users": 1,
+                                                                     "last_seen": seen}]})
+    body = client.get(f"/statement-imports/{IMPORT_ID}/preview").json()
+    out = body["rows"][0]
+    assert out["display_name"] == "NAIVAS WESTLANDS" and out["name_learned"] is True
+    assert out["suggestion"]["source"] == "directory" and out["suggestion"]["category_id"] == str(GROCERIES["id"])
+    assert mocks["get_learned_names"].call_args.kwargs["numbers"] == [("till", "5551234", "out")]
+
+
+def test_rows_with_printed_names_never_look_up_learned_names(client, fake_pool, fake_user, monkeypatch):
+    mocks = patch_reads(monkeypatch, imp=import_row(), rows=[txn("Merchant Payment to 5551234 - NAIVAS LTD")])
+    body = client.get(f"/statement-imports/{IMPORT_ID}/preview").json()
+    assert body["rows"][0]["name_learned"] is False
+    assert mocks["get_learned_names"].call_args.kwargs["numbers"] == []
+
+
+def test_csv_payee_uses_the_learned_name(client, fake_pool, fake_user, monkeypatch):
+    row = txn("IB Outgoing Mobile Payments BuyGoods FTX26232ABCDE 5551234")
+    seen = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    patch_reads(monkeypatch, imp=import_row(provider="NCBA Bank"), rows=[row],
+                learned_names={("till", "5551234", "out"): [{"name": "MAMA PIMA HARDWARE", "users": 1,
+                                                             "last_seen": seen}]})
+    text = client.get(f"/statement-imports/{IMPORT_ID}/preview.csv").text
+    assert "MAMA PIMA HARDWARE" in text.splitlines()[1]

@@ -65,6 +65,7 @@ class RowKey:
     match_text: str = ""  # cleaned text the shared-list patterns are matched against
     display: str = ""  # short label for rows with no readable name
     is_transfer_hint: bool = False
+    name_learned: bool = False  # name borrowed from other users' M-Pesa rows (ab-253 PR 4)
 
 
 def normalize_text(text: str | None) -> str:
