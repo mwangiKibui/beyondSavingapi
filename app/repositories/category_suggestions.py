@@ -356,3 +356,65 @@ async def set_preferred_rules(pool: asyncpg.Pool, *, user_id: UUID, preferences:
             for p in preferences
         ],
     )
+
+
+# --- shared Till/Paybill -> name learning (ab-253 PR 4) ---------------------
+
+
+async def get_learned_names(
+    pool: asyncpg.Pool | asyncpg.Connection, *, numbers: list[tuple]
+) -> dict[tuple, list[dict]]:
+    """numbers: [(number_kind, number, direction)]. Returns
+    {(kind, number, direction): [{name, users, last_seen}]} - distinct-user
+    counts per name, never who."""
+    if not numbers:
+        return {}
+    rows = await pool.fetch(
+        """
+        SELECT s.number_kind, s.number, s.direction, s.name,
+               count(DISTINCT s.user_id) AS users, max(s.seen_at) AS last_seen
+        FROM number_name_sightings s
+        JOIN unnest($1::text[], $2::text[], $3::text[]) AS k(number_kind, number, direction)
+          ON k.number_kind = s.number_kind AND k.number = s.number AND k.direction = s.direction
+        GROUP BY s.number_kind, s.number, s.direction, s.name
+        """,
+        [n[0] for n in numbers],
+        [n[1] for n in numbers],
+        [n[2] for n in numbers],
+    )
+    out: dict[tuple, list[dict]] = {}
+    for r in rows:
+        out.setdefault((r["number_kind"], r["number"], r["direction"]), []).append(
+            {"name": r["name"], "users": r["users"], "last_seen": r["last_seen"]}
+        )
+    return out
+
+
+async def record_name_sightings(conn: asyncpg.Connection, *, user_id: UUID, sightings: list[dict]) -> None:
+    """One row per user per number: the latest name they saw replaces it."""
+    if not sightings:
+        return
+    await conn.executemany(
+        """
+        INSERT INTO number_name_sightings (number_kind, number, direction, user_id, name)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (number_kind, number, direction, user_id) DO UPDATE
+            SET name = EXCLUDED.name, seen_at = now()
+        """,
+        [(s["number_kind"], s["number"], s["direction"], user_id, s["name"][:120]) for s in sightings],
+    )
+
+
+async def add_users_number_keys(conn: asyncpg.Connection, *, keys: list[dict]) -> None:
+    """Numbers users taught the list. A number already owned (one owner per
+    key) is left alone."""
+    if not keys:
+        return
+    await conn.executemany(
+        """
+        INSERT INTO merchant_directory_keys (merchant_id, direction, key_kind, key_value, requires_text, added_from)
+        VALUES ($1, $2, $3, $4, false, 'users')
+        ON CONFLICT ON CONSTRAINT merchant_directory_keys_one_owner DO NOTHING
+        """,
+        [(k["merchant_id"], k["direction"], k["key_kind"], k["key_value"]) for k in keys],
+    )

@@ -13,13 +13,16 @@ from uuid import UUID
 import asyncpg
 
 from app.repositories.category_suggestions import (
+    add_users_number_keys,
     create_categories,
     get_approved_directory,
     get_blocked_numbers,
     get_import_rows,
+    get_learned_names,
     get_user_categories,
     lock_transactions,
     mark_import_reviewed,
+    record_name_sightings,
     set_rule_labels,
     upsert_merchant_votes,
     upsert_number_votes,
@@ -32,7 +35,14 @@ from app.services.allocations import (
     AllocationRejected,
     plan_bulk_allocation,
 )
-from app.services.category_suggestions import Directory, extract_keys
+from app.services.category_suggestions import (
+    Directory,
+    apply_learned_names,
+    extract_keys,
+    learned_name_lookups,
+    name_sightings,
+    plan_key_growth,
+)
 from app.services.suggestion_learning import ConfirmedRow, plan_learning
 
 
@@ -84,9 +94,10 @@ async def confirm_import(
     if item_by_id.keys() - rows_by_id.keys():
         raise AllocationRejected(422, "One or more rows aren't part of this statement")
 
-    keys = extract_keys([rows_by_id[i] for i in item_by_id], provider=statement_import["provider"], secret=secret)
+    directory = Directory.from_rows(await get_approved_directory(conn), blocked=await get_blocked_numbers(conn))
+    printed = extract_keys(rows, provider=statement_import["provider"], secret=secret)
     for transaction_id, item in item_by_id.items():
-        if item.user_entered_paybill and keys[transaction_id].kind != "reference":
+        if item.user_entered_paybill and printed[transaction_id].kind != "reference":
             raise AllocationRejected(422, "A Paybill can only be added to a row that shows an account reference")
 
     categories = await get_user_categories(conn, user_id=user_id)
@@ -133,8 +144,21 @@ async def confirm_import(
             currencies=plan.currencies,
         )
 
+    # Names: record what this statement printed for each business number,
+    # borrow learned names for rows showing only a number (as the preview
+    # did), and add numbers 3+ users saw under a listed name to the list.
+    sightings = name_sightings(rows, printed, directory)
+    await record_name_sightings(conn, user_id=user_id, sightings=sightings)
+    sighted = {(s["number_kind"], s["number"], s["direction"]) for s in sightings}
+    learned = await get_learned_names(
+        conn, numbers=sorted(sighted | set(learned_name_lookups(rows, printed, directory)))
+    )
+    keys = apply_learned_names(rows, printed, learned, directory)
+    await add_users_number_keys(
+        conn, keys=plan_key_growth({k: v for k, v in learned.items() if k in sighted}, directory)
+    )
+
     # Only rows actually allocated now teach anything.
-    directory = Directory.from_rows(await get_approved_directory(conn), blocked=await get_blocked_numbers(conn))
     confirmed = []
     for transaction_id in plan.updated:
         item, row = item_by_id[transaction_id], rows_by_id[transaction_id]

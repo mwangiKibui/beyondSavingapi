@@ -245,6 +245,18 @@ def test_unknown_numbers_need_ten_users(client, admin, repo):
     assert repo["list_unknown_numbers"].call_args.kwargs["min_users"] == 10
 
 
+def test_unknown_numbers_show_the_learned_name(client, admin, repo):
+    repo["list_unknown_numbers"].return_value = ([{"key_kind": "till", "key_value": "5551234", "direction": "out",
+                                                   "users": 10, "votes": [], "learned_name": "MAMA PIMA HARDWARE"}], 1)
+    assert client.get("/admin/unknown-numbers").json()["items"][0]["learned_name"] == "MAMA PIMA HARDWARE"
+
+
+def test_merchant_keys_say_where_they_came_from(client, admin, repo):
+    repo["list_merchants"].return_value = ([merchant(keys=[
+        {"key_kind": "till", "key_value": "5551234", "requires_text": False, "added_from": "users"}])], 1)
+    assert client.get("/admin/merchants").json()["items"][0]["keys"][0]["added_from"] == "users"
+
+
 def test_dismiss_unknown_number(client, admin, repo):
     body = {"number_kind": "till", "number": "9120385", "direction": "out"}
     assert client.post("/admin/unknown-numbers/dismiss", json=body).status_code == 204

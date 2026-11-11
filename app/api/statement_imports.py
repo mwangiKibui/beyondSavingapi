@@ -21,6 +21,7 @@ from app.repositories.category_suggestions import (
     get_blocked_numbers,
     get_import_for_preview,
     get_import_rows,
+    get_learned_names,
     get_shared_votes,
     get_user_categories,
     get_user_rules,
@@ -35,8 +36,10 @@ from app.repositories.sub_ledgers import list_sub_ledgers
 from app.services.allocations import AllocationRejected, alert_groups
 from app.services.category_suggestions import (
     Directory,
+    apply_learned_names,
     build_preview_rows,
     extract_keys,
+    learned_name_lookups,
     new_category_names,
     rule_lookup_pairs,
     shared_vote_lookups,
@@ -134,6 +137,8 @@ class PreviewRow(BaseModel):
     number: str | None = None
     is_business: bool
     is_transfer_hint: bool
+    # display_name was learned from other users' M-Pesa statements.
+    name_learned: bool = False
     suggestion: PreviewSuggestion | None = None
 
 
@@ -332,6 +337,10 @@ async def _load_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id: UUID) -
         directory = Directory.from_rows(
             await get_approved_directory(pool), blocked=await get_blocked_numbers(pool)
         )
+        # Rows showing only a Till/Paybill borrow the name other users' M-Pesa
+        # statements printed for it (ab-253 PR 4).
+        learned = await get_learned_names(pool, numbers=learned_name_lookups(rows, keys, directory))
+        keys = apply_learned_names(rows, keys, learned, directory)
         rules = await get_user_rules(pool, user_id=user_id, pairs=rule_lookup_pairs(keys.values(), directory))
         categories = await get_user_categories(pool, user_id=user_id)
         name_keys, number_keys = shared_vote_lookups(rows, keys, directory)

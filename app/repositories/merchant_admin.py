@@ -15,7 +15,8 @@ _MERCHANT_COLUMNS = """
     m.created_at, m.updated_at,
     COALESCE((
         SELECT json_agg(json_build_object(
-                   'key_kind', k.key_kind, 'key_value', k.key_value, 'requires_text', k.requires_text)
+                   'key_kind', k.key_kind, 'key_value', k.key_value, 'requires_text', k.requires_text,
+                   'added_from', k.added_from)
                ORDER BY k.key_kind, k.key_value)
         FROM merchant_directory_keys k WHERE k.merchant_id = m.id
     ), '[]') AS keys
@@ -324,7 +325,13 @@ async def list_unknown_numbers(
     (shared/misattributed) and dismissed numbers are left out."""
     base = """
         SELECT v.number_kind AS key_kind, v.number AS key_value, v.direction,
-               count(DISTINCT v.user_id) AS users
+               count(DISTINCT v.user_id) AS users,
+               -- Name other users' M-Pesa statements printed for it (ab-253 PR 4).
+               (SELECT s.name FROM number_name_sightings s
+                WHERE s.number_kind = v.number_kind AND s.number = v.number AND s.direction = v.direction
+                GROUP BY s.name
+                ORDER BY count(DISTINCT s.user_id) DESC, max(s.seen_at) DESC
+                LIMIT 1) AS learned_name
         FROM unknown_number_votes v
         WHERE NOT EXISTS (SELECT 1 FROM blocked_numbers b
                           WHERE b.number_kind = v.number_kind AND b.number = v.number)

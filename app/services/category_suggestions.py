@@ -22,7 +22,7 @@ import hashlib
 import re
 from collections import Counter
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from uuid import UUID
 
 from app.services.merchant_keys import RowKey, extract_key
@@ -111,6 +111,10 @@ class Directory:
             return None
         return self._merchants[hit[0]]
 
+    def owns_number(self, number_kind: str, number: str, direction: str) -> bool:
+        """The list already has this number as a key (alone or with text)."""
+        return (number_kind, number, direction) in self._numbers
+
     def match(self, key: RowKey, direction: str) -> Merchant | None:
         if key.number and (key.number_kind, key.number) not in self._blocked:
             hit = self._numbers.get((key.number_kind, key.number, direction))
@@ -118,13 +122,17 @@ class Directory:
                 merchant = self._merchants[hit[0]]
                 if not hit[1] or merchant.text_score(key.match_text):
                     return merchant
-        if not key.match_text:
+        return self.match_text(key.match_text, direction)
+
+    def match_text(self, text: str, direction: str) -> Merchant | None:
+        """The merchant whose longest name pattern is found in text."""
+        if not text:
             return None
         best, best_score = None, 0
         for m in self._merchants.values():
             if m.direction != direction:
                 continue
-            score = m.text_score(key.match_text)
+            score = m.text_score(text)
             if score > best_score:
                 best, best_score = m, score
         return best
@@ -251,6 +259,98 @@ def pick_shared(votes: list[dict]) -> str | None:
     return ranked[0]["category_name"]
 
 
+# --- shared Till/Paybill -> name learning (ab-253 PR 4) ---------------------
+
+LEARNED_NAME_MIN_USERS = 1  # the name is printed by Safaricom, not chosen by the user
+KEY_GROWTH_MIN_USERS = 3  # before a number is added to a listed merchant
+
+
+def _is_number_key(key: RowKey) -> bool:
+    return key.kind in ("paybill", "till") and bool(key.number)
+
+
+def name_sightings(rows: list[dict], keys: dict[UUID, RowKey], directory: Directory) -> list[dict]:
+    """Number -> name pairs a confirm records for this user: rows printing a
+    Paybill/Till with a business name (business-looking, or a name on the
+    list). Never person-named Tills, blocked numbers, references, or names
+    this row only borrowed. One per number+direction - the latest name."""
+    seen: dict[tuple, tuple] = {}
+    for row in rows:
+        key, direction = keys[row["id"]], row["direction"]
+        if not _is_number_key(key) or not key.name or key.name_learned:
+            continue
+        if directory.is_blocked(key.number_kind, key.number):
+            continue
+        if not (key.is_business or directory.match_text(key.name, direction)):
+            continue
+        k = (key.number_kind, key.number, direction)
+        if k not in seen or row["txn_date"] >= seen[k][0]:
+            seen[k] = (row["txn_date"], key.name)
+    return [{"number_kind": k[0], "number": k[1], "direction": k[2], "name": name} for k, (_, name) in seen.items()]
+
+
+def _wants_learned_name(key: RowKey, direction: str, directory: Directory) -> bool:
+    return (
+        _is_number_key(key)
+        and not key.name
+        and not directory.is_blocked(key.number_kind, key.number)
+        and not directory.owns_number(key.number_kind, key.number, direction)
+    )
+
+
+def learned_name_lookups(rows: list[dict], keys: dict[UUID, RowKey], directory: Directory) -> list[tuple]:
+    """(number_kind, number, direction) of rows showing only a number the
+    list doesn't know - the ones that can borrow a learned name."""
+    return sorted({
+        (keys[r["id"]].number_kind, keys[r["id"]].number, r["direction"])
+        for r in rows
+        if _wants_learned_name(keys[r["id"]], r["direction"], directory)
+    })
+
+
+def pick_learned_name(names: list[dict]) -> dict | None:
+    """names: [{name, users, last_seen}] for one number. The name the most
+    distinct users saw; a tie goes to the most recently seen."""
+    if not names:
+        return None
+    top = max(names, key=lambda n: (n["users"], n["last_seen"]))
+    return top if top["users"] >= LEARNED_NAME_MIN_USERS else None
+
+
+def apply_learned_names(
+    rows: list[dict], keys: dict[UUID, RowKey], learned: dict[tuple, list[dict]], directory: Directory
+) -> dict[UUID, RowKey]:
+    """New keys with learned names filled in. The row's rule identity
+    (kind/value) is unchanged, so the user's own memory isn't affected;
+    the name drives display, list matching and name votes."""
+    out = dict(keys)
+    for row in rows:
+        key, direction = keys[row["id"]], row["direction"]
+        if not _wants_learned_name(key, direction, directory):
+            continue
+        top = pick_learned_name(learned.get((key.number_kind, key.number, direction), []))
+        if top:
+            out[row["id"]] = replace(key, name=top["name"], match_text=top["name"], is_business=True, name_learned=True)
+    return out
+
+
+def plan_key_growth(learned: dict[tuple, list[dict]], directory: Directory) -> list[dict]:
+    """Numbers to add to a listed merchant: KEY_GROWTH_MIN_USERS+ distinct
+    users saw it under a top name matching that merchant, and the list
+    doesn't already own (or block) the number."""
+    out = []
+    for (kind, number, direction), names in sorted(learned.items()):
+        top = pick_learned_name(names)
+        if not top or top["users"] < KEY_GROWTH_MIN_USERS:
+            continue
+        if directory.is_blocked(kind, number) or directory.owns_number(kind, number, direction):
+            continue
+        merchant = directory.match_text(top["name"], direction)
+        if merchant:
+            out.append({"merchant_id": merchant.id, "direction": direction, "key_kind": kind, "key_value": number})
+    return out
+
+
 def group_key(key: RowKey, direction: str) -> str | None:
     """Opaque id shared by rows the UI should treat as the same payee
     (pick a category for one, offer it for the rest). Hashed so names,
@@ -303,6 +403,13 @@ def build_preview_rows(
         wanted_type = CATEGORY_TYPE_FOR_DIRECTION[direction]
         g = group_key(key, direction)
         suggestion, label, known_as = None, None, None
+        # A row showing only a number the list owns is named after that
+        # merchant, whichever source the suggestion comes from.
+        listed = _is_number_key(key) and not key.name and directory.merchant_for_number(
+            key.number_kind, key.number, direction
+        )
+        if listed:
+            known_as = listed.display_name
 
         rk = rule_key(key, directory)
         if rk:
@@ -358,6 +465,7 @@ def build_preview_rows(
             "number": key.number,
             "is_business": key.is_business,
             "is_transfer_hint": key.is_transfer_hint,
+            "name_learned": key.name_learned,
             "suggestion": suggestion,
         })
     return out
