@@ -227,3 +227,60 @@ def test_ncba_card_match_text_keeps_the_prefix_for_shared_patterns():
 
 def test_mpesa_person_transfer_has_no_match_text():
     assert key("M-Pesa", "Customer Transfer to 254700000000 - KFC MWANGI").match_text == ""
+
+
+# --- Equity Bank (ab-273) -------------------------------------------------
+# Rows as the Equity parser produces them after ab-272. Equity sometimes
+# splits the phone number's last digit onto the next token, so a person is
+# identified by the name words, not the phone.
+
+EQUITY_PERSON_ROWS = [
+    ("MPS 25470000009 9AB12CD34EF JOHN DOE 1A2b3C4d5E6f 0000000000001", "in"),
+    ("25470000009 9AB56GH78IJ JOHN DOE 0000 7G8h9I0j1K2l 007G8h9I0j1K2l", "in"),
+    ("MPS 254711111111 QW12ER34TY JANE ROE 3M4n5O6p7Q8r", "out"),
+    ("0711111111 QW56ER78TY JANE ROE", "out"),
+]
+
+
+@pytest.mark.parametrize("description,direction", EQUITY_PERSON_ROWS)
+def test_equity_person_rows_are_private_hashed_references(description, direction):
+    k = key("Equity Bank", description, direction)
+    assert k.kind == "reference"
+    assert k.provider == "Equity Bank"
+    assert k.is_person is True
+    assert k.value.startswith("h:")
+    assert k.name is None and k.match_text == ""
+    assert not k.is_business
+    for word in ("JOHN", "JANE", "2547", "0711"):
+        assert word not in k.value
+
+
+def test_equity_same_person_gets_the_same_key_whatever_the_refs():
+    first = key("Equity Bank", EQUITY_PERSON_ROWS[0][0], "in")
+    second = key("Equity Bank", EQUITY_PERSON_ROWS[1][0], "in")
+    assert first.value == second.value
+    jane = key("Equity Bank", EQUITY_PERSON_ROWS[2][0])
+    assert jane.value != first.value
+
+
+def test_equity_transfer_to_a_business_stays_a_business_name():
+    k = key("Equity Bank", "MPS 254722222222 ZX12CV34BN SAMPLE HARDWARE LIMITED 9Z8y7X6w5V4u")
+    assert k.kind == "name"
+    assert k.is_person is False
+    assert k.is_business is True
+    assert k.value == "SAMPLE HARDWARE LIMITED"
+
+
+@pytest.mark.parametrize(
+    "description,expected",
+    [
+        ("USSD/SAMPLE CREDIT LIMITED/ U5C3A6F8A3460", "USSD/SAMPLE CREDIT LIMITED/"),
+        ("SMS CHARGE U5C3A6F8A3460", "SMS CHARGE"),
+        ("Interim statement printing charges Interim statmnt print chrgs", "INTERIM STATEMENT PRINTING CHARGES INTERIM STATMNT PRINT CHRGS"),
+    ],
+)
+def test_equity_business_and_charge_rows_keep_name_keys(description, expected):
+    k = key("Equity Bank", description)
+    assert k.kind == "name"
+    assert k.is_person is False
+    assert k.value == expected

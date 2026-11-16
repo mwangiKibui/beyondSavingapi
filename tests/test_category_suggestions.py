@@ -474,6 +474,9 @@ PERSON_ROWS = [
     ("M-Pesa", "Funds received from - 254711***111 JANE ROE", "in"),
     ("NCBA Bank", "MPESA PAYBILL TRANSFER MPESA REF: TJK12AB34C JANE ROE", "in"),
     ("NCBA Bank", "IB INCOMING MOBILE PAYMENTS FTX26216ABCDE JANE ROE", "in"),
+    # ab-273: Equity M-Pesa transfers, with and without the MPS prefix.
+    ("Equity Bank", "MPS 25470000009 9AB12CD34EF JOHN DOE 1A2b3C4d5E6f 0000000000001", "in"),
+    ("Equity Bank", "25470000009 9AB56GH78IJ JOHN DOE 0000 7G8h9I0j1K2l", "in"),
 ]
 
 
