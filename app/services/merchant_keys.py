@@ -38,6 +38,7 @@ from dataclasses import dataclass, replace
 MPESA = "M-Pesa"
 NCBA = "NCBA Bank"
 MENTOR = "Mentor Sacco"
+EQUITY = "Equity Bank"
 
 _BUSINESS_TOKENS = {
     "LTD", "LIMITED", "PLC", "CO", "COMPANY", "ENTERPRISE", "ENTERPRISES", "SUPERMARKET", "SUPERMARKETS",
@@ -282,6 +283,23 @@ def _mentor(text: str) -> RowKey:
     return _fallback(re.sub(r"(?<=[A-Z])-(?=[A-Z])", " ", text))
 
 
+# --- Equity Bank ------------------------------------------------------------
+
+# An M-Pesa transfer: "MPS <phone> <ref> <NAME> <refs…>", or the same without
+# "MPS". Equity sometimes splits the phone's last digit onto the next token,
+# so the person is identified by the name words, never the phone (ab-273).
+_EQUITY_TRANSFER = re.compile(r"^(?:MPS\b|(?:254|07|01)\d{7,}\b)")
+
+
+def _equity(text: str, secret: str) -> RowKey:
+    if not _EQUITY_TRANSFER.match(text):
+        return _fallback(text)
+    words = _words_only(re.sub(r"^MPS\b", "", text))
+    if words and looks_like_business(words):
+        return _name_row(words)
+    return _person_row(EQUITY, words or text, secret=secret)
+
+
 # --- everything else ------------------------------------------------------
 
 
@@ -309,4 +327,6 @@ def extract_key(*, provider: str, description: str | None, direction: str, secre
         return _ncba(text, secret)
     if provider == MENTOR:
         return _mentor(text)
+    if provider == EQUITY:
+        return _equity(text, secret)
     return _fallback(text)

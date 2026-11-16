@@ -153,6 +153,8 @@ def test_person_rows_from_real_statement_text_never_vote_or_carry_the_text():
         ("M-Pesa", "Customer Transfer Fuliza MPesa to - 254700***000 JOHN DOE", "out"),
         ("M-Pesa", "Funds received from - 254711***111 JANE ROE", "in"),
         ("NCBA Bank", "MPESA PAYBILL TRANSFER MPESA REF: TJK12AB34C JANE ROE", "in"),
+        ("Equity Bank", "MPS 254700000000 9AB12CD34EF JOHN DOE 1A2b3C4d5E6f", "in"),
+        ("Equity Bank", "0711111111 QW56ER78TY JANE ROE", "out"),
     ]
     rows = [
         row(extract_key(provider=p, description=t, direction=d, secret="s"), direction=d)
@@ -162,5 +164,5 @@ def test_person_rows_from_real_statement_text_never_vote_or_carry_the_text():
     assert learning.merchant_votes == [] and learning.number_votes == []
     # Only the user's own rules are written, keyed by the private hash.
     dumped = repr(learning)
-    for word in ("JOHN", "JANE", "254700", "254711", "Customer Transfer"):
+    for word in ("JOHN", "JANE", "254700", "254711", "0711", "MPS", "Customer Transfer"):
         assert word not in dumped
