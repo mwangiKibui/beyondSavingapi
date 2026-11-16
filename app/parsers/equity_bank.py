@@ -33,6 +33,17 @@ _TOTAL_LINE_RE = re.compile(
 
 _CURRENCY_RE = re.compile(r"Currency\s+([A-Z]{3})")
 
+# The table's column-heading line (often rendered with doubled letters).
+# Everything above it on a page is the statement/page header, never part
+# of a transaction (ab-272).
+_HEADING_RE = re.compile(r"^Transaction Details\b.*\bBalance$", re.IGNORECASE)
+
+# Page footer lines - the table ends at the first one on each page.
+_FOOTER_RE = re.compile(r"^(Disclaimer:|.*\bPage \d+/\d+$)", re.IGNORECASE)
+
+# One text line on a page: (vertical centre, text).
+Line = tuple[float, str]
+
 
 def _dedouble_word(word: str) -> str:
     """Undoes a faux-bold rendering trick this template uses for some
@@ -63,40 +74,72 @@ def _dedupe_hash(*, reference: str, description: str, amount: float) -> str:
 
 def parse_equity_bank_statement(content: bytes) -> list[ParsedTransaction]:
     with pdfplumber.open(io.BytesIO(content)) as pdf:
-        full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
-    return _parse_statement_text(full_text)
+        pages = [
+            [((line["top"] + line["bottom"]) / 2, line["text"]) for line in page.extract_text_lines()]
+            for page in pdf.pages
+        ]
+    return _parse_pages(pages)
 
 
 def _parse_statement_text(full_text: str) -> list[ParsedTransaction]:
+    """Plain-text entry point (one page, one unit of height per line)."""
+    return _parse_pages([[(float(i), text) for i, text in enumerate(full_text.split("\n"))]])
+
+
+def _table_lines(page: list[Line]) -> list[Line]:
+    """The lines between a page's column heading and its Total/footer."""
+    start = next(
+        (i + 1 for i, (_, text) in enumerate(page) if _HEADING_RE.match(_dedouble_line(text.strip()))),
+        0,
+    )
+    table: list[Line] = []
+    for y, text in page[start:]:
+        stripped = text.strip()
+        if _TOTAL_LINE_RE.match(_dedouble_line(stripped)) or _FOOTER_RE.match(stripped):
+            break
+        if stripped:
+            table.append((y, stripped))
+    return table
+
+
+def _rows_on_page(page: list[Line]) -> list[dict]:
+    """Equity prints a row's details around its amounts line - some above,
+    some below - so each detail line belongs to the amounts line nearest to
+    it vertically (the earlier row on a tie), not simply the next one.
+    """
+    lines = _table_lines(page)
+    data = {i: m for i, (_, text) in enumerate(lines) if (m := _DATA_LINE_RE.match(text))}
+    if not data:
+        return []
+
+    parts: dict[int, list[Line]] = {i: [] for i in data}
+    for i, (y, text) in enumerate(lines):
+        if i in data:
+            prefix = data[i].group("prefix").strip()
+            if prefix:
+                parts[i].append((y, prefix))
+            continue
+        owner = min(data, key=lambda d: (abs(lines[d][0] - y), d))
+        parts[owner].append((y, text))
+
+    return [
+        {
+            "reference": m.group("reference"),
+            "date": m.group("date"),
+            "balance": _parse_number(m.group("balance")),
+            "description": " ".join(text for _, text in sorted(parts[i], key=lambda p: p[0])),
+        }
+        for i, m in data.items()
+    ]
+
+
+def _parse_pages(pages: list[list[Line]]) -> list[ParsedTransaction]:
+    full_text = "\n".join(text for page in pages for _, text in page)
     currency_match = _CURRENCY_RE.search(full_text)
     currency = currency_match.group(1) if currency_match else DEFAULT_CURRENCY
 
     lines = full_text.split("\n")
-
-    raw_rows: list[dict] = []
-    pending: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if _TOTAL_LINE_RE.match(_dedouble_line(stripped)):
-            continue  # closing summary row, not a transaction - handled separately below
-
-        match = _DATA_LINE_RE.match(stripped)
-        if not match:
-            if stripped:
-                pending.append(stripped)
-            continue
-
-        prefix = match.group("prefix").strip()
-        detail_parts = pending + ([prefix] if prefix else [])
-        raw_rows.append(
-            {
-                "reference": match.group("reference"),
-                "date": match.group("date"),
-                "balance": _parse_number(match.group("balance")),
-                "description": " ".join(detail_parts),
-            }
-        )
-        pending = []
+    raw_rows = [row for page in pages for row in _rows_on_page(page)]
 
     total_match = next(
         (m for line in lines if (m := _TOTAL_LINE_RE.match(_dedouble_line(line.strip())))), None
