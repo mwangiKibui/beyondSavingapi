@@ -13,6 +13,7 @@ SAMPLE_ITEM = {
     "id": str(uuid4()),
     "name": "Groceries",
     "type": "expense",
+    "entry_type": "general",
     "is_default": True,
 }
 

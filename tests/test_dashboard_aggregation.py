@@ -43,6 +43,7 @@ def test_build_dashboard_includes_a_zero_activity_account():
             "account_nickname": "Empty Account",
             "money_in": ZERO,
             "money_out": ZERO,
+            "saving": ZERO,
         }
     ]
 
@@ -166,3 +167,21 @@ async def test_get_dashboard_sums_only_overlapping_same_currency_budget_plans():
     # "October plan" doesn't overlap, "Different currency plan" is USD,
     # "No cap set" has nothing to add.
     assert dashboard["total_budget"] == Decimal("20000.00")
+
+
+def test_saving_is_apart_from_money_in_and_out():
+    account_id = uuid4()
+    rows = [
+        _row(account_id=account_id, transaction_id=uuid4(), txn_amount=Decimal("3000.00"), direction="in",
+             handled_as="saving", saving=Decimal("3000.00")),
+        _row(account_id=account_id, transaction_id=uuid4(), txn_amount=Decimal("1200.00"), direction="out",
+             saving=Decimal("1000.00")),
+        _row(account_id=account_id, transaction_id=uuid4(), txn_amount=Decimal("8000.00"), direction="in",
+             saving=Decimal("0.00")),
+    ]
+    dashboard = build_dashboard(rows, total_budget=ZERO, currency="KES")
+    assert (dashboard["total_in"], dashboard["total_out"], dashboard["total_saving"]) == (
+        Decimal("8000.00"), Decimal("200.00"), Decimal("4000.00")
+    )
+    assert dashboard["net"] == Decimal("3800.00")
+    assert dashboard["accounts"][0]["saving"] == Decimal("4000.00")

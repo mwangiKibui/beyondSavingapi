@@ -173,6 +173,7 @@ def build_report_pdf(
     summary_data = [
         ["Total in", f"{report['total_in']} {currency}"],
         ["Total out", f"{report['total_out']} {currency}"],
+        ["Saved", f"{report.get('total_saving', 0)} {currency}"],
         ["Net", f"{report['net']} {currency}"],
         ["Reconciled, no category", f"{report['reconciled_no_category_total']} {currency}"],
         ["Unreconciled", f"{report['unreconciled_total']} {currency}"],

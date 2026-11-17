@@ -60,7 +60,7 @@ class PayeeGroup(BaseModel):
     category_name: str | None = None
     apply_id: UUID | None = None
     # Handled tab only (ab-281).
-    handled_as: Literal["charge", "loan", "transfer"] | None = None
+    handled_as: Literal["charge", "loan", "transfer", "saving"] | None = None
     handled_reason: str | None = None
     rows: list[GroupRow]
 

@@ -94,6 +94,7 @@ def test_a_fully_categorized_transaction_appears_in_by_category_not_unreconciled
             "category_id": GROCERIES_ID,
             "category_name": "Groceries",
             "category_type": "expense",
+            "entry_type": "general",
             "total": Decimal("500.00"),
         }
     ]
@@ -279,6 +280,7 @@ def test_build_account_summary_includes_an_account_with_zero_transactions():
             "account_nickname": "Empty Account",
             "money_in": Decimal("0.00"),
             "money_out": Decimal("0.00"),
+            "saving": Decimal("0.00"),
         }
     ]
 
@@ -310,6 +312,7 @@ def test_build_account_summary_sums_allocated_amount_by_direction_per_account():
             "account_nickname": "KCB Salary",
             "money_in": Decimal("1000.00"),
             "money_out": Decimal("300.00"),
+            "saving": Decimal("0.00"),
         }
     ]
 
@@ -877,3 +880,63 @@ def test_account_summary_skips_uncategorised_loan_rows():
         {**base, "direction": "in", "alloc_amount": Decimal("300.00"), "category_id": SALARY_ID, "handled_as": None},
     ]
     assert build_account_summary(rows)[0]["money_in"] == Decimal("300.00")
+
+
+# --- ab-259: the Saving bucket ------------------------------------------------
+
+
+def test_saving_is_neither_income_nor_spending_and_counted_once():
+    salary = _row(transaction_id=uuid4(), txn_amount=Decimal("50000.00"), direction="in",
+                  allocation_id=uuid4(), category_id=uuid4(), category_name="Salary", category_type="income",
+                  alloc_amount=Decimal("50000.00"))
+    # Withdrawable side of a move into deposits: a transfer, netted out.
+    move_out = _row(transaction_id=uuid4(), txn_amount=Decimal("3000.00"), direction="out", handled_as="transfer",
+                    sub_ledger_role="spending", allocation_id=uuid4(), transfer_reason_id=uuid4(),
+                    alloc_amount=Decimal("3000.00"))
+    # Deposits side: the saving.
+    move_in = _row(transaction_id=uuid4(), txn_amount=Decimal("3000.00"), direction="in", handled_as="saving",
+                   sub_ledger_role="locked_saving", allocation_id=uuid4(), alloc_amount=Decimal("3000.00"))
+    # A deposit withdrawal.
+    exit_refund = _row(transaction_id=uuid4(), txn_amount=Decimal("500.00"), direction="out", handled_as="saving",
+                       sub_ledger_role="locked_saving", allocation_id=uuid4(), alloc_amount=Decimal("500.00"))
+    # Only M-Pesa uploaded: a Paybill to a money-market fund, split with groceries.
+    mmf_txn = uuid4()
+    mmf = _row(transaction_id=mmf_txn, txn_amount=Decimal("1200.00"), direction="out", allocation_id=uuid4(),
+               category_id=uuid4(), category_name="Investments & money market", category_type="expense",
+               category_entry_type="saving", alloc_amount=Decimal("1000.00"))
+    food = _row(transaction_id=mmf_txn, txn_amount=Decimal("1200.00"), direction="out", allocation_id=uuid4(),
+                category_id=uuid4(), category_name="Groceries", category_type="expense",
+                category_entry_type="general", alloc_amount=Decimal("200.00"))
+
+    report = build_report([salary, move_out, move_in, exit_refund, mmf, food], currency="KES")
+
+    assert report["total_in"] == Decimal("50000.00")
+    assert report["total_out"] == Decimal("200.00")
+    assert report["total_saving"] == Decimal("3500.00")  # 3000 in - 500 out + 1000 MMF
+    assert report["net"] == Decimal("46300.00")
+    assert report["reconciled_no_category_total"] == Decimal("0.00")
+    entry_types = {b["category_name"]: b["entry_type"] for b in report["by_category"]}
+    assert entry_types["Investments & money market"] == "saving"
+
+
+def test_withdrawable_side_alone_counts_as_saving():
+    move_out = _row(transaction_id=uuid4(), txn_amount=Decimal("3000.00"), direction="out", handled_as="saving",
+                    sub_ledger_role="spending", allocation_id=uuid4(), alloc_amount=Decimal("3000.00"))
+    report = build_report([move_out], currency="KES")
+    assert (report["total_out"], report["total_saving"]) == (Decimal("0.00"), Decimal("3000.00"))
+
+
+def test_account_summary_shows_saving_apart():
+    account_id = uuid4()
+    rows = [
+        _account_summary_row(account_id=account_id, transaction_id=uuid4(), direction="in", allocation_id=uuid4(),
+                             alloc_amount=Decimal("3000.00"), handled_as="saving", sub_ledger_role="locked_saving"),
+        _account_summary_row(account_id=account_id, transaction_id=uuid4(), direction="out", allocation_id=uuid4(),
+                             alloc_amount=Decimal("700.00"), category_id=uuid4(), category_entry_type="saving"),
+        _account_summary_row(account_id=account_id, transaction_id=uuid4(), direction="out", allocation_id=uuid4(),
+                             alloc_amount=Decimal("200.00"), category_id=uuid4()),
+    ]
+    [item] = build_account_summary(rows)
+    assert (item["money_in"], item["money_out"], item["saving"]) == (
+        Decimal("0.00"), Decimal("200.00"), Decimal("3700.00")
+    )

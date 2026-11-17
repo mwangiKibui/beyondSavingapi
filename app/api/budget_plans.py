@@ -96,6 +96,8 @@ class BudgetPlanListItem(BudgetPlanResponse):
     total_state: str | None
     total_expenditure: Decimal
     total_income: Decimal
+    # ab-259: net money into savings in the plan's window.
+    total_saving: Decimal = Decimal("0.00")
 
 
 class BudgetPlanListResponse(BaseModel):

@@ -81,7 +81,12 @@ def test_create_sub_ledger_success(client, fake_user, fake_pool, monkeypatch):
     assert response.status_code == 201
     assert response.json()["name"] == "Ordinary Deposit"
     _, kwargs = mock_create.call_args
-    assert kwargs == {"account_id": ACCOUNT_ID, "name": "Ordinary Deposit", "balance_treatment": "addition"}
+    assert kwargs == {
+        "account_id": ACCOUNT_ID,
+        "name": "Ordinary Deposit",
+        "balance_treatment": "addition",
+        "role": "locked_saving",
+    }
 
 
 def test_create_sub_ledger_rejects_invalid_balance_treatment(client, fake_user, fake_pool, monkeypatch):
@@ -128,6 +133,7 @@ def test_update_sub_ledger_renames_it(client, fake_user, fake_pool, monkeypatch)
         "account_id": ACCOUNT_ID,
         "name": "Deposits",
         "balance_treatment": None,
+        "role": None,
     }
 
 
@@ -171,3 +177,30 @@ def test_endpoints_log_and_return_generic_500_on_unexpected_error(client, fake_u
     body = response.json()
     assert body["detail"] == "Something went wrong. Please try again."
     assert "secret=xyz" not in body["detail"]
+
+
+def test_create_sub_ledger_keeps_a_given_role(client, fake_user, fake_pool, monkeypatch):
+    monkeypatch.setattr("app.api.sub_ledgers.get_account", AsyncMock(return_value=FAKE_ACCOUNT))
+    mock_create = AsyncMock(return_value=SUB_LEDGER)
+    monkeypatch.setattr("app.api.sub_ledgers.create_sub_ledger", mock_create)
+
+    client.post(_base_url(), json={"name": "Ordinary Deposit", "balance_treatment": "addition", "role": "spending"})
+
+    assert mock_create.call_args.kwargs["role"] == "spending"
+
+
+def test_create_sub_ledger_rejects_unknown_role(client, fake_user, fake_pool, monkeypatch):
+    monkeypatch.setattr("app.api.sub_ledgers.get_account", AsyncMock(return_value=FAKE_ACCOUNT))
+    response = client.post(_base_url(), json={"name": "X", "balance_treatment": "addition", "role": "piggy"})
+    assert response.status_code == 422
+
+
+def test_update_sub_ledger_role_only(client, fake_user, fake_pool, monkeypatch):
+    monkeypatch.setattr("app.api.sub_ledgers.get_account", AsyncMock(return_value=FAKE_ACCOUNT))
+    mock_update = AsyncMock(return_value=SUB_LEDGER)
+    monkeypatch.setattr("app.api.sub_ledgers.update_sub_ledger", mock_update)
+
+    response = client.patch(f"{_base_url()}/{SUB_LEDGER_ID}", json={"role": "shares"})
+
+    assert response.status_code == 200
+    assert mock_update.call_args.kwargs["role"] == "shares"

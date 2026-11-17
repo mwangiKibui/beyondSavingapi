@@ -22,6 +22,7 @@ class AccountPerformance(BaseModel):
     account_nickname: str
     money_in: Decimal
     money_out: Decimal
+    saving: Decimal = Decimal("0.00")
 
 
 class DashboardResponse(BaseModel):
@@ -29,6 +30,8 @@ class DashboardResponse(BaseModel):
     total_budget: Decimal
     total_in: Decimal
     total_out: Decimal
+    # ab-259: net money into savings - neither income nor spending.
+    total_saving: Decimal = Decimal("0.00")
     net: Decimal
     accounts: list[AccountPerformance]
 

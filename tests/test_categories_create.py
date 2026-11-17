@@ -108,3 +108,22 @@ def test_create_category_logs_and_returns_generic_500_on_unexpected_error(
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(error_records) == 1
     assert error_records[0].exc_info is not None
+
+
+def test_create_category_passes_entry_type(client, fake_user, fake_pool, monkeypatch):
+    created = AsyncMock(return_value={
+        "id": uuid4(), "name": "Chama", "type": "expense", "entry_type": "saving",
+        "is_default": False, "created_at": "2026-11-17T00:00:00+00:00",
+    })
+    monkeypatch.setattr("app.api.categories.create_category", created)
+
+    response = client.post("/categories", json={"name": "Chama", "type": "expense", "entry_type": "saving"})
+
+    assert response.status_code == 201
+    assert response.json()["entry_type"] == "saving"
+    assert created.await_args.kwargs["entry_type"] == "saving"
+
+
+def test_create_category_rejects_saving_income(client, fake_user):
+    response = client.post("/categories", json={"name": "Odd", "type": "income", "entry_type": "saving"})
+    assert response.status_code == 422

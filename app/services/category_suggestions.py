@@ -25,6 +25,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from uuid import UUID
 
+from app.repositories.categories import DIVIDENDS_CATEGORY
+from app.services.row_handling import is_savings_earning
 from app.services.merchant_keys import RowKey, extract_key
 
 CATEGORY_TYPE_FOR_DIRECTION = {"out": "expense", "in": "income"}
@@ -475,6 +477,11 @@ def build_preview_rows(
             if merchant:
                 suggestion = _shared(merchant.category_name, by_name, wanted_type, "directory")
                 suggestion["merchant_name"] = merchant.display_name
+
+        # ab-259: dividends and interest the savings earned - suggested,
+        # never filed without the user.
+        if suggestion is None and direction == "in" and is_savings_earning(row["description"]):
+            suggestion = _shared(DIVIDENDS_CATEGORY, by_name, wanted_type, "directory")
 
         out.append({
             "transaction_id": row["id"],

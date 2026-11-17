@@ -5,7 +5,7 @@ from uuid import UUID
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.core.db import get_pool
 from app.core.errors import GENERIC_ERROR_MESSAGE
@@ -22,17 +22,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/categories", tags=["categories"])
 
 CategoryType = Literal["expense", "income"]
+# ab-259: refines an expense - saving and loan repayments are neither
+# spending nor income in reports.
+EntryType = Literal["general", "saving", "loan_repayment"]
 
 
 class CreateCategoryRequest(BaseModel):
     name: str = Field(min_length=1)
     type: CategoryType
+    entry_type: EntryType = "general"
+
+    @model_validator(mode="after")
+    def _income_is_general(self):
+        if self.type == "income" and self.entry_type != "general":
+            raise ValueError("Only expense categories can be a saving or a loan repayment")
+        return self
 
 
 class CategoryResponse(BaseModel):
     id: UUID
     name: str
     type: str
+    entry_type: EntryType = "general"
     is_default: bool
     created_at: datetime
 
@@ -46,6 +57,7 @@ class CategoryListItem(BaseModel):
     id: UUID
     name: str
     type: str
+    entry_type: EntryType = "general"
     is_default: bool
 
 
@@ -58,6 +70,8 @@ class CategoryListResponse(BaseModel):
 
 class UpdateCategoryRequest(BaseModel):
     name: str = Field(min_length=1)
+    # Omitted keeps it. Ignored on income categories.
+    entry_type: EntryType | None = None
 
 
 @router.post("", response_model=CategoryResponse, status_code=status.HTTP_201_CREATED)
@@ -74,7 +88,7 @@ async def create_category_endpoint(
 
     try:
         category = await create_category(
-            pool, user_id=user_id, name=payload.name, category_type=payload.type
+            pool, user_id=user_id, name=payload.name, category_type=payload.type, entry_type=payload.entry_type
         )
     except DuplicateCategory as exc:
         raise HTTPException(
@@ -151,7 +165,9 @@ async def update_category_endpoint(
         )
 
     try:
-        category = await update_category(pool, category_id=category_id, user_id=user_id, name=payload.name)
+        category = await update_category(
+            pool, category_id=category_id, user_id=user_id, name=payload.name, entry_type=payload.entry_type
+        )
         if category is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
     except HTTPException:
