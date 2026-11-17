@@ -508,6 +508,9 @@ class ReviewGroupsResponse(BaseModel):
     counts: ReviewTabCounts
     # Statement rows per tab - the review's stat cards and progress (ab-283).
     row_counts: ReviewTabCounts
+    # To-decide groups that have a suggestion, whatever the filters - "Use
+    # all N suggestions" (ab-283).
+    suggested: int
 
 
 @router.get("/{import_id}/groups", response_model=ReviewGroupsResponse)
@@ -542,6 +545,7 @@ async def review_groups_endpoint(
         "page_size": params.page_size,
         "counts": {t: len(g) for t, g in grouped.items()},
         "row_counts": {t: len(rows) for t, rows in by_tab.items()},
+        "suggested": sum(1 for g in grouped["decide"] if g.get("suggestion")),
     }
 
 

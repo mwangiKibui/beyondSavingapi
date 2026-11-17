@@ -177,6 +177,7 @@ def test_review_groups_split_rows_into_tabs(client, fake_user, fake_pool, review
     decide = client.get(f"/statement-imports/{IMPORT_ID}/groups").json()
     assert decide["counts"] == {"decide": 1, "decided": 1, "sorted": 1, "handled": 1}
     assert decide["row_counts"] == {"decide": 2, "decided": 1, "sorted": 1, "handled": 1}
+    assert decide["suggested"] == 1
     g = decide["items"][0]
     assert g["row_count"] == 2 and g["label"] == "Corner shop"
     assert g["suggestion"]["category_id"] == str(GROCERIES["id"]) and g["suggestion"]["source"] == "your_rule"
@@ -201,6 +202,7 @@ def test_review_groups_search_keeps_tab_counts(client, fake_user, fake_pool, rev
 
     assert body["total"] == 1 and "KPLC" in body["items"][0]["rows"][0]["description"]
     assert body["counts"]["decide"] == 2
+    assert body["suggested"] == 0
 
 
 def test_review_groups_404_for_another_users_import(client, fake_user, fake_pool, review):
