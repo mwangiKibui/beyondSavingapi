@@ -186,7 +186,7 @@ class HandledRow(BaseModel):
     currency: str
     direction: str
     description: str | None = None
-    handled_as: Literal["charge", "loan", "transfer"]
+    handled_as: Literal["charge", "loan", "transfer", "saving"]
     reason: str
     # The category it was filed under; None for loan rows that are neither
     # income nor spending, and for transfers.

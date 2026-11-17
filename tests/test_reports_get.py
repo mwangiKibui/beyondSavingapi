@@ -168,6 +168,7 @@ def _account_summary_item(**overrides):
         "account_nickname": "KCB Salary",
         "money_in": "12345.00",
         "money_out": "6789.00",
+        "saving": "0.00",
     }
     base.update(overrides)
     return base

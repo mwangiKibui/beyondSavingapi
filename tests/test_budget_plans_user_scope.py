@@ -33,7 +33,9 @@ class RecordingPool:
     def __init__(self, fetch=None, fetchrow=None, fetchval=None):
         self.calls = []
         self._fetch = fetch or (lambda sql, args: [])
-        self._fetchrow = fetchrow or (lambda sql, args: {"total_income": Decimal("0"), "total_expenditure": Decimal("0")})
+        self._fetchrow = fetchrow or (
+            lambda sql, args: {"total_income": Decimal("0"), "total_expenditure": Decimal("0"), "total_saving": Decimal("0")}
+        )
         self._fetchval = fetchval or (lambda sql, args: None)
 
     async def fetch(self, sql, *args):
@@ -66,13 +68,15 @@ def assert_counted_only(sql):
 
 @pytest.mark.asyncio
 async def test_plan_totals_reads_only_the_users_allocations():
-    pool = RecordingPool(fetchrow=lambda sql, args: {"total_income": Decimal("50"), "total_expenditure": Decimal("20")})
+    pool = RecordingPool(fetchrow=lambda sql, args: {
+        "total_income": Decimal("50"), "total_expenditure": Decimal("20"), "total_saving": Decimal("5")
+    })
 
     totals = await budget_plans.plan_totals(
         pool, user_id=USER, currency="KES", starts_at=PLAN["starts_at"], ends_at=PLAN["ends_at"]
     )
 
-    assert totals == (Decimal("50"), Decimal("20"))
+    assert totals == (Decimal("50"), Decimal("20"), Decimal("5"))
     sql, args = pool.calls[0]
     assert_user_scoped(sql, args)
     assert_counted_only(sql)

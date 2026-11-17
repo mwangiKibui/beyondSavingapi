@@ -48,6 +48,7 @@ def repo(monkeypatch):
         "get_handled_transaction": AsyncMock(return_value=None),
         "dismiss_handling": AsyncMock(),
         "unlink_transfer": AsyncMock(),
+        "set_transfer_group": AsyncMock(),
         "get_category": AsyncMock(return_value=None),
     }
     for name, mock in mocks.items():
@@ -221,3 +222,59 @@ async def test_change_category_rejections(repo, handled_as, category, status):
     with pytest.raises(HandlingRejected) as rejected:
         await change_handled_category(object(), transaction_id=uuid4(), user_id=USER, category_id=uuid4())
     assert rejected.value.status_code == status
+
+
+# --- ab-259: saving inside a SACCO ----------------------------------------------
+
+SACCO_ACC = uuid4()
+SACCO_IMPORT = {**IMPORT, "account_id": SACCO_ACC, "provider": "Mentor Sacco"}
+MOVE = "ATRC-07315 MPA Recovery:-Non-Withdrawable Deposits"
+
+
+def sacco(description, *, direction, role, name, amount=3000.0, day=7):
+    return {**txn(description, amount=amount, direction=direction, day=day), "account_id": SACCO_ACC,
+            "sub_ledger_role": role, "sub_ledger_name": name}
+
+
+async def test_a_move_into_deposits_counts_as_saving_once(repo):
+    repo["get_owned_providers"].return_value = {"Mentor Sacco"}
+    repo["create_categories"].return_value = []
+    out_side = sacco(MOVE, direction="out", role="spending", name="Savings Account")
+    in_side = sacco(MOVE, direction="in", role="locked_saving", name="Ordinary Deposit")
+    lone = sacco("ATRC-09243 MPA Recovery:-Non-Withdrawable Deposits", direction="in", role="locked_saving",
+                 name="Ordinary Deposit", amount=829.75, day=9)
+    repo["get_import_rows"].return_value = [out_side, in_side, lone]
+
+    result = await handle_import(object(), statement_import=SACCO_IMPORT, secret=SECRET)
+
+    assert result.counts == {"saving": 2, "transfer": 1}
+    handled = dict(zip(repo["set_handled"].call_args.kwargs["transaction_ids"],
+                       zip(repo["set_handled"].call_args.kwargs["kinds"], repo["set_handled"].call_args.kwargs["reasons"])))
+    assert handled[out_side["id"]] == ("transfer", "Moved to your Ordinary Deposit")
+    assert handled[in_side["id"]] == ("saving", "Into your savings from Savings Account")
+    assert handled[lone["id"]] == ("saving", "Into your savings")
+    allocations = {a["transaction_id"]: a for a in repo["insert_handled_allocations"].call_args.kwargs["allocations"]}
+    # The savings side carries no category; the withdrawable side is netted out.
+    assert allocations[in_side["id"]].get("category_id") is None
+    assert allocations[in_side["id"]].get("transfer_reason_id") is None
+    assert allocations[out_side["id"]]["transfer_reason_id"] == REASON_ID
+    assert allocations[out_side["id"]]["source_account_id"] == SACCO_ACC
+    repo["set_transfer_group"].assert_awaited_once()
+    assert repo["set_transfer_group"].call_args.kwargs["ids"] == [out_side["id"], in_side["id"]]
+
+
+async def test_undo_the_withdrawable_side_keeps_the_savings_side_saving(repo):
+    other_id = uuid4()
+    row = {**handled(MOVE, handled_as="transfer", provider="Mentor Sacco", paired=other_id), "sub_ledger_role": "spending"}
+    partner = {**handled(MOVE, handled_as="saving", provider="Mentor Sacco", direction="in", amount=3000.0),
+               "id": other_id, "sub_ledger_role": "locked_saving"}
+    repo["get_handled_transaction"].side_effect = [row, partner]
+
+    back = await undo_handling(object(), transaction_id=row["id"], user_id=USER, secret=SECRET)
+
+    assert back == [row["id"]]
+    assert repo["set_handled"].call_args.kwargs == {
+        "transaction_ids": [other_id], "kinds": ["saving"], "reasons": ["Into your savings"]
+    }
+    kept = repo["insert_handled_allocations"].call_args.kwargs["allocations"][0]
+    assert kept["transaction_id"] == other_id and kept.get("category_id") is None

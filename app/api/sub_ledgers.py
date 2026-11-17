@@ -11,6 +11,7 @@ from app.core.db import get_pool
 from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.security import get_current_user_id
 from app.repositories.accounts import get_account
+from app.services.sub_ledger_roles import infer_role
 from app.repositories.sub_ledgers import (
     DuplicateSubLedger,
     create_sub_ledger,
@@ -24,16 +25,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/accounts/{account_id}/sub-ledgers", tags=["sub-ledgers"])
 
 BalanceTreatment = Literal["addition", "deduction"]
+# ab-259: what the sub-ledger holds. Omitted on create, it's inferred from
+# the name (app.services.sub_ledger_roles.infer_role).
+SubLedgerRole = Literal["spending", "locked_saving", "shares", "loan"]
 
 
 class CreateSubLedgerRequest(BaseModel):
     name: str = Field(min_length=1)
     balance_treatment: BalanceTreatment
+    role: SubLedgerRole | None = None
 
 
 class UpdateSubLedgerRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1)
     balance_treatment: BalanceTreatment | None = None
+    role: SubLedgerRole | None = None
 
 
 class SubLedgerResponse(BaseModel):
@@ -41,6 +47,7 @@ class SubLedgerResponse(BaseModel):
     account_id: UUID
     name: str
     balance_treatment: str
+    role: SubLedgerRole = "spending"
     created_at: datetime
     updated_at: datetime
 
@@ -99,7 +106,11 @@ async def create_sub_ledger_endpoint(
     try:
         await _get_owned_account(pool, account_id=account_id, user_id=user_id)
         sub_ledger = await create_sub_ledger(
-            pool, account_id=account_id, name=payload.name, balance_treatment=payload.balance_treatment
+            pool,
+            account_id=account_id,
+            name=payload.name,
+            balance_treatment=payload.balance_treatment,
+            role=payload.role or infer_role(payload.name, payload.balance_treatment),
         )
     except HTTPException:
         raise
@@ -133,7 +144,7 @@ async def update_sub_ledger_endpoint(
         )
 
     try:
-        if payload.name is None and payload.balance_treatment is None:
+        if payload.name is None and payload.balance_treatment is None and payload.role is None:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="At least one of name or balance_treatment must be provided",
@@ -146,6 +157,7 @@ async def update_sub_ledger_endpoint(
             account_id=account_id,
             name=payload.name,
             balance_treatment=payload.balance_treatment,
+            role=payload.role,
         )
         if sub_ledger is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sub-ledger not found")

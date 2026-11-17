@@ -54,6 +54,7 @@ async def get_import_rows(
                (t.transfer_group_id IS NOT NULL) AS is_transfer,
                t.balance_after,
                t.account_id, t.handled_as, t.handled_reason, t.handling_dismissed,
+               t.sub_ledger_id, sl.name AS sub_ledger_name, sl.role AS sub_ledger_role,
                t.import_id, si.file_name, acct.nickname AS account_nickname,
                alloc.apply_id, COALESCE(alloc.applied_here, false) AS applied_here,
                pair.id AS paired_transaction_id, pair.txn_date AS paired_txn_date,
@@ -80,6 +81,7 @@ async def get_import_rows(
             WHERE al.transaction_id = t.id
         ) alloc ON true
         JOIN accounts acct ON acct.id = t.account_id
+        LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
         LEFT JOIN statement_imports si ON si.id = t.import_id
         -- ab-281: the other leg of a transfer between the user's accounts.
         LEFT JOIN LATERAL (

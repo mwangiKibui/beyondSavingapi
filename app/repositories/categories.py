@@ -48,7 +48,22 @@ DEFAULT_CATEGORIES: list[tuple[str, str]] = [
     ("Insurance", "expense"),
     ("Books & stationery", "expense"),
     ("Winnings", "income"),
+    # ab-259: saving (SACCO deposits/shares, money-market funds) is neither
+    # income nor spending; dividends and interest on deposits are income.
+    # Existing users get these via beyondSavingdb migration 000026.
+    ("SACCO savings", "expense"),
+    ("Investments & money market", "expense"),
+    ("SACCO dividends & interest", "income"),
 ]
+
+# Defaults that refine "expense" (categories.entry_type, ab-259); every
+# other default is "general".
+DEFAULT_ENTRY_TYPES: dict[str, str] = {
+    "SACCO savings": "saving",
+    "Investments & money market": "saving",
+}
+SAVINGS_CATEGORY = "SACCO savings"
+DIVIDENDS_CATEGORY = "SACCO dividends & interest"
 
 
 async def get_categories_by_ids(pool: asyncpg.Pool, *, category_ids: list[UUID], user_id: UUID) -> list[dict]:
@@ -71,8 +86,11 @@ async def get_categories_by_ids(pool: asyncpg.Pool, *, category_ids: list[UUID],
 
 async def seed_default_categories(conn: asyncpg.Connection, *, user_id: UUID) -> None:
     await conn.executemany(
-        "INSERT INTO categories (user_id, name, type, is_default) VALUES ($1, $2, $3, TRUE)",
-        [(user_id, name, category_type) for name, category_type in DEFAULT_CATEGORIES],
+        "INSERT INTO categories (user_id, name, type, is_default, entry_type) VALUES ($1, $2, $3, TRUE, $4)",
+        [
+            (user_id, name, category_type, DEFAULT_ENTRY_TYPES.get(name, "general"))
+            for name, category_type in DEFAULT_CATEGORIES
+        ],
     )
 
 
@@ -82,17 +100,19 @@ async def create_category(
     user_id: UUID,
     name: str,
     category_type: str,
+    entry_type: str = "general",
 ) -> dict:
     try:
         row = await pool.fetchrow(
             """
-            INSERT INTO categories (user_id, name, type)
-            VALUES ($1, $2, $3)
-            RETURNING id, name, type, is_default, created_at
+            INSERT INTO categories (user_id, name, type, entry_type)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id, name, type, entry_type, is_default, created_at
             """,
             user_id,
             name,
             category_type,
+            entry_type,
         )
     except asyncpg.UniqueViolationError as exc:
         raise DuplicateCategory() from exc
@@ -105,18 +125,23 @@ async def update_category(
     category_id: UUID,
     user_id: UUID,
     name: str,
+    entry_type: str | None = None,
 ) -> dict | None:
+    """entry_type None keeps it; income categories stay "general" (the
+    DB's categories_income_is_general check)."""
     try:
         row = await pool.fetchrow(
             """
             UPDATE categories
-            SET name = $1
+            SET name = $1,
+                entry_type = CASE WHEN type = 'expense' THEN COALESCE($4, entry_type) ELSE entry_type END
             WHERE id = $2 AND user_id = $3
-            RETURNING id, name, type, is_default, created_at
+            RETURNING id, name, type, entry_type, is_default, created_at
             """,
             name,
             category_id,
             user_id,
+            entry_type,
         )
     except asyncpg.UniqueViolationError as exc:
         raise DuplicateCategory() from exc
@@ -135,7 +160,7 @@ async def list_categories(
     sort_dir: str,
 ) -> tuple[list[dict], int]:
     base_query = """
-        SELECT id, name, type, is_default
+        SELECT id, name, type, entry_type, is_default
         FROM categories
         WHERE user_id = $1
           AND type = $2

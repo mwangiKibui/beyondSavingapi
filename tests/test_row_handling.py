@@ -233,3 +233,109 @@ def test_a_waiting_leg_for_another_provider_is_not_claimed():
     leg = row(NCBA, "out", 500.0, 5, handled_as="transfer", target=MPESA)
     other = row(MPESA, "in", 500.0, 5, handled_as="transfer", target=EQUITY)
     assert plan_pairs([leg], [other]) == []
+
+
+# --- ab-259: saving by sub-ledger role -----------------------------------------
+
+from app.parsers.mentor_sacco import parse_mentor_sacco_statement  # noqa: E402
+from app.services.row_handling import is_savings_earning, plan_saving_pairs  # noqa: E402
+from app.services.sub_ledger_roles import infer_role  # noqa: E402
+
+MENTOR_FIXTURE = test_parsers_ncba_bank.FIXTURE.parents[1] / "mentor_sacco" / "member_statement_sample.pdf"
+
+
+def classify_on(role, description, direction):
+    key = extract_key(provider=MENTOR, description=description, direction=direction, secret=SECRET)
+    return classify_row(
+        provider=MENTOR, description=description, direction=direction, key=key,
+        owned_providers=frozenset({MENTOR}), sub_ledger_role=role,
+    )
+
+
+@pytest.mark.parametrize("role", ["locked_saving", "shares"])
+def test_rows_on_a_saving_sub_ledger_are_saving(role):
+    into = classify_on(role, "ATRC-1 MPA Recovery:-Non-Withdrawable Deposits", "in")
+    out = classify_on(role, "SJN-2 Deposit refund on exit", "out")
+    assert (into.kind, into.category) == ("saving", None)
+    assert into.reason == "Into your savings"
+    assert (out.kind, out.reason) == ("saving", "Out of your savings")
+
+
+def test_loan_and_charge_rules_win_on_a_saving_sub_ledger():
+    assert classify_on("locked_saving", "ATRC-1 Loan Recovery:-Instant Loan", "out").kind == "loan"
+    assert classify_on("locked_saving", "SSP-1 SMS Charges-SSP1", "out").kind == "charge"
+
+
+@pytest.mark.parametrize(
+    "description",
+    ["SJN-9 Dividend 2025", "SJN-9 Interest on Deposits 2025", "INT-1 Interest Earned on Savings"],
+)
+def test_dividends_and_interest_go_to_the_review(description):
+    assert is_savings_earning(description)
+    assert classify_on("locked_saving", description, "in") is None
+    assert classify_on("shares", description, "in") is None
+
+
+def test_loan_interest_due_is_not_an_earning():
+    assert not is_savings_earning("INT-19/08/25 Interest Due-82025")
+
+
+def test_money_sent_to_deposits_from_the_withdrawable_account_is_saving():
+    handling = classify_on("spending", "ATRC-1 MPA Recovery:-Non-Withdrawable Deposits", "out")
+    assert (handling.kind, handling.reason) == ("saving", "Moved into your savings")
+    assert classify_on("spending", "ATRC-1 Share Capital contribution", "out").kind == "saving"
+
+
+def test_ordinary_rows_on_the_withdrawable_account_are_left_alone():
+    assert classify_on("spending", "SJN-1 RISK FUND AUGUST 2025", "out") is None
+    assert classify_on(None, "ATRC-1 MPA Recovery:-Non-Withdrawable Deposits", "out") is None
+
+
+def test_golden_mentor_sample_counts_saving_once():
+    counts = Counter()
+    for section in parse_mentor_sacco_statement(MENTOR_FIXTURE.read_bytes()):
+        role = infer_role(section["name"], "addition")
+        for r in section["transactions"]:
+            handling = classify_on(role, r["description"], r["direction"])
+            counts[(role, handling.kind if handling else "review")] += 1
+    # Both Ordinary Deposit credits are saving; the matching debit on the
+    # Savings Account is the other side of the same move (paired below).
+    assert counts[("locked_saving", "saving")] == 2
+    assert counts[("spending", "saving")] == 2
+    assert counts[("loan", "loan")] == 10
+    assert sum(n for (role, _), n in counts.items() if role == "locked_saving") == 2
+
+
+def _sacco_row(direction, role, *, day=7, amount=3000.0, description="ATRC-07315 MPA Recovery:-Non-Withdrawable Deposits"):
+    return {
+        "id": uuid4(), "account_id": NCBA_ACC, "direction": direction, "amount": amount,
+        "txn_date": date(2025, 8, day), "description": description, "sub_ledger_role": role,
+    }
+
+
+def test_saving_pairs_match_the_two_sides_of_one_sacco_move():
+    out_side, in_side = _sacco_row("out", "spending"), _sacco_row("in", "locked_saving")
+    other = _sacco_row("in", "locked_saving", day=9, amount=829.75, description="ATRC-09243 MPA Recovery:-Non-Withdrawable Deposits")
+    assert plan_saving_pairs([out_side, in_side, other]) == [(out_side, in_side)]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"amount": 2999.0}, {"day": 8}, {"description": "ATRC-1 MPA Recovery:-Non-Withdrawable Deposits"}],
+)
+def test_saving_pairs_need_same_amount_date_and_document(change):
+    assert plan_saving_pairs([_sacco_row("out", "spending"), _sacco_row("in", "locked_saving", **change)]) == []
+
+
+def test_a_withdrawal_from_deposits_pairs_the_other_way():
+    out_side, in_side = _sacco_row("out", "locked_saving"), _sacco_row("in", "spending")
+    assert plan_saving_pairs([in_side, out_side]) == [(in_side, out_side)]
+
+
+@pytest.mark.parametrize("role", ["loan", "locked_saving", "shares"])
+def test_an_mpesa_payment_never_pairs_with_a_non_spending_sub_ledger(role):
+    leg = row(MPESA, "out", 500, 10, handled_as="transfer", target=NCBA)
+    candidate = {**row(NCBA, "in", 500, 10), "sub_ledger_role": role}
+    assert plan_pairs([leg], [candidate]) == []
+    spending = {**candidate, "sub_ledger_role": "spending"}
+    assert plan_pairs([leg], [spending]) == [(leg, spending)]

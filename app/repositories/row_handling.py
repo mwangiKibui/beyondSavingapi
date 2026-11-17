@@ -86,9 +86,10 @@ async def get_waiting_transfer_legs(conn: asyncpg.Connection, *, user_id: UUID) 
     rows = await conn.fetch(
         """
         SELECT t.id, t.account_id, a.provider, a.nickname, t.direction, t.amount, t.currency,
-               t.txn_date, t.description, t.handled_as
+               t.txn_date, t.description, t.handled_as, sl.role AS sub_ledger_role
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
+        LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
         WHERE a.user_id = $1 AND t.handled_as = 'transfer' AND t.transfer_group_id IS NULL
         ORDER BY t.txn_date, t.id
         """,
@@ -107,9 +108,10 @@ async def get_pair_candidates(
     rows = await conn.fetch(
         """
         SELECT t.id, t.account_id, a.provider, a.nickname, t.direction, t.amount, t.currency,
-               t.txn_date, t.description, t.handled_as
+               t.txn_date, t.description, t.handled_as, sl.role AS sub_ledger_role
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
+        LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
         WHERE a.user_id = $1
           AND t.amount = ANY($2::numeric[])
           AND t.txn_date BETWEEN $3 AND $4
@@ -146,18 +148,27 @@ async def link_transfer_pair(
     )
 
 
+async def set_transfer_group(conn: asyncpg.Connection, *, group_id: UUID, ids: list[UUID]) -> None:
+    """Links rows as one move (ab-259: the two sides of a move inside a
+    SACCO) without changing how each is handled."""
+    await conn.execute(
+        "UPDATE transactions SET transfer_group_id = $1 WHERE id = ANY($2::uuid[])", group_id, ids
+    )
+
+
 async def get_handled_transaction(conn: asyncpg.Connection, *, transaction_id: UUID, user_id: UUID) -> dict | None:
     """The row (locked) with its account's provider and the other leg's id
     when it's a paired transfer. None when it isn't the user's."""
     row = await conn.fetchrow(
         """
         SELECT t.id, t.account_id, a.provider, t.direction, t.amount, t.currency, t.description,
-               t.handled_as, t.handled_reason, t.transfer_group_id,
+               t.handled_as, t.handled_reason, t.transfer_group_id, sl.role AS sub_ledger_role,
                (SELECT o.id FROM transactions o
                 WHERE t.transfer_group_id IS NOT NULL AND o.transfer_group_id = t.transfer_group_id AND o.id <> t.id
                 LIMIT 1) AS paired_transaction_id
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
+        LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
         WHERE t.id = $1 AND a.user_id = $2
         FOR UPDATE OF t
         """,

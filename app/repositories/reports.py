@@ -6,6 +6,7 @@ from uuid import UUID
 import asyncpg
 
 from app.repositories.budget_plans import plan_totals
+from app.services.saving import handled_saving
 
 ZERO = Decimal("0.00")
 
@@ -71,16 +72,19 @@ async def fetch_report_rows(pool: asyncpg.Pool, filters: ReportFilters) -> list[
             t.counterparty,
             t.description,
             t.handled_as,
+            sl.role AS sub_ledger_role,
             acc.nickname AS account_nickname,
             a.id AS allocation_id,
             a.category_id,
             c.name AS category_name,
             c.type AS category_type,
+            c.entry_type AS category_entry_type,
             a.transfer_reason_id,
             a.amount AS alloc_amount,
             a.currency AS alloc_currency
         FROM transactions t
         JOIN accounts acc ON acc.id = t.account_id
+        LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
         LEFT JOIN allocations a ON a.transaction_id = t.id
         LEFT JOIN categories c ON c.id = a.category_id
         WHERE acc.user_id = $1
@@ -123,6 +127,27 @@ def is_uncounted_loan(alloc_rows: list[dict]) -> bool:
     )
 
 
+def transaction_saving(alloc_rows: list[dict]) -> Decimal:
+    """ab-259: what one transaction adds to savings (app.services.saving) -
+    the whole row when it was handled as saving, else the part filed under
+    a saving category."""
+    first = alloc_rows[0]
+    if first.get("handled_as") == "saving":
+        return handled_saving(
+            direction=first["direction"], sub_ledger_role=first.get("sub_ledger_role"), amount=first["txn_amount"]
+        )
+    if first["direction"] != "out":
+        return ZERO
+    return sum(
+        (
+            row["alloc_amount"]
+            for row in alloc_rows
+            if row["allocation_id"] is not None and row.get("category_entry_type") == "saving"
+        ),
+        ZERO,
+    )
+
+
 def build_report(rows: list[dict], *, currency: str) -> dict:
     """Pure-Python aggregation over fetch_report_rows' own result set -
     the shared data backing GET /reports (ab-82/83/127). Every figure
@@ -134,7 +159,11 @@ def build_report(rows: list[dict], *, currency: str) -> dict:
       direction, EXCLUDING any transaction that has at least one
       transfer-shaped allocation (ab-79: "excludes transfer-tagged
       transactions" - the whole transaction is netted out, even the
-      portion not covered by the transfer allocation).
+      portion not covered by the transfer allocation). Saving (ab-259) is
+      neither: a row handled as saving is left out, and the part of a
+      payment filed under a saving category comes off total_out.
+    - total_saving: net money into savings (transaction_saving above);
+      net = total_in - total_out - total_saving.
     - by_category: sum of allocation amounts grouped by category_id,
       for allocations with a real category_id and no transfer_reason_id.
     - reconciled_no_category_total: sum of allocation amounts where both
@@ -148,6 +177,7 @@ def build_report(rows: list[dict], *, currency: str) -> dict:
     """
     total_in = ZERO
     total_out = ZERO
+    total_saving = ZERO
     unreconciled_total = ZERO
     reconciled_no_category_total = ZERO
     by_category: dict[UUID, dict] = {}
@@ -165,11 +195,13 @@ def build_report(rows: list[dict], *, currency: str) -> dict:
             ZERO,
         )
 
-        if not has_transfer:
+        saving = transaction_saving(alloc_rows)
+        total_saving += saving
+        if not has_transfer and first.get("handled_as") != "saving":
             if direction == "in":
                 total_in += txn_amount
             else:
-                total_out += txn_amount
+                total_out += txn_amount - saving
 
         remainder = txn_amount - allocated
         if remainder > ZERO:
@@ -179,7 +211,8 @@ def build_report(rows: list[dict], *, currency: str) -> dict:
             if row["allocation_id"] is None or row["transfer_reason_id"] is not None:
                 continue
             if row["category_id"] is None:
-                reconciled_no_category_total += row["alloc_amount"]
+                if first.get("handled_as") != "saving":
+                    reconciled_no_category_total += row["alloc_amount"]
                 continue
             bucket = by_category.setdefault(
                 row["category_id"],
@@ -187,6 +220,7 @@ def build_report(rows: list[dict], *, currency: str) -> dict:
                     "category_id": row["category_id"],
                     "category_name": row["category_name"],
                     "category_type": row["category_type"],
+                    "entry_type": row.get("category_entry_type") or "general",
                     "total": ZERO,
                 },
             )
@@ -196,7 +230,8 @@ def build_report(rows: list[dict], *, currency: str) -> dict:
         "currency": currency,
         "total_in": total_in,
         "total_out": total_out,
-        "net": total_in - total_out,
+        "total_saving": total_saving,
+        "net": total_in - total_out - total_saving,
         "by_category": sorted(by_category.values(), key=lambda b: b["category_name"] or ""),
         "reconciled_no_category_total": reconciled_no_category_total,
         "unreconciled_total": unreconciled_total,
@@ -291,10 +326,14 @@ async def fetch_account_summary_rows(pool: asyncpg.Pool, *, user_id: UUID, accou
             al.amount AS alloc_amount,
             al.transfer_reason_id,
             al.category_id,
-            t.handled_as
+            c.entry_type AS category_entry_type,
+            t.handled_as,
+            sl.role AS sub_ledger_role
         FROM accounts a
         LEFT JOIN transactions t ON t.account_id = a.id
+        LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
         LEFT JOIN allocations al ON al.transaction_id = t.id
+        LEFT JOIN categories c ON c.id = al.category_id
         WHERE a.user_id = $1
           AND ($2::uuid IS NULL OR a.id = $2)
         ORDER BY a.nickname
@@ -326,12 +365,21 @@ def build_account_summary(rows: list[dict]) -> list[dict]:
                 "account_nickname": row["account_nickname"],
                 "money_in": ZERO,
                 "money_out": ZERO,
+                "saving": ZERO,
             },
         )
         if row["allocation_id"] is None or row["transfer_reason_id"] is not None:
             continue
         if row.get("handled_as") == "loan" and row.get("category_id") is None:
             continue  # ab-281: borrowed money, not income/expense
+        if row.get("handled_as") == "saving":  # ab-259: neither income nor spending
+            bucket["saving"] += handled_saving(
+                direction=row["direction"], sub_ledger_role=row.get("sub_ledger_role"), amount=row["alloc_amount"]
+            )
+            continue
+        if row["direction"] == "out" and row.get("category_entry_type") == "saving":
+            bucket["saving"] += row["alloc_amount"]
+            continue
         if row["direction"] == "in":
             bucket["money_in"] += row["alloc_amount"]
         else:
@@ -417,14 +465,14 @@ async def get_budget_plans_report(
 
     result = []
     for plan in plans:
-        total_income, total_expenditure = await plan_totals(
+        total_income, total_expenditure, total_saving = await plan_totals(
             pool,
             user_id=user_id,
             currency=plan["currency"],
             starts_at=plan["starts_at"],
             ends_at=plan["ends_at"],
         )
-        result.append({**plan, "money_in": total_income, "money_out": total_expenditure})
+        result.append({**plan, "money_in": total_income, "money_out": total_expenditure, "saving": total_saving})
 
     return result
 

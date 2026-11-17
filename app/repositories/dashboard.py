@@ -4,6 +4,7 @@ from uuid import UUID
 
 import asyncpg
 
+from app.services.saving import HANDLED_SAVING_SQL
 from app.repositories.reports import (
     ZERO,
     fetch_budget_plan_rows,
@@ -49,6 +50,7 @@ async def fetch_dashboard_rows(
             t.id AS transaction_id,
             t.amount AS txn_amount,
             t.direction,
+            t.handled_as,
             -- Netted out of totals: a transfer, or (ab-281) a loan row handled
             -- at import with no category - borrowed money isn't income/expense.
             (
@@ -63,13 +65,26 @@ async def fetch_dashboard_rows(
                         WHERE al.transaction_id = t.id AND al.category_id IS NOT NULL
                     )
                 )
-            ) AS has_transfer_allocation
+            ) AS has_transfer_allocation,
+            -- ab-259: what the row adds to savings (app.services.saving):
+            -- all of it when handled as saving, else the part filed under
+            -- a saving category.
+            CASE
+                WHEN t.handled_as = 'saving' THEN {HANDLED_SAVING_SQL}
+                WHEN t.direction = 'out' THEN COALESCE((
+                    SELECT SUM(al.amount) FROM allocations al
+                    JOIN categories c ON c.id = al.category_id
+                    WHERE al.transaction_id = t.id AND c.entry_type = 'saving'
+                ), 0)
+                ELSE 0
+            END AS saving
         FROM accounts a
         LEFT JOIN transactions t
             ON t.account_id = a.id AND t.txn_date >= $3 AND t.txn_date <= $4
+        LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
         WHERE a.user_id = $1 AND a.currency = $2
         ORDER BY a.nickname
-        """,
+        """.replace("{HANDLED_SAVING_SQL}", HANDLED_SAVING_SQL),
         user_id,
         currency,
         from_date,
@@ -92,6 +107,7 @@ def build_dashboard(rows: list[dict], *, total_budget: Decimal, currency: str) -
     """
     total_in = ZERO
     total_out = ZERO
+    total_saving = ZERO
     accounts: dict[UUID, dict] = {}
 
     for row in rows:
@@ -102,23 +118,30 @@ def build_dashboard(rows: list[dict], *, total_budget: Decimal, currency: str) -
                 "account_nickname": row["account_nickname"],
                 "money_in": ZERO,
                 "money_out": ZERO,
+                "saving": ZERO,
             },
         )
         if row["transaction_id"] is None or row["has_transfer_allocation"]:
             continue
+        saving = row.get("saving") or ZERO
+        bucket["saving"] += saving
+        total_saving += saving
+        if row.get("handled_as") == "saving":
+            continue  # ab-259: neither income nor spending
         if row["direction"] == "in":
             bucket["money_in"] += row["txn_amount"]
             total_in += row["txn_amount"]
         else:
-            bucket["money_out"] += row["txn_amount"]
-            total_out += row["txn_amount"]
+            bucket["money_out"] += row["txn_amount"] - saving
+            total_out += row["txn_amount"] - saving
 
     return {
         "currency": currency,
         "total_budget": total_budget,
         "total_in": total_in,
         "total_out": total_out,
-        "net": total_in - total_out,
+        "total_saving": total_saving,
+        "net": total_in - total_out - total_saving,
         "accounts": sorted(accounts.values(), key=lambda b: b["account_nickname"]),
     }
 

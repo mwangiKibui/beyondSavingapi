@@ -96,12 +96,12 @@ def test_export_budget_plans_csv_success_shape_and_rows(client, fake_user, fake_
     assert response.headers["content-disposition"] == 'attachment; filename="budget-plans.csv"'
 
     rows = list(csv.reader(io.StringIO(response.text)))
-    assert rows[0] == ["Plan Name", "Window (start - end)", "Total Cap", "Money In", "Money Out"]
-    assert rows[1] == ["This month", "2026-09-01 - 2026-09-30", "5000.00", "15000.00", "4200.00"]
+    assert rows[0] == ["Plan Name", "Window (start - end)", "Total Cap", "Money In", "Money Out", "Saved"]
+    assert rows[1] == ["This month", "2026-09-01 - 2026-09-30", "5000.00", "15000.00", "4200.00", "0"]
     # A plan with no name and no total_cap falls back to the em dash
     # placeholder, same convention as build_csv_rows' own "—" for an
     # empty category column.
-    assert rows[2] == ["—", "2026-08-15 - 2026-09-10", "—", "0.00", "0.00"]
+    assert rows[2] == ["—", "2026-08-15 - 2026-09-10", "—", "0.00", "0.00", "0"]
 
 
 def test_export_budget_plans_csv_forwards_from_to_filters(client, fake_user, fake_pool, monkeypatch):

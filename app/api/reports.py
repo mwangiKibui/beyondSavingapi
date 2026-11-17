@@ -90,6 +90,7 @@ class CategoryBreakdownItem(BaseModel):
     category_id: UUID
     category_name: str | None
     category_type: str | None
+    entry_type: str = "general"
     total: Decimal
 
 
@@ -97,6 +98,8 @@ class ReportResponse(BaseModel):
     currency: str
     total_in: Decimal
     total_out: Decimal
+    # ab-259: net money into savings - neither income nor spending.
+    total_saving: Decimal = Decimal("0.00")
     net: Decimal
     by_category: list[CategoryBreakdownItem]
     reconciled_no_category_total: Decimal
@@ -108,6 +111,7 @@ class AccountSummaryItem(BaseModel):
     account_nickname: str
     money_in: Decimal
     money_out: Decimal
+    saving: Decimal = Decimal("0.00")
 
 
 class AccountSummaryResponse(BaseModel):
@@ -480,11 +484,12 @@ async def export_budget_plans_csv_endpoint(
             plan["total_cap"] if plan["total_cap"] is not None else "—",
             plan["money_in"],
             plan["money_out"],
+            plan.get("saving", 0),
         ]
         for plan in plans
     ]
     return _csv_response(
-        ["Plan Name", "Window (start - end)", "Total Cap", "Money In", "Money Out"],
+        ["Plan Name", "Window (start - end)", "Total Cap", "Money In", "Money Out", "Saved"],
         rows,
         filename="budget-plans.csv",
     )
@@ -517,12 +522,13 @@ async def export_budget_plans_pdf_endpoint(
             str(plan["total_cap"]) if plan["total_cap"] is not None else "—",
             str(plan["money_in"]),
             str(plan["money_out"]),
+            str(plan.get("saving", 0)),
         ]
         for plan in plans
     ]
     pdf_bytes = build_simple_table_pdf(
         "Budget Plans",
-        ["Plan Name", "Window (start - end)", "Total Cap", "Money In", "Money Out"],
+        ["Plan Name", "Window (start - end)", "Total Cap", "Money In", "Money Out", "Saved"],
         rows,
         from_date=from_date,
         to_date=to_date,

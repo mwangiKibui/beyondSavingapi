@@ -4,6 +4,7 @@ from uuid import UUID
 
 import asyncpg
 
+from app.services.saving import HANDLED_SAVING_SQL
 from app.services.budget_state import DEFAULT_NEAR_THRESHOLD, derive_budget_state
 
 # MVP1 is single-currency (developer decision, 2026-09-30) - every plan is
@@ -156,36 +157,50 @@ async def update_budget(
 
 # An allocation that counts as real income/expense in a plan: not a
 # transfer (ab-132) and not borrowed money (ab-281 - a loan row handled at
-# import with no category), the same rule as reports and the dashboard.
-COUNTED_ALLOCATION = "a.transfer_reason_id IS NULL AND NOT (t.handled_as = 'loan' AND a.category_id IS NULL)"
+# import with no category) and not saving (ab-259 - a row handled as saving,
+# or filed under a saving category), the same rule as reports and the
+# dashboard. Expects allocations a, transactions t, categories c.
+COUNTED_ALLOCATION = (
+    "a.transfer_reason_id IS NULL AND NOT (t.handled_as = 'loan' AND a.category_id IS NULL)"
+    " AND t.handled_as IS DISTINCT FROM 'saving' AND c.entry_type IS DISTINCT FROM 'saving'"
+)
 
 
 async def plan_totals(
     pool: asyncpg.Pool, *, user_id: UUID, currency: str, starts_at, ends_at
 ) -> tuple:
-    """(total_income, total_expenditure) for one plan's currency and
-    window - the user's own allocations only. allocations has no user_id,
-    so ownership comes from the transaction's account."""
+    """(total_income, total_expenditure, total_saving) for one plan's
+    currency and window - the user's own allocations only. allocations has
+    no user_id, so ownership comes from the transaction's account.
+    total_saving (ab-259) is net money into savings (app.services.saving)."""
     row = await pool.fetchrow(
         """
         SELECT
-            COALESCE(SUM(a.amount) FILTER (WHERE t.direction = 'in'), 0) AS total_income,
-            COALESCE(SUM(a.amount) FILTER (WHERE t.direction = 'out'), 0) AS total_expenditure
+            COALESCE(SUM(a.amount) FILTER (WHERE t.direction = 'in' AND {COUNTED_ALLOCATION}), 0) AS total_income,
+            COALESCE(SUM(a.amount) FILTER (WHERE t.direction = 'out' AND {COUNTED_ALLOCATION}), 0)
+                AS total_expenditure,
+            COALESCE(SUM(
+                CASE
+                    WHEN t.handled_as = 'saving' THEN {HANDLED_SAVING_SQL}
+                    WHEN t.direction = 'out' AND c.entry_type = 'saving' THEN a.amount
+                END
+            ), 0) AS total_saving
         FROM allocations a
         JOIN transactions t ON t.id = a.transaction_id
         JOIN accounts acc ON acc.id = t.account_id
+        LEFT JOIN categories c ON c.id = a.category_id
+        LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
         WHERE acc.user_id = $1
           AND a.currency = $2
-          AND {COUNTED_ALLOCATION}
           AND t.txn_date >= $3::date
           AND t.txn_date <= $4::date
-        """.replace("{COUNTED_ALLOCATION}", COUNTED_ALLOCATION),
+        """.replace("{COUNTED_ALLOCATION}", COUNTED_ALLOCATION).replace("{HANDLED_SAVING_SQL}", HANDLED_SAVING_SQL),
         user_id,
         currency,
         starts_at,
         ends_at,
     )
-    return row["total_income"], row["total_expenditure"]
+    return row["total_income"], row["total_expenditure"], row["total_saving"]
 
 
 async def list_plan_money_flows(
@@ -331,7 +346,7 @@ async def list_budget_plans(
         # repayment) is explicitly NOT real income/expense, so it's
         # excluded here the same way the per-category `consumed` subquery
         # above only ever matches a real category_id.
-        total_income, total_expenditure = await plan_totals(
+        total_income, total_expenditure, total_saving = await plan_totals(
             pool,
             user_id=user_id,
             currency=plan["currency"],
@@ -360,6 +375,7 @@ async def list_budget_plans(
             "total_state": total_derived["state"] if total_derived else None,
             "total_expenditure": total_expenditure,
             "total_income": total_income,
+            "total_saving": total_saving,
         })
 
     return plans
