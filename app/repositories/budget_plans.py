@@ -154,6 +154,40 @@ async def update_budget(
     return dict(row) if row else None
 
 
+# An allocation that counts as real income/expense in a plan: not a
+# transfer (ab-132) and not borrowed money (ab-281 - a loan row handled at
+# import with no category), the same rule as reports and the dashboard.
+COUNTED_ALLOCATION = "a.transfer_reason_id IS NULL AND NOT (t.handled_as = 'loan' AND a.category_id IS NULL)"
+
+
+async def plan_totals(
+    pool: asyncpg.Pool, *, user_id: UUID, currency: str, starts_at, ends_at
+) -> tuple:
+    """(total_income, total_expenditure) for one plan's currency and
+    window - the user's own allocations only. allocations has no user_id,
+    so ownership comes from the transaction's account."""
+    row = await pool.fetchrow(
+        """
+        SELECT
+            COALESCE(SUM(a.amount) FILTER (WHERE t.direction = 'in'), 0) AS total_income,
+            COALESCE(SUM(a.amount) FILTER (WHERE t.direction = 'out'), 0) AS total_expenditure
+        FROM allocations a
+        JOIN transactions t ON t.id = a.transaction_id
+        JOIN accounts acc ON acc.id = t.account_id
+        WHERE acc.user_id = $1
+          AND a.currency = $2
+          AND {COUNTED_ALLOCATION}
+          AND t.txn_date >= $3::date
+          AND t.txn_date <= $4::date
+        """.replace("{COUNTED_ALLOCATION}", COUNTED_ALLOCATION),
+        user_id,
+        currency,
+        starts_at,
+        ends_at,
+    )
+    return row["total_income"], row["total_expenditure"]
+
+
 async def list_plan_money_flows(
     pool: asyncpg.Pool,
     *,
@@ -185,14 +219,17 @@ async def list_plan_money_flows(
                 a.currency
             FROM allocations a
             JOIN transactions t ON t.id = a.transaction_id
+            JOIN accounts acc ON acc.id = t.account_id
             LEFT JOIN categories c ON c.id = a.category_id
-            WHERE a.currency = $1
-              AND t.direction = $2
-              AND a.transfer_reason_id IS NULL
-              AND t.txn_date >= $3::date
-              AND t.txn_date <= $4::date
+            WHERE acc.user_id = $1
+              AND a.currency = $2
+              AND t.direction = $3
+              AND {COUNTED_ALLOCATION}
+              AND t.txn_date >= $4::date
+              AND t.txn_date <= $5::date
             ORDER BY t.txn_date DESC
-            """,
+            """.replace("{COUNTED_ALLOCATION}", COUNTED_ALLOCATION),
+            user_id,
             plan["currency"],
             direction,
             plan["starts_at"],
@@ -255,7 +292,9 @@ async def list_budget_plans(
                     SELECT SUM(a.amount)
                     FROM allocations a
                     JOIN transactions t ON t.id = a.transaction_id
+                    JOIN accounts acc ON acc.id = t.account_id
                     WHERE a.category_id = b.category_id
+                      AND acc.user_id = $5
                       AND a.currency = $2
                       AND t.txn_date >= $3::date
                       AND t.txn_date <= $4::date
@@ -269,6 +308,7 @@ async def list_budget_plans(
             plan["currency"],
             plan["starts_at"],
             plan["ends_at"],
+            user_id,
         )
 
         budgets = []
@@ -291,35 +331,12 @@ async def list_budget_plans(
         # repayment) is explicitly NOT real income/expense, so it's
         # excluded here the same way the per-category `consumed` subquery
         # above only ever matches a real category_id.
-        total_expenditure = await pool.fetchval(
-            """
-            SELECT COALESCE(SUM(a.amount), 0)
-            FROM allocations a
-            JOIN transactions t ON t.id = a.transaction_id
-            WHERE a.currency = $1
-              AND t.direction = 'out'
-              AND a.transfer_reason_id IS NULL
-              AND t.txn_date >= $2::date
-              AND t.txn_date <= $3::date
-            """,
-            plan["currency"],
-            plan["starts_at"],
-            plan["ends_at"],
-        )
-        total_income = await pool.fetchval(
-            """
-            SELECT COALESCE(SUM(a.amount), 0)
-            FROM allocations a
-            JOIN transactions t ON t.id = a.transaction_id
-            WHERE a.currency = $1
-              AND t.direction = 'in'
-              AND a.transfer_reason_id IS NULL
-              AND t.txn_date >= $2::date
-              AND t.txn_date <= $3::date
-            """,
-            plan["currency"],
-            plan["starts_at"],
-            plan["ends_at"],
+        total_income, total_expenditure = await plan_totals(
+            pool,
+            user_id=user_id,
+            currency=plan["currency"],
+            starts_at=plan["starts_at"],
+            ends_at=plan["ends_at"],
         )
 
         # The overall total_cap (if set) measures against that same
