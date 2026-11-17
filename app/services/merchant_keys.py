@@ -80,6 +80,9 @@ class RowKey:
     # ab-269: a payment to/from a person (or an unnamed sender). The uploader
     # sees the statement text as the payee; nothing about it is shared.
     is_person: bool = False
+    # ab-281: rows handled at import without asking the user.
+    is_charge: bool = False  # a bank/mobile charge or excise duty on one
+    is_loan_repayment: bool = False  # repaying a loan (gets the Loan Repayment category)
 
 
 def normalize_text(text: str | None) -> str:
@@ -141,12 +144,20 @@ def _person_row(provider: str, identity: str, *, secret: str, match_text: str = 
     )
 
 
-def _name_row(name: str, *, match_text: str | None = None) -> RowKey:
+def _name_row(
+    name: str, *, match_text: str | None = None, is_charge: bool = False, is_loan_repayment: bool = False
+) -> RowKey:
     name = _clean_name(name)
     if not name:
         return RowKey(kind=None, value=None)
     return RowKey(
-        kind="name", value=name, is_business=looks_like_business(name), name=name, match_text=match_text or name
+        kind="name",
+        value=name,
+        is_business=looks_like_business(name),
+        name=name,
+        match_text=match_text or name,
+        is_charge=is_charge,
+        is_loan_repayment=is_loan_repayment,
     )
 
 
@@ -174,7 +185,7 @@ def _mpesa(text: str, secret: str) -> RowKey:
     if _MPESA_NO_KEY.match(cleaned):
         return RowKey(kind=None, value=None)
     if cleaned.startswith("M-SHWARI LOAN REPAYMENT"):
-        return _name_row("M-SHWARI LOAN REPAYMENT")
+        return _name_row("M-SHWARI LOAN REPAYMENT", is_loan_repayment=True)
     if cleaned.startswith("AIRTIME PURCHASE"):
         return RowKey(kind="name", value="AIRTIME PURCHASE", is_business=True, name="AIRTIME PURCHASE", match_text="AIRTIME PURCHASE")
     if m := _MPESA_PAYBILL.match(cleaned):
@@ -186,7 +197,7 @@ def _mpesa(text: str, secret: str) -> RowKey:
     if m := _MPESA_BUNDLE.match(cleaned):
         return _number_row("paybill", m.group(1), m.group(2), account=None, provider=MPESA, secret=secret)
     if cleaned.endswith("CHARGE"):
-        return _name_row(cleaned)
+        return _name_row(cleaned, is_charge=True)
     if m := _MPESA_PERSON.match(cleaned):
         identity = m.group(1) or m.group(2) or cleaned
         return _person_row(MPESA, identity, secret=secret)
@@ -221,7 +232,7 @@ def _ncba(text: str, secret: str) -> RowKey:
     if m := _NCBA_LOAN.match(text):
         account = m.group(1)
         if not account:
-            return _name_row("AA LOAN REPAYMENT")
+            return _name_row("AA LOAN REPAYMENT", is_loan_repayment=True)
         # One key per loan account, so a car loan and a personal loan keep
         # their own memory. Prefixed so it can't equal a PayBill reference
         # hash of the same digits.
@@ -231,11 +242,12 @@ def _ncba(text: str, secret: str) -> RowKey:
             provider=NCBA,
             display=f"Loan repayment · acc {account}",
             match_text="AA LOAN REPAYMENT",
+            is_loan_repayment=True,
         )
     if _NCBA_NO_KEY.match(text):
         return RowKey(kind=None, value=None)
     if m := _NCBA_CHARGES.match(text):
-        return _name_row(m.group(1))
+        return _name_row(m.group(1), is_charge=True)
     if m := _NCBA_UTILITY.match(text):
         return _name_row(_words_only(m.group(1)))
     if m := _NCBA_CARD.match(text):
@@ -274,10 +286,12 @@ def _mentor(text: str) -> RowKey:
         return RowKey(kind=None, value=None, row_kind="loan_payout")
     if m := _MENTOR_RECOVERY.match(words):
         value = _clean_name(f"LOAN RECOVERY {_words_only(m.group(1))}")
-        return _name_row(value, match_text=f"SACCO {value}")
+        return _name_row(value, match_text=f"SACCO {value}", is_loan_repayment=True)
     if m := _MENTOR_FEE.match(words):
         fee = m.group(1)
-        return _name_row(fee, match_text=f"SACCO LOAN FEE {fee}")
+        return _name_row(
+            fee, match_text=f"SACCO LOAN FEE {fee}", is_charge=fee in ("SMS CHARGES", "EXCISE DUTY PAYABLE")
+        )
     # Mentor glues reference codes on with a hyphen ("…Charges-SSPSP…");
     # split them off so the words survive strip_reference_codes.
     return _fallback(re.sub(r"(?<=[A-Z])-(?=[A-Z])", " ", text))
@@ -289,11 +303,15 @@ def _mentor(text: str) -> RowKey:
 # "MPS". Equity sometimes splits the phone's last digit onto the next token,
 # so the person is identified by the name words, never the phone (ab-273).
 _EQUITY_TRANSFER = re.compile(r"^(?:MPS\b|(?:254|07|01)\d{7,}\b)")
+_EQUITY_CHARGES = re.compile(r"\b(?:CHARGES?|CHRGS|COMMISSION|EXCISE DUTY|LEDGER FEE)\b")
 
 
 def _equity(text: str, secret: str) -> RowKey:
     if not _EQUITY_TRANSFER.match(text):
-        return _fallback(text)
+        key = _fallback(text)
+        if key.kind == "name" and _EQUITY_CHARGES.search(text):
+            key = replace(key, is_charge=True)
+        return key
     words = _words_only(re.sub(r"^MPS\b", "", text))
     if words and looks_like_business(words):
         return _name_row(words)

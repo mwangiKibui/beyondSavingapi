@@ -20,6 +20,7 @@ from app.repositories.statement_imports import (
     set_sub_ledger_opening_balances,
 )
 from app.repositories.transactions import insert_transactions
+from app.services.import_handling import handle_import_by_id
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -144,6 +145,18 @@ async def _write_sub_ledger_import(
     )
 
 
+async def _handle_rows(pool: asyncpg.Pool, *, import_id: UUID) -> None:
+    # ab-281: charges, loans and own-account transfers leave the review.
+    # A failure here never fails the import - handled_at stays NULL and the
+    # handling runs again when the review opens.
+    try:
+        result = await handle_import_by_id(pool, import_id=import_id, secret=get_settings().suggestion_key_secret)
+        if result is not None:
+            logger.info("Import %s: handled %s, paired %d transfer(s)", import_id, dict(result.counts), result.paired)
+    except Exception:
+        logger.error("Handling rows failed for import %s - will retry when its review opens", import_id, exc_info=True)
+
+
 async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
     try:
         parsed_import_id = UUID(import_id)
@@ -197,6 +210,7 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
                     account_id=record["account_id"],
                     transactions=transactions,
                 )
+            await _handle_rows(pool, import_id=parsed_import_id)
         except (StatementParseError, ImportWriteError) as e:
             # A parser's own validation (ab-42's validate_running_balance,
             # a missing required anchor like Equity Bank/NCBA's opening

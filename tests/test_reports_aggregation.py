@@ -849,3 +849,31 @@ def test_build_transaction_statement_pages_without_changing_totals_or_closing_ba
         assert statement["total"] == full["total"] == 3
         assert statement["closing_balance"] == full["closing_balance"] == Decimal("850.00")
         assert statement["total_debit"] == full["total_debit"] == Decimal("150.00")
+
+
+# --- ab-281: loan rows handled at import --------------------------------------
+
+def test_uncategorised_loan_rows_are_netted_out_like_transfers():
+    payout = uuid4()
+    repayment = uuid4()
+    rows = [
+        _row(transaction_id=payout, direction="in", txn_amount=Decimal("2000.00"), handled_as="loan",
+             allocation_id=uuid4(), alloc_amount=Decimal("2000.00"), alloc_currency="KES"),
+        _row(transaction_id=repayment, direction="out", txn_amount=Decimal("500.00"), handled_as="loan",
+             allocation_id=uuid4(), category_id=GROCERIES_ID, category_name="Loan Repayment",
+             category_type="expense", alloc_amount=Decimal("500.00"), alloc_currency="KES"),
+    ]
+    report = build_report(rows, currency="KES")
+    assert report["total_in"] == Decimal("0.00")
+    assert report["total_out"] == Decimal("500.00")
+
+
+def test_account_summary_skips_uncategorised_loan_rows():
+    account_id = uuid4()
+    base = {"account_id": account_id, "account_nickname": "M-Pesa", "transaction_id": uuid4(),
+            "allocation_id": uuid4(), "transfer_reason_id": None}
+    rows = [
+        {**base, "direction": "in", "alloc_amount": Decimal("2000.00"), "category_id": None, "handled_as": "loan"},
+        {**base, "direction": "in", "alloc_amount": Decimal("300.00"), "category_id": SALARY_ID, "handled_as": None},
+    ]
+    assert build_account_summary(rows)[0]["money_in"] == Decimal("300.00")

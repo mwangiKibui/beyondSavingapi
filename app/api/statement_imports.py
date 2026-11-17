@@ -1,5 +1,6 @@
 import logging
 import re
+from collections import Counter
 from datetime import date, datetime
 from typing import Literal
 from uuid import UUID, uuid4
@@ -38,6 +39,7 @@ from app.services.allocations import AllocationRejected, alert_groups
 from app.services.category_suggestions import (
     Directory,
     apply_learned_names,
+    build_handled_rows,
     build_preview_rows,
     extract_keys,
     learned_name_lookups,
@@ -46,6 +48,7 @@ from app.services.category_suggestions import (
     shared_vote_lookups,
 )
 from app.services.import_confirm import ConfirmItem, confirm_import
+from app.services.import_handling import handle_import_by_id
 from app.services.import_progress import Draft, payee_keys, progress_counts
 from app.services.preview_csv import build_preview_csv
 from app.services.statement_files import (
@@ -172,16 +175,46 @@ class PreviewRow(BaseModel):
     suggestion: PreviewSuggestion | None = None
 
 
+class HandledRow(BaseModel):
+    """ab-281: a row handled at import without asking, and why."""
+
+    transaction_id: UUID
+    txn_date: date
+    amount: float
+    currency: str
+    direction: str
+    description: str | None = None
+    handled_as: Literal["charge", "loan", "transfer"]
+    reason: str
+    # The category it was filed under; None for loan rows that are neither
+    # income nor spending, and for transfers.
+    category_name: str | None = None
+    # Transfers: the other leg, once the other statement is in.
+    paired_transaction_id: UUID | None = None
+    paired_txn_date: date | None = None
+    paired_account_nickname: str | None = None
+
+
+class HandledCounts(BaseModel):
+    charge: int = 0
+    loan: int = 0
+    transfer: int = 0
+    # Transfers still waiting for the other account's statement.
+    unmatched_transfer: int = 0
+
+
 class PreviewSummary(BaseModel):
     open_rows: int
     suggested: int
     new_categories: list[str]
+    handled: HandledCounts = HandledCounts()
 
 
 class StatementImportPreviewResponse(BaseModel):
     # "import" is a Python keyword, hence the alias.
     import_: PreviewImport = Field(alias="import", serialization_alias="import")
     rows: list[PreviewRow]
+    handled: list[HandledRow] = []
     summary: PreviewSummary
 
 
@@ -341,6 +374,20 @@ async def upload_statement_endpoint(
     return statement_import
 
 
+async def _handle_if_needed(pool: asyncpg.Pool, statement_import: dict) -> None:
+    """ab-281: imports parsed before handling existed (or whose handling
+    failed in the worker) are handled once, the first time their review
+    opens. A failure is logged and the review opens anyway."""
+    if statement_import.get("handled_at") is not None or statement_import.get("reviewed_at") is not None:
+        return
+    try:
+        await handle_import_by_id(
+            pool, import_id=statement_import["id"], secret=get_settings().suggestion_key_secret
+        )
+    except Exception:
+        logger.error("Handling rows failed for import %s", statement_import["id"], exc_info=True)
+
+
 async def _load_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id: UUID) -> dict:
     """Everything the preview and its CSV are built from. Raises the 404 /
     409 / 500 HTTPExceptions both endpoints share."""
@@ -353,6 +400,7 @@ async def _load_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id: UUID) -
                 status_code=status.HTTP_409_CONFLICT,
                 detail="This statement hasn't finished processing yet",
             )
+        await _handle_if_needed(pool, statement_import)
 
         rows = await get_import_rows(
             pool,
@@ -422,13 +470,22 @@ async def preview_statement_import_endpoint(
     _require_pool(pool)
     loaded = await _load_preview(pool, import_id=import_id, user_id=user_id)
     preview_rows = loaded["preview_rows"]
+    handled = build_handled_rows(loaded["rows"], categories=loaded["categories"])
+    counts = Counter(r["handled_as"] for r in handled)
     return {
         "import": loaded["import"],
         "rows": preview_rows,
+        "handled": handled,
         "summary": {
             "open_rows": len(preview_rows),
             "suggested": sum(1 for r in preview_rows if r["suggestion"]),
             "new_categories": new_category_names(preview_rows),
+            "handled": {
+                **counts,
+                "unmatched_transfer": sum(
+                    1 for r in handled if r["handled_as"] == "transfer" and r["paired_transaction_id"] is None
+                ),
+            },
         },
     }
 

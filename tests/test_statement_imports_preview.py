@@ -66,6 +66,7 @@ def patch_reads(monkeypatch, *, imp=None, rows=(), rules=(), directory=(), categ
         "get_user_categories": AsyncMock(return_value=list(categories)),
         "get_shared_votes": AsyncMock(return_value=dict(shared_votes or {})),
         "get_learned_names": AsyncMock(return_value=dict(learned_names or {})),
+        "handle_import_by_id": AsyncMock(return_value=None),
     }
     for name, mock in mocks.items():
         monkeypatch.setattr(f"{API}.{name}", mock)
@@ -121,7 +122,8 @@ def test_preview_returns_open_rows_with_suggestions(client, fake_user, fake_pool
     assert rows[str(shell["id"])]["suggestion"]["is_new_category"] is True
     assert rows[str(shell["id"])]["group_key"] == rows[str(shell2["id"])]["group_key"]
     assert rows[str(unknown["id"])]["suggestion"] is None
-    assert body["summary"] == {"open_rows": 4, "suggested": 3, "new_categories": ["Fuel"]}
+    assert body["summary"] == {"open_rows": 4, "suggested": 3, "new_categories": ["Fuel"],
+                               "handled": {"charge": 0, "loan": 0, "transfer": 0, "unmatched_transfer": 0}}
 
     # rules are fetched once, for the distinct keys only
     mocks["get_user_rules"].assert_awaited_once()
@@ -263,3 +265,54 @@ def test_csv_payee_uses_the_learned_name(client, fake_pool, fake_user, monkeypat
                                                              "last_seen": seen}]})
     text = client.get(f"/statement-imports/{IMPORT_ID}/preview.csv").text
     assert "MAMA PIMA HARDWARE" in text.splitlines()[1]
+
+
+# --- ab-281: rows handled at import ------------------------------------------
+
+def handled_txn(description, handled_as, reason, *, category_id=None, paired=None):
+    return {**txn(description, allocated=1000.0, category_id=category_id), "handled_as": handled_as,
+            "handled_reason": reason, "paired_transaction_id": paired, "paired_txn_date": None,
+            "paired_account_nickname": "My NCBA" if paired else None}
+
+
+def test_handled_rows_leave_the_review_and_are_listed_with_why(client, fake_user, fake_pool, monkeypatch):
+    charges = {"id": uuid4(), "name": "Bank & mobile charges", "type": "expense"}
+    charge = handled_txn("Pay Bill Charge", "charge", "M-Pesa charge", category_id=charges["id"])
+    paired = handled_txn("Pay Bill Online to 000000 - NCBA BANK KENYA PLC. Acc. 0", "transfer",
+                         "Moved to your My NCBA account", paired=uuid4())
+    waiting = handled_txn("Pay Bill Online to 000000 - NCBA BANK KENYA PLC. Acc. 1", "transfer",
+                          "Sent to your NCBA Bank account")
+    loan = {**handled_txn("OverDraft of Credit Party", "loan", "Fuliza overdraft"), "allocated": 0, "amount": 0.0}
+    shop = txn("Merchant Payment to 5555555 - NAIVAS LTD")
+    patch_reads(monkeypatch, imp=import_row(), rows=[charge, paired, waiting, loan, shop],
+                categories=(GROCERIES, charges))
+
+    body = client.get(f"/statement-imports/{IMPORT_ID}/preview").json()
+
+    assert [r["transaction_id"] for r in body["rows"]] == [str(shop["id"])]
+    by_id = {r["transaction_id"]: r for r in body["handled"]}
+    assert by_id[str(charge["id"])]["category_name"] == "Bank & mobile charges"
+    assert by_id[str(charge["id"])]["reason"] == "M-Pesa charge"
+    assert by_id[str(paired["id"])]["paired_account_nickname"] == "My NCBA"
+    assert body["summary"]["handled"] == {"charge": 1, "loan": 1, "transfer": 2, "unmatched_transfer": 1}
+    assert body["summary"]["open_rows"] == 1
+
+
+def test_an_unhandled_import_is_handled_when_its_review_opens(client, fake_user, fake_pool, monkeypatch):
+    mocks = patch_reads(monkeypatch, imp={**import_row(), "handled_at": None, "reviewed_at": None})
+    client.get(f"/statement-imports/{IMPORT_ID}/preview")
+    assert mocks["handle_import_by_id"].call_args.kwargs["import_id"] == IMPORT_ID
+
+
+@pytest.mark.parametrize("field", ["handled_at", "reviewed_at"])
+def test_handled_or_reviewed_imports_are_not_handled_again(client, fake_user, fake_pool, monkeypatch, field):
+    mocks = patch_reads(monkeypatch, imp={**import_row(), field: datetime(2026, 11, 1, tzinfo=timezone.utc)})
+    client.get(f"/statement-imports/{IMPORT_ID}/preview")
+    mocks["handle_import_by_id"].assert_not_awaited()
+
+
+def test_a_handling_failure_still_opens_the_review(client, fake_user, fake_pool, monkeypatch):
+    mocks = patch_reads(monkeypatch, imp=import_row(), rows=[txn("Merchant Payment to 5555555 - NAIVAS LTD")])
+    mocks["handle_import_by_id"].side_effect = RuntimeError("boom")
+    response = client.get(f"/statement-imports/{IMPORT_ID}/preview")
+    assert response.status_code == 200 and len(response.json()["rows"]) == 1
