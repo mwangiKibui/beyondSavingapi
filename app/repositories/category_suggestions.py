@@ -16,7 +16,7 @@ async def get_import_for_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id
         """
         SELECT si.id, si.account_id, a.nickname AS account_nickname, a.provider,
                si.file_name, si.status, si.period_start, si.period_end, si.row_count, si.created_at,
-               si.reviewed_at, si.error_detail
+               si.reviewed_at, si.error_detail, si.handled_at, a.user_id
         FROM statement_imports si
         JOIN accounts a ON a.id = si.account_id
         WHERE si.id = $1 AND a.user_id = $2
@@ -53,6 +53,9 @@ async def get_import_rows(
         SELECT t.id, t.txn_date, t.amount, t.currency, t.direction, t.description,
                (t.transfer_group_id IS NOT NULL) AS is_transfer,
                t.balance_after,
+               t.account_id, t.handled_as, t.handled_reason, t.handling_dismissed,
+               pair.id AS paired_transaction_id, pair.txn_date AS paired_txn_date,
+               pair.account_nickname AS paired_account_nickname,
                COALESCE(alloc.total, 0) AS allocated,
                alloc.category_id,
                COALESCE(alloc.category_count, 0) AS category_count,
@@ -67,6 +70,14 @@ async def get_import_rows(
             FROM allocations al
             WHERE al.transaction_id = t.id
         ) alloc ON true
+        -- ab-281: the other leg of a transfer between the user's accounts.
+        LEFT JOIN LATERAL (
+            SELECT o.id, o.txn_date, oa.nickname AS account_nickname
+            FROM transactions o
+            JOIN accounts oa ON oa.id = o.account_id
+            WHERE t.transfer_group_id IS NOT NULL AND o.transfer_group_id = t.transfer_group_id AND o.id <> t.id
+            LIMIT 1
+        ) pair ON true
         WHERE t.import_id = $1
            OR (
                 t.account_id = $2

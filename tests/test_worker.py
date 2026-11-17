@@ -529,3 +529,48 @@ async def test_run_worker_processes_each_popped_job(fake_pool, monkeypatch):
         ((fake_pool, "job-1"),),
         ((fake_pool, "job-2"),),
     ]
+
+
+# --- ab-281: rows handled right after parsing --------------------------------
+
+def _parsed_job(monkeypatch, import_id):
+    monkeypatch.setattr(
+        "app.worker.get_import_for_processing",
+        AsyncMock(return_value={"id": import_id, "account_id": uuid4(), "storage_key": "k",
+                                "file_name": "s.pdf", "provider": "Test Provider"}),
+    )
+    monkeypatch.setattr("app.worker.PARSERS", {"Test Provider": MagicMock(return_value=[])})
+    monkeypatch.setattr("app.worker.insert_transactions", AsyncMock(return_value=0))
+    monkeypatch.setattr("app.worker.mark_import_parsed", AsyncMock())
+    mark_failed = AsyncMock()
+    monkeypatch.setattr("app.worker.mark_import_failed", mark_failed)
+    body = MagicMock()
+    body.read.return_value = b"x"
+    storage = MagicMock()
+    storage.get_object.return_value = {"Body": body}
+    monkeypatch.setattr("app.worker.get_storage_client", lambda: storage)
+    return mark_failed
+
+
+async def test_process_job_handles_rows_after_parsing(fake_pool, monkeypatch):
+    import_id = uuid4()
+    mark_failed = _parsed_job(monkeypatch, import_id)
+    handle = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.worker.handle_import_by_id", handle)
+
+    await process_job(fake_pool, str(import_id))
+
+    assert handle.call_args.kwargs["import_id"] == import_id
+    mark_failed.assert_not_called()
+
+
+async def test_a_handling_failure_never_fails_the_import(fake_pool, monkeypatch, caplog):
+    import_id = uuid4()
+    mark_failed = _parsed_job(monkeypatch, import_id)
+    monkeypatch.setattr("app.worker.handle_import_by_id", AsyncMock(side_effect=RuntimeError("db down")))
+
+    with caplog.at_level(logging.ERROR):
+        await process_job(fake_pool, str(import_id))
+
+    mark_failed.assert_not_called()
+    assert "will retry when its review opens" in caplog.text

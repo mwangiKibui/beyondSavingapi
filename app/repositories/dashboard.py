@@ -49,9 +49,20 @@ async def fetch_dashboard_rows(
             t.id AS transaction_id,
             t.amount AS txn_amount,
             t.direction,
-            EXISTS (
-                SELECT 1 FROM allocations al
-                WHERE al.transaction_id = t.id AND al.transfer_reason_id IS NOT NULL
+            -- Netted out of totals: a transfer, or (ab-281) a loan row handled
+            -- at import with no category - borrowed money isn't income/expense.
+            (
+                EXISTS (
+                    SELECT 1 FROM allocations al
+                    WHERE al.transaction_id = t.id AND al.transfer_reason_id IS NOT NULL
+                )
+                OR (
+                    t.handled_as = 'loan'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM allocations al
+                        WHERE al.transaction_id = t.id AND al.category_id IS NOT NULL
+                    )
+                )
             ) AS has_transfer_allocation
         FROM accounts a
         LEFT JOIN transactions t

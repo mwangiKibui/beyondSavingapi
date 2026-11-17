@@ -362,7 +362,33 @@ def group_key(key: RowKey, direction: str) -> str | None:
 
 
 def _is_open(row: dict) -> bool:
-    return not row["is_transfer"] and float(row["allocated"] or 0) == 0
+    # ab-281: rows handled at import (charges, loans, own transfers) aren't
+    # asked about, even when nothing could be allocated (a zero-amount row).
+    return not row["is_transfer"] and not row.get("handled_as") and float(row["allocated"] or 0) == 0
+
+
+def build_handled_rows(rows: list[dict], *, categories: list[dict]) -> list[dict]:
+    """The import's rows handled at import, with why (ab-281), for the
+    review's Handled tab. Only ever shown to the importer."""
+    names = {c["id"]: c["name"] for c in categories}
+    return [
+        {
+            "transaction_id": row["id"],
+            "txn_date": row["txn_date"],
+            "amount": float(row["amount"]),
+            "currency": row["currency"],
+            "direction": row["direction"],
+            "description": row["description"],
+            "handled_as": row["handled_as"],
+            "reason": row["handled_reason"],
+            "category_name": names.get(row.get("category_id")),
+            "paired_transaction_id": row.get("paired_transaction_id"),
+            "paired_txn_date": row.get("paired_txn_date"),
+            "paired_account_nickname": row.get("paired_account_nickname"),
+        }
+        for row in rows
+        if row.get("handled_as")
+    ]
 
 
 def build_preview_rows(

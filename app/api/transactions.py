@@ -27,6 +27,7 @@ from app.repositories.transactions import (
     list_transactions,
 )
 from app.repositories.transfer_reasons import get_transfer_reasons_by_ids
+from app.services.import_handling import HandlingRejected, change_handled_category, undo_handling
 from app.services.rule_updates import remember_preferred
 from app.services.allocations import (
     CATEGORY_TYPE_FOR_DIRECTION,
@@ -688,3 +689,77 @@ async def create_transactions_endpoint(
         for row in created
     ]
     return {"items": items}
+
+
+# --- rows handled at import (ab-281) ------------------------------------------
+
+
+class UndoHandlingResponse(BaseModel):
+    # The row itself, plus a transfer's other leg when it goes back too.
+    returned_to_review: list[UUID]
+
+
+class HandledCategoryRequest(BaseModel):
+    category_id: UUID
+
+
+class HandledCategoryResponse(BaseModel):
+    transaction_id: UUID
+    category_id: UUID
+    category_name: str
+
+
+async def _run_handling_correction(pool: asyncpg.Pool | None, action, *, transaction_id: UUID, user_id: UUID):
+    if pool is None:
+        logger.error("Database pool unavailable")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE)
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                return await action(conn)
+    except HandlingRejected as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
+    except Exception:
+        logger.error(
+            "Unexpected error correcting handled row %s, user %s", transaction_id, user_id, exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
+        ) from None
+
+
+@router.delete("/{transaction_id}/handling", response_model=UndoHandlingResponse)
+async def undo_handling_endpoint(
+    transaction_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """"Not a charge / loan / transfer": undoes what the import did with
+    this row and returns it to the review for good. Unpairs a transfer."""
+    secret = get_settings().suggestion_key_secret
+    back = await _run_handling_correction(
+        pool,
+        lambda conn: undo_handling(conn, transaction_id=transaction_id, user_id=user_id, secret=secret),
+        transaction_id=transaction_id,
+        user_id=user_id,
+    )
+    return {"returned_to_review": back}
+
+
+@router.put("/{transaction_id}/handling/category", response_model=HandledCategoryResponse)
+async def change_handled_category_endpoint(
+    transaction_id: UUID,
+    body: HandledCategoryRequest,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """Files a handled charge (or loan row) under another of the user's
+    categories. Nothing is learned from it."""
+    return await _run_handling_correction(
+        pool,
+        lambda conn: change_handled_category(
+            conn, transaction_id=transaction_id, user_id=user_id, category_id=body.category_id
+        ),
+        transaction_id=transaction_id,
+        user_id=user_id,
+    )

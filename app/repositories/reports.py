@@ -68,6 +68,7 @@ async def fetch_report_rows(pool: asyncpg.Pool, filters: ReportFilters) -> list[
             t.direction,
             t.counterparty,
             t.description,
+            t.handled_as,
             acc.nickname AS account_nickname,
             a.id AS allocation_id,
             a.category_id,
@@ -110,6 +111,16 @@ def _group_by_transaction(rows: list[dict]) -> dict[UUID, list[dict]]:
     return grouped
 
 
+def is_uncounted_loan(alloc_rows: list[dict]) -> bool:
+    """ab-281: a loan row handled at import with no category (a payout,
+    request, Fuliza draw/repayment, SACCO loan-ledger row) is neither
+    income nor spending - netted out of totals exactly like a transfer.
+    A loan repayment filed under a category still counts."""
+    return alloc_rows[0].get("handled_as") == "loan" and not any(
+        row.get("category_id") is not None for row in alloc_rows
+    )
+
+
 def build_report(rows: list[dict], *, currency: str) -> dict:
     """Pure-Python aggregation over fetch_report_rows' own result set -
     the shared data backing GET /reports (ab-82/83/127). Every figure
@@ -144,7 +155,9 @@ def build_report(rows: list[dict], *, currency: str) -> dict:
         txn_amount = first["txn_amount"]
         direction = first["direction"]
 
-        has_transfer = any(row["transfer_reason_id"] is not None for row in alloc_rows)
+        has_transfer = any(row["transfer_reason_id"] is not None for row in alloc_rows) or is_uncounted_loan(
+            alloc_rows
+        )
         allocated = sum(
             (row["alloc_amount"] for row in alloc_rows if row["allocation_id"] is not None),
             ZERO,
@@ -274,7 +287,9 @@ async def fetch_account_summary_rows(pool: asyncpg.Pool, *, user_id: UUID, accou
             t.direction,
             al.id AS allocation_id,
             al.amount AS alloc_amount,
-            al.transfer_reason_id
+            al.transfer_reason_id,
+            al.category_id,
+            t.handled_as
         FROM accounts a
         LEFT JOIN transactions t ON t.account_id = a.id
         LEFT JOIN allocations al ON al.transaction_id = t.id
@@ -313,6 +328,8 @@ def build_account_summary(rows: list[dict]) -> list[dict]:
         )
         if row["allocation_id"] is None or row["transfer_reason_id"] is not None:
             continue
+        if row.get("handled_as") == "loan" and row.get("category_id") is None:
+            continue  # ab-281: borrowed money, not income/expense
         if row["direction"] == "in":
             bucket["money_in"] += row["alloc_amount"]
         else:
