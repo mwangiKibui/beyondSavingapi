@@ -12,6 +12,7 @@ from app.api import (
     auth,
     budget_plans,
     categories,
+    category_applies,
     dashboard,
     money_plans,
     notifications,
@@ -20,6 +21,7 @@ from app.api import (
     sub_ledgers,
     transactions,
     transfer_reasons,
+    uncategorised,
     users,
 )
 from app.core.config import get_settings
@@ -71,6 +73,7 @@ app.include_router(admin.router)
 app.include_router(admin_merchants.router)
 app.include_router(budget_plans.router)
 app.include_router(categories.router)
+app.include_router(category_applies.router)
 app.include_router(dashboard.router)
 app.include_router(money_plans.router)
 app.include_router(notifications.router)
@@ -79,6 +82,7 @@ app.include_router(statement_imports.router)
 app.include_router(sub_ledgers.router)
 app.include_router(transactions.router)
 app.include_router(transfer_reasons.router)
+app.include_router(uncategorised.router)
 app.include_router(users.router)
 
 

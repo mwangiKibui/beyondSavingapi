@@ -1,0 +1,101 @@
+"""Response shapes and list parameters shared by the payee-group endpoints
+(ab-282): Transactions -> Uncategorised and an import's review tabs."""
+
+from datetime import date
+from typing import Literal
+from uuid import UUID
+
+from fastapi import HTTPException, Query, status
+from pydantic import BaseModel
+
+from app.services.payee_groups import ALLOWED_PAGE_SIZES, DEFAULT_PAGE_SIZE
+
+
+class GroupStatement(BaseModel):
+    import_id: UUID
+    file_name: str | None = None
+    account_nickname: str | None = None
+
+
+class GroupRow(BaseModel):
+    transaction_id: UUID
+    txn_date: date
+    amount: float
+    currency: str
+    description: str | None = None
+    import_id: UUID | None = None
+
+
+class GroupSuggestion(BaseModel):
+    # None when is_new_category: applying it creates the category.
+    category_id: UUID | None = None
+    category_name: str
+    is_new_category: bool
+    source: Literal["your_rule", "this_statement", "others", "directory"]
+    merchant_name: str | None = None
+
+
+class PayeeGroup(BaseModel):
+    # Opaque; names, numbers and references never appear in it.
+    group_key: str
+    # Person rows show the statement text - only ever to the importer (ab-269).
+    display_name: str
+    label: str | None = None
+    key_kind: str | None = None
+    number_kind: str | None = None
+    number: str | None = None
+    is_person: bool
+    is_business: bool
+    direction: Literal["in", "out"]
+    currency: str
+    row_count: int
+    total: float
+    first_date: date
+    last_date: date
+    statements: list[GroupStatement]
+    suggestion: GroupSuggestion | None = None
+    # Set when every row has the same single category / was filed by the
+    # same apply (undo it with DELETE /category-applies/{apply_id}).
+    category_id: UUID | None = None
+    category_name: str | None = None
+    apply_id: UUID | None = None
+    # Handled tab only (ab-281).
+    handled_as: Literal["charge", "loan", "transfer"] | None = None
+    handled_reason: str | None = None
+    rows: list[GroupRow]
+
+
+Direction = Literal["in", "out"]
+Kind = Literal["person", "business"]
+Sort = Literal["rows", "amount", "payee"]
+Order = Literal["asc", "desc"]
+
+
+class ListParams(BaseModel):
+    direction: Direction | None = None
+    kind: Kind | None = None
+    sort: Sort = "rows"
+    order: Order = "desc"
+    page: int = 1
+    page_size: int = DEFAULT_PAGE_SIZE
+
+
+def list_params(
+    direction: Direction | None = Query(default=None),
+    kind: Kind | None = Query(default=None),
+    sort: Sort = Query(default="rows"),
+    order: Order = Query(default="desc"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE),
+) -> ListParams:
+    return ListParams(direction=direction, kind=kind, sort=sort, order=order, page=page, page_size=page_size)
+
+
+def check_page_size(params: ListParams) -> None:
+    """Called in the handler, not in the Depends() above (raising there
+    breaks FastAPI's validation ordering)."""
+    if params.page_size not in ALLOWED_PAGE_SIZES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"page_size must be one of {', '.join(map(str, ALLOWED_PAGE_SIZES))}",
+        )
