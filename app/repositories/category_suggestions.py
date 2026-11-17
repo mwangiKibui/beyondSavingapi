@@ -54,6 +54,8 @@ async def get_import_rows(
                (t.transfer_group_id IS NOT NULL) AS is_transfer,
                t.balance_after,
                t.account_id, t.handled_as, t.handled_reason, t.handling_dismissed,
+               t.import_id, si.file_name, acct.nickname AS account_nickname,
+               alloc.apply_id, COALESCE(alloc.applied_here, false) AS applied_here,
                pair.id AS paired_transaction_id, pair.txn_date AS paired_txn_date,
                pair.account_nickname AS paired_account_nickname,
                COALESCE(alloc.total, 0) AS allocated,
@@ -66,10 +68,19 @@ async def get_import_rows(
                    CASE WHEN COUNT(*) = COUNT(al.category_id) AND COUNT(DISTINCT al.category_id) = 1
                         THEN MIN(al.category_id::text)::uuid END AS category_id,
                    COUNT(DISTINCT al.category_id) AS category_count,
-                   bool_or(al.category_id IS NULL) AS has_uncategorised
+                   bool_or(al.category_id IS NULL) AS has_uncategorised,
+                   -- ab-282: the apply that filed the row, when one apply
+                   -- made all its allocations; applied_here = from this
+                   -- import's review (its "Decided" tab).
+                   CASE WHEN COUNT(*) = COUNT(al.apply_id) AND COUNT(DISTINCT al.apply_id) = 1
+                        THEN MIN(al.apply_id::text)::uuid END AS apply_id,
+                   bool_or(ca.import_id = $1 AND ca.undone_at IS NULL) AS applied_here
             FROM allocations al
+            LEFT JOIN category_applies ca ON ca.id = al.apply_id
             WHERE al.transaction_id = t.id
         ) alloc ON true
+        JOIN accounts acct ON acct.id = t.account_id
+        LEFT JOIN statement_imports si ON si.id = t.import_id
         -- ab-281: the other leg of a transfer between the user's accounts.
         LEFT JOIN LATERAL (
             SELECT o.id, o.txn_date, oa.nickname AS account_nickname

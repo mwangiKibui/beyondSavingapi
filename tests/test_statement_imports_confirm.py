@@ -99,7 +99,6 @@ def test_confirm_returns_503_when_db_unreachable(client, fake_user):
 
 
 @pytest.mark.parametrize("body", [
-    {"items": []},
     {"items": [{"transaction_id": str(uuid4())}]},                                     # no category
     {"items": [item(new_category_name="Fuel")]},                                       # both
     {"items": [item(category_id=None, new_category_name="   ")]},                     # blank name
@@ -110,6 +109,14 @@ def test_confirm_returns_503_when_db_unreachable(client, fake_user):
 def test_confirm_rejects_bad_items(client, fake_user, fake_pool, patched, body):
     assert client.post(URL, json=body).status_code == 422
     patched["confirm_import"].assert_not_awaited()
+
+
+@pytest.mark.parametrize("body", [{"items": []}, {}])
+def test_confirm_with_no_items_just_finishes_the_review(client, fake_user, fake_pool, patched, body):
+    # ab-282: categories applied as the user went are already saved.
+    response = client.post(URL, json=body)
+    assert response.status_code == 200
+    assert patched["confirm_import"].await_args.kwargs["items"] == []
 
 
 def test_confirm_rejects_duplicate_rows(client, fake_user, fake_pool, patched):

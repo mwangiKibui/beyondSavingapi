@@ -9,6 +9,7 @@ import asyncpg
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field, field_validator
 
+from app.api.payee_group_models import ListParams, PayeeGroup, check_page_size, list_params
 from app.core.config import get_settings
 from app.core.db import get_pool
 from app.core.errors import GENERIC_ERROR_MESSAGE
@@ -50,6 +51,7 @@ from app.services.category_suggestions import (
 from app.services.import_confirm import ConfirmItem, confirm_import
 from app.services.import_handling import handle_import_by_id
 from app.services.import_progress import Draft, payee_keys, progress_counts
+from app.services.payee_groups import REVIEW_TABS, build_groups, review_tab, select_groups
 from app.services.preview_csv import build_preview_csv
 from app.services.statement_files import (
     IncorrectStatementPassword,
@@ -490,6 +492,56 @@ async def preview_statement_import_endpoint(
     }
 
 
+class ReviewTabCounts(BaseModel):
+    decide: int
+    decided: int
+    sorted: int
+    handled: int
+
+
+class ReviewGroupsResponse(BaseModel):
+    items: list[PayeeGroup]
+    total: int
+    page: int
+    page_size: int
+    # Payee groups per tab, whatever the filters.
+    counts: ReviewTabCounts
+
+
+@router.get("/{import_id}/groups", response_model=ReviewGroupsResponse)
+async def review_groups_endpoint(
+    import_id: UUID,
+    tab: Literal["decide", "decided", "sorted", "handled"] = Query(default="decide"),
+    params: ListParams = Depends(list_params),
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """The review's payee table (ab-282): one tab of the import's rows,
+    grouped by payee. decide = still open (with suggestions); decided =
+    filed from this review (each group's apply_id undoes it); sorted =
+    categorised some other way; handled = handled at import (ab-281)."""
+    check_page_size(params)
+    _require_pool(pool)
+    loaded = await _load_preview(pool, import_id=import_id, user_id=user_id)
+    by_tab: dict[str, list[dict]] = {t: [] for t in REVIEW_TABS}
+    for row in loaded["rows"]:
+        by_tab[review_tab(row)].append(row)
+    preview = {p["transaction_id"]: p for p in loaded["preview_rows"]}
+    names = {c["id"]: c["name"] for c in loaded["categories"]}
+    grouped = {
+        t: build_groups(rows, keys=loaded["keys"], preview=preview if t == "decide" else None, category_names=names)
+        for t, rows in by_tab.items()
+    }
+    items, total = select_groups(grouped[tab], **params.model_dump())
+    return {
+        "items": items,
+        "total": total,
+        "page": params.page,
+        "page_size": params.page_size,
+        "counts": {t: len(g) for t, g in grouped.items()},
+    }
+
+
 @router.get("/{import_id}/preview.csv", response_class=Response)
 async def preview_statement_import_csv_endpoint(
     import_id: UUID,
@@ -554,7 +606,9 @@ class ConfirmItemRequest(BaseModel):
 
 
 class ConfirmRequest(BaseModel):
-    items: list[ConfirmItemRequest] = Field(min_length=1, max_length=5000)
+    # ab-282: may be empty - categories applied as the user went
+    # (/category-applies) are already saved, so "Done" just finishes.
+    items: list[ConfirmItemRequest] = Field(default_factory=list, max_length=5000)
 
 
 class CreatedCategory(BaseModel):
