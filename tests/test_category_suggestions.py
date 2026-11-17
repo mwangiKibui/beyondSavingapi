@@ -157,6 +157,35 @@ def test_new_account_on_a_single_category_paybill_still_suggests():
     assert pick_rule(rules, account_hash="h:new", amount=100)["category_id"] == cat
 
 
+# Per-line by amount (ab-292): a payee filed under several categories at
+# clearly different amounts suggests the category whose typical amount
+# is nearest.
+def test_clearly_apart_amounts_pick_the_nearest_category():
+    veg, shop = uuid4(), uuid4()
+    rules = [rule(veg, times_used=3, avg_amount=400), rule(shop, times_used=9, avg_amount=6000)]
+    assert pick_rule(rules, account_hash=None, amount=350)["category_id"] == veg
+    assert pick_rule(rules, account_hash=None, amount=7000)["category_id"] == shop
+
+
+def test_a_close_call_on_amount_keeps_the_most_used():
+    veg, shop = uuid4(), uuid4()
+    rules = [rule(veg, times_used=3, avg_amount=400), rule(shop, times_used=9, avg_amount=6000)]
+    # About halfway (in ratio terms) between 400 and 6000.
+    assert pick_rule(rules, account_hash=None, amount=1500)["category_id"] == shop
+
+
+def test_amounts_too_close_together_keep_the_most_used():
+    a, b = uuid4(), uuid4()
+    rules = [rule(a, times_used=3, avg_amount=1000), rule(b, times_used=9, avg_amount=1500)]
+    assert pick_rule(rules, account_hash=None, amount=900)["category_id"] == b
+
+
+def test_a_category_used_once_doesnt_steer_by_amount():
+    veg, shop = uuid4(), uuid4()
+    rules = [rule(veg, times_used=1, avg_amount=400), rule(shop, times_used=9, avg_amount=6000)]
+    assert pick_rule(rules, account_hash=None, amount=350)["category_id"] == shop
+
+
 def test_no_rules_gives_none():
     assert pick_rule([], account_hash=None, amount=100) is None
 

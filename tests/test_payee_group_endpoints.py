@@ -271,6 +271,52 @@ def test_review_groups_rejects_an_unknown_handled_as(client, fake_user, fake_poo
     assert client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=all&handled_as=gift").status_code == 422
 
 
+def test_review_groups_keep_one_payee_in_one_row_across_pending_and_approved(client, fake_user, fake_pool, review):
+    apply_id = uuid4()
+    review([
+        txn(GROCER, amount=300.0),
+        txn(GROCER, amount=400.0, allocated=400, category_id=GROCERIES["id"], apply_id=apply_id, applied_here=True),
+        txn("Pay Bill Charge", allocated=10, handled_as="charge", handled_reason="M-Pesa charge"),
+    ])
+
+    body = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=all").json()
+
+    acme = next(g for g in body["items"] if g["handled_as"] is None)
+    assert acme["row_count"] == 2 and acme["status"] == "decide"
+    assert acme["pending_count"] == 1 and acme["approved_count"] == 1
+    assert acme["category_id"] is None and acme["apply_id"] is None
+    lines = {r["amount"]: r for r in acme["rows"]}
+    assert lines[300.0]["status"] == "decide" and lines[300.0]["category_id"] is None
+    assert lines[400.0]["status"] == "decided" and lines[400.0]["category_name"] == "Groceries"
+    assert lines[400.0]["apply_id"] == str(apply_id)
+    # Row counts stay per line.
+    assert body["row_counts"] == {"decide": 1, "decided": 1, "sorted": 0, "handled": 1}
+    # A mixed group shows under Pending and under Approved.
+    for tab in ("decide", "approved"):
+        items = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab={tab}").json()["items"]
+        assert [g["row_count"] for g in items] == [2]
+    assert client.get(f"/statement-imports/{IMPORT_ID}/groups").json()["counts"]["decided"] == 1
+
+
+def test_review_group_lines_carry_their_own_suggestion(client, fake_user, fake_pool, review):
+    veg = {"id": uuid4(), "name": "Vegetables", "type": "expense", "entry_type": "general"}
+    rules = [
+        {"key_kind": "till", "key_value": "5555555", "provider": None, "account_hash": None, "direction": "out",
+         "category_id": GROCERIES["id"], "label": None, "times_used": 9, "avg_amount": 6000},
+        {"key_kind": "till", "key_value": "5555555", "provider": None, "account_hash": None, "direction": "out",
+         "category_id": veg["id"], "label": None, "times_used": 3, "avg_amount": 400},
+    ]
+    mocks = review([txn(GROCER, amount=350.0), txn(GROCER, amount=6500.0), txn(GROCER, amount=7000.0)], rules=rules)
+    mocks["get_user_categories"].return_value = [GROCERIES, veg]
+
+    g = client.get(f"/statement-imports/{IMPORT_ID}/groups").json()["items"][0]
+
+    by_amount = {r["amount"]: r["suggestion"]["category_name"] for r in g["rows"]}
+    assert by_amount == {350.0: "Vegetables", 6500.0: "Groceries", 7000.0: "Groceries"}
+    # The group's own suggestion is what most lines got.
+    assert g["suggestion"]["category_name"] == "Groceries"
+
+
 def test_review_groups_404_for_another_users_import(client, fake_user, fake_pool, review):
     review([])["get_import_for_preview"].return_value = None
     assert client.get(f"/statement-imports/{IMPORT_ID}/groups").status_code == 404
@@ -301,6 +347,7 @@ def applies(monkeypatch):
     mocks = {
         "apply_groups": AsyncMock(return_value=result([applied_group()])),
         "undo_apply": AsyncMock(return_value=[]),
+        "reopen_lines": AsyncMock(return_value=[]),
         "apply_earlier": AsyncMock(return_value=result()),
         "get_import_for_preview": AsyncMock(return_value=import_row()),
         "generate_budget_alerts": AsyncMock(),
@@ -407,6 +454,32 @@ def test_undo_returns_the_reopened_rows(client, fake_user, fake_pool, applies):
     assert response.status_code == 200 and response.json() == {"reopened": [str(reopened[0])]}
     kwargs = applies["undo_apply"].await_args.kwargs
     assert kwargs["apply_id"] == apply_id and kwargs["user_id"] == fake_user
+
+
+def test_apply_passes_per_line_through(client, fake_user, fake_pool, applies):
+    client.post("/category-applies", json=body(category_id=str(uuid4()), remember=True, per_line=True))
+    group = applies["apply_groups"].await_args.kwargs["groups"][0]
+    assert group.per_line is True and group.remember is True
+
+
+def test_reopen_returns_the_reopened_lines(client, fake_user, fake_pool, applies):
+    apply_id, line = uuid4(), uuid4()
+    applies["reopen_lines"].return_value = [line]
+    response = client.post(f"/category-applies/{apply_id}/reopen", json={"transaction_ids": [str(line)]})
+    assert response.status_code == 200 and response.json() == {"reopened": [str(line)]}
+    kwargs = applies["reopen_lines"].await_args.kwargs
+    assert kwargs == {"user_id": fake_user, "apply_id": apply_id, "transaction_ids": [line]}
+
+
+def test_reopen_needs_at_least_one_line(client, fake_user, fake_pool, applies):
+    assert client.post(f"/category-applies/{uuid4()}/reopen", json={"transaction_ids": []}).status_code == 422
+
+
+@pytest.mark.parametrize("code", [404, 409, 422])
+def test_reopen_rejections_pass_through(client, fake_user, fake_pool, applies, code):
+    applies["reopen_lines"].side_effect = AllocationRejected(code, "nope")
+    response = client.post(f"/category-applies/{uuid4()}/reopen", json={"transaction_ids": [str(uuid4())]})
+    assert response.status_code == code
 
 
 @pytest.mark.parametrize("code", [404, 409])

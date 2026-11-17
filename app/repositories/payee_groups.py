@@ -145,6 +145,21 @@ async def delete_apply_allocations(conn: asyncpg.Connection, *, apply_id: UUID) 
     return sorted({r["transaction_id"] for r in rows})
 
 
+async def delete_apply_line_allocations(
+    conn: asyncpg.Connection, *, apply_id: UUID, transaction_ids: list[UUID]
+) -> list[UUID]:
+    """ab-292: takes some lines out of an apply, leaving the rest filed."""
+    rows = await conn.fetch(
+        "DELETE FROM allocations WHERE apply_id = $1 AND transaction_id = ANY($2::uuid[]) RETURNING transaction_id",
+        apply_id, transaction_ids,
+    )
+    return sorted({r["transaction_id"] for r in rows})
+
+
+async def count_apply_allocations(conn: asyncpg.Connection, *, apply_id: UUID) -> int:
+    return await conn.fetchval("SELECT count(*) FROM allocations WHERE apply_id = $1", apply_id)
+
+
 async def mark_apply_undone(conn: asyncpg.Connection, *, apply_id: UUID) -> None:
     await conn.execute("UPDATE category_applies SET undone_at = now() WHERE id = $1", apply_id)
 

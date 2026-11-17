@@ -79,12 +79,16 @@ def build_groups(
     keys: dict[UUID, RowKey],
     preview: dict[UUID, dict] | None = None,
     category_names: dict[UUID, str] | None = None,
+    with_status: bool = False,
 ) -> list[dict]:
     """rows: each with id, txn_date, amount, currency, direction,
     description, import_id, file_name, account_nickname and, where known,
     category_id / apply_id / handled_as / handled_reason.
     preview: build_preview_rows output by transaction id (suggestion, label)
-    for open rows. Groups come back in first-seen order."""
+    for open rows. Groups come back in first-seen order.
+    with_status (an import's review, ab-289/ab-292): each line gets its
+    review status, and the group its status and pending/approved counts;
+    a payee's pending and approved lines share one group."""
     preview = preview or {}
     category_names = category_names or {}
     by_key: dict[str, list[dict]] = {}
@@ -109,6 +113,7 @@ def build_groups(
                     "account_nickname": r.get("account_nickname"),
                 })
         category_id = _same([r.get("category_id") for r in members])
+        statuses = [review_tab(r) for r in members] if with_status else []
         groups.append({
             "group_key": gk,
             "display_name": known_as or _display_name(key, None, latest["description"]),
@@ -132,6 +137,7 @@ def build_groups(
             "apply_id": _same([r.get("apply_id") for r in members]),
             "handled_as": latest.get("handled_as"),
             "handled_reason": _same([r.get("handled_reason") for r in members]),
+            **(_group_status(statuses) if with_status else {}),
             "rows": [
                 {
                     "transaction_id": r["id"],
@@ -140,11 +146,30 @@ def build_groups(
                     "currency": r["currency"],
                     "description": r["description"],
                     "import_id": r.get("import_id"),
+                    "status": statuses[i] if with_status else None,
+                    "category_id": r.get("category_id"),
+                    "category_name": category_names.get(r.get("category_id")) if r.get("category_id") else None,
+                    "apply_id": r.get("apply_id"),
+                    "suggestion": preview.get(r["id"], {}).get("suggestion"),
                 }
-                for r in members
+                for i, r in enumerate(members)
             ],
         })
     return groups
+
+
+def _group_status(statuses: list[str]) -> dict:
+    """A group is Pending while any line is (ab-292); otherwise its lines'
+    shared status, or Approved (decided before sorted)."""
+    pending = statuses.count("decide")
+    approved = statuses.count("decided") + statuses.count("sorted")
+    if pending:
+        status = "decide"
+    elif "handled" in statuses:
+        status = "handled"
+    else:
+        status = "decided" if "decided" in statuses else "sorted"
+    return {"status": status, "statuses": set(statuses), "pending_count": pending, "approved_count": approved}
 
 
 def _matches(group: dict, needle: str) -> bool:

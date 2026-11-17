@@ -16,7 +16,14 @@ from app.core.security import get_current_user_id
 from app.repositories.category_suggestions import get_import_for_preview
 from app.repositories.notifications import generate_budget_alerts
 from app.services.allocations import AllocationRejected, alert_groups
-from app.services.category_applies import ApplyGroup, ApplyResult, apply_earlier, apply_groups, undo_apply
+from app.services.category_applies import (
+    ApplyGroup,
+    ApplyResult,
+    apply_earlier,
+    apply_groups,
+    reopen_lines,
+    undo_apply,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +41,9 @@ class ApplyGroupRequest(BaseModel):
     # "From now on": the payee's top saved choice, plus a shared vote for
     # business payees. Off learns nothing.
     remember: bool = False
+    # ab-292: one line of a payee filed on its own - remember learns softly
+    # (one more use, never forced to the top) and casts no shared vote.
+    per_line: bool = False
 
     @field_validator("new_category_name", mode="before")
     @classmethod
@@ -80,6 +90,10 @@ class CreatedCategory(BaseModel):
 class ApplyResponse(BaseModel):
     groups: list[AppliedGroup]
     created_categories: list[CreatedCategory]
+
+
+class ReopenRequest(BaseModel):
+    transaction_ids: list[UUID] = Field(min_length=1, max_length=5000)
 
 
 class UndoResponse(BaseModel):
@@ -175,6 +189,32 @@ async def undo_apply_endpoint(
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
     except Exception:
         logger.error("Unexpected error undoing apply %s for user %s", apply_id, user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
+        ) from None
+    return {"reopened": reopened}
+
+
+@router.post("/{apply_id}/reopen", response_model=UndoResponse)
+async def reopen_lines_endpoint(
+    apply_id: UUID,
+    body: ReopenRequest,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """ab-292: puts some lines of a choice back to open (to file one line
+    differently) without undoing the rest."""
+    _require_pool(pool)
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                reopened = await reopen_lines(
+                    conn, user_id=user_id, apply_id=apply_id, transaction_ids=body.transaction_ids
+                )
+    except AllocationRejected as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
+    except Exception:
+        logger.error("Unexpected error reopening lines of apply %s for user %s", apply_id, user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
         ) from None

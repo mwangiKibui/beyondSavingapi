@@ -537,30 +537,34 @@ async def review_groups_endpoint(
         by_tab[review_tab(row)].append(row)
     preview = {p["transaction_id"]: p for p in loaded["preview_rows"]}
     names = {c["id"]: c["name"] for c in loaded["categories"]}
-    grouped = {
-        t: build_groups(rows, keys=loaded["keys"], preview=preview if t == "decide" else None, category_names=names)
-        for t, rows in by_tab.items()
-    }
-    for t, groups in grouped.items():
-        for g in groups:
-            g["status"] = t
-    if tab == "all":
-        pool_of_groups = [g for t in REVIEW_TABS for g in grouped[t]]
-    elif tab == "approved":
-        pool_of_groups = grouped["decided"] + grouped["sorted"]
-    else:
-        pool_of_groups = grouped[tab]
+    # One row per payee across Pending and Approved (ab-292); handled rows
+    # group on their own.
+    not_handled = [r for t in ("decide", "decided", "sorted") for r in by_tab[t]]
+    all_groups = build_groups(
+        not_handled, keys=loaded["keys"], preview=preview, category_names=names, with_status=True
+    ) + build_groups(by_tab["handled"], keys=loaded["keys"], category_names=names, with_status=True)
+
+    def in_tab(g: dict, t: str) -> bool:
+        if t == "all":
+            return True
+        if t == "approved":
+            return bool(g["statuses"] & {"decided", "sorted"})
+        return t in g["statuses"]
+
     items, total = select_groups(
-        pool_of_groups, **params.model_dump(), handled_as=handled_as, status_first=tab in ("all", "approved")
+        [g for g in all_groups if in_tab(g, tab)],
+        **params.model_dump(), handled_as=handled_as, status_first=tab in ("all", "approved"),
     )
     return {
         "items": items,
         "total": total,
         "page": params.page,
         "page_size": params.page_size,
-        "counts": {t: len(g) for t, g in grouped.items()},
+        "counts": {t: sum(1 for g in all_groups if in_tab(g, t)) for t in REVIEW_TABS},
         "row_counts": {t: len(rows) for t, rows in by_tab.items()},
-        "suggested": sum(1 for g in grouped["decide"] if g.get("suggestion")),
+        "suggested": sum(
+            1 for g in all_groups if any(r["status"] == "decide" and r["suggestion"] for r in g["rows"])
+        ),
     }
 
 

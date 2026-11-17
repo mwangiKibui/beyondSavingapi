@@ -9,7 +9,7 @@ import pytest
 
 import app.services.category_applies as svc
 from app.services.allocations import AllocationRejected
-from app.services.category_applies import ApplyGroup, apply_earlier, apply_groups, undo_apply
+from app.services.category_applies import ApplyGroup, apply_earlier, apply_groups, reopen_lines, undo_apply
 
 SECRET = "test-secret"
 USER = uuid4()
@@ -46,6 +46,9 @@ def db(monkeypatch):
         "get_merchant_votes": AsyncMock(return_value=[]),
         "get_number_votes": AsyncMock(return_value=[]),
         "set_preferred_rules": AsyncMock(),
+        "learn_rules": AsyncMock(),
+        "delete_apply_line_allocations": AsyncMock(return_value=[]),
+        "count_apply_allocations": AsyncMock(return_value=0),
         "upsert_merchant_votes": AsyncMock(),
         "upsert_number_votes": AsyncMock(),
         "get_uncategorised_rows": AsyncMock(return_value=[]),
@@ -161,6 +164,72 @@ async def test_use_suggestion_takes_the_groups_suggestion(db):
     }]
     result = await run(db, [a], [ApplyGroup(transaction_ids=[a["id"]], use_suggestion=True)])
     assert result.groups[0]["category_id"] == GROCERIES["id"]
+
+
+VEG = {"id": uuid4(), "name": "Vegetables", "type": "expense"}
+
+
+def till_rule(category, times_used, avg_amount):
+    return {"key_kind": "till", "key_value": "5555555", "provider": None, "account_hash": None,
+            "direction": "out", "category_id": category["id"], "label": None, "times_used": times_used,
+            "avg_amount": avg_amount}
+
+
+async def test_use_suggestion_files_each_line_under_its_own_suggestion(db):
+    # ab-292: small lines suggest Vegetables, large ones Groceries.
+    small, big1, big2 = row(GROCER, amount=350), row(GROCER, amount=6500), row(GROCER, amount=7000)
+    db["get_user_categories"].return_value = [GROCERIES, VEG, SALARY]
+    db["get_user_rules"].return_value = [till_rule(GROCERIES, 9, 6000), till_rule(VEG, 3, 400)]
+
+    result = await run(db, [small, big1, big2], [
+        ApplyGroup(transaction_ids=[small["id"], big1["id"], big2["id"]], use_suggestion=True)
+    ])
+
+    filed = {g["category_name"]: g["allocated"] for g in result.groups}
+    assert filed == {"Groceries": [big1["id"], big2["id"]], "Vegetables": [small["id"]]}
+    assert db["insert_apply"].await_count == 2
+    assert len({g["group_key"] for g in result.groups}) == 1
+
+
+async def test_a_remembered_split_makes_only_the_main_category_the_default(db):
+    small, big1, big2 = row(GROCER, amount=350), row(GROCER, amount=6500), row(GROCER, amount=7000)
+    db["get_user_categories"].return_value = [GROCERIES, VEG, SALARY]
+    db["get_user_rules"].return_value = [till_rule(GROCERIES, 9, 6000), till_rule(VEG, 3, 400)]
+
+    await run(db, [small, big1, big2], [
+        ApplyGroup(transaction_ids=[small["id"], big1["id"], big2["id"]], use_suggestion=True, remember=True)
+    ])
+
+    top = db["set_preferred_rules"].await_args_list
+    soft = db["learn_rules"].await_args_list
+    assert [c.kwargs["preferences"][0]["category_id"] for c in top] == [GROCERIES["id"]]
+    assert [c.kwargs["preferences"][0]["category_id"] for c in soft] == [VEG["id"]]
+    # Shared votes only for the main category.
+    assert db["upsert_merchant_votes"].await_count == 1
+
+
+async def test_use_suggestion_gives_lines_without_one_the_groups(db):
+    a, b = row(GROCER, amount=100), row(GROCER, amount=120)
+    db["get_user_rules"].return_value = [till_rule(GROCERIES, 2, None)]
+    result = await run(db, [a, b], [ApplyGroup(transaction_ids=[a["id"], b["id"]], use_suggestion=True)])
+    assert [g["category_name"] for g in result.groups] == ["Groceries"]
+    assert result.groups[0]["allocated"] == [a["id"], b["id"]]
+
+
+async def test_a_per_line_choice_learns_softly_and_casts_no_vote(db):
+    a = row(GROCER, amount=350)
+    db["get_user_categories"].return_value = [GROCERIES, VEG, SALARY]
+
+    await run(db, [a], [ApplyGroup(transaction_ids=[a["id"]], category_id=VEG["id"], remember=True,
+                                   per_line=True)])
+
+    learned = db["learn_rules"].await_args.kwargs["preferences"]
+    assert [(p["key_value"], p["category_id"], p["amount"]) for p in learned] == [("5555555", VEG["id"], 350.0)]
+    db["set_preferred_rules"].assert_not_awaited()
+    db["upsert_merchant_votes"].assert_not_awaited()
+    db["upsert_number_votes"].assert_not_awaited()
+    # Still undoable: the saved choices are snapshotted first.
+    assert "rule_keys" in db["insert_apply"].await_args.kwargs["snapshot"]
 
 
 async def test_use_suggestion_without_one_is_rejected(db):
@@ -313,3 +382,51 @@ async def test_earlier_rejections(db, found, code):
     with pytest.raises(AllocationRejected) as exc:
         await apply_earlier(object(), user_id=USER, apply_id=uuid4(), secret=SECRET)
     assert exc.value.status_code == code
+
+
+# --- reopening lines of an apply (ab-292) -----------------------------------
+
+
+async def test_reopen_takes_some_lines_out_of_an_apply(db):
+    a = applied(remember=True, snapshot={"rule_keys": []})
+    line = uuid4()
+    db["lock_apply"].return_value = a
+    db["delete_apply_line_allocations"].return_value = [line]
+    db["count_apply_allocations"].return_value = 2
+
+    assert await reopen_lines(object(), user_id=USER, apply_id=a["id"], transaction_ids=[line]) == [line]
+    assert db["delete_apply_line_allocations"].await_args.kwargs == {"apply_id": a["id"], "transaction_ids": [line]}
+    # The rest of the apply stands: nothing restored, not undone.
+    db["restore_snapshot"].assert_not_awaited()
+    db["mark_apply_undone"].assert_not_awaited()
+
+
+async def test_reopening_the_last_lines_is_an_undo(db):
+    snapshot = {"rule_keys": [{"key_kind": "till"}]}
+    a = applied(remember=True, snapshot=snapshot)
+    line = uuid4()
+    db["lock_apply"].return_value = a
+    db["delete_apply_line_allocations"].return_value = [line]
+    db["count_apply_allocations"].return_value = 0
+
+    await reopen_lines(object(), user_id=USER, apply_id=a["id"], transaction_ids=[line])
+
+    assert db["restore_snapshot"].await_args.kwargs == {"user_id": USER, "snapshot": snapshot}
+    db["mark_apply_undone"].assert_awaited_once()
+
+
+async def test_reopen_rejects_lines_that_arent_in_the_apply(db):
+    db["lock_apply"].return_value = applied()
+    db["delete_apply_line_allocations"].return_value = []
+    with pytest.raises(AllocationRejected) as exc:
+        await reopen_lines(object(), user_id=USER, apply_id=uuid4(), transaction_ids=[uuid4()])
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.parametrize("found,code", [(None, 404), (applied(undone_at=datetime.now(timezone.utc)), 409)])
+async def test_reopen_rejections(db, found, code):
+    db["lock_apply"].return_value = found
+    with pytest.raises(AllocationRejected) as exc:
+        await reopen_lines(object(), user_id=USER, apply_id=uuid4(), transaction_ids=[uuid4()])
+    assert exc.value.status_code == code
+    db["delete_apply_line_allocations"].assert_not_awaited()
