@@ -245,6 +245,14 @@ def test_review_groups_each_tab_reports_its_status(client, fake_user, fake_pool,
         assert items and {g["status"] for g in items} == {tab}
 
 
+def test_review_groups_approved_is_decided_and_sorted(client, fake_user, fake_pool, review):
+    review(_all_statuses_rows(uuid4()))
+
+    body = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=approved").json()
+
+    assert sorted(g["status"] for g in body["items"]) == ["decided", "sorted"] and body["total"] == 2
+
+
 def test_review_groups_filter_by_handled_as(client, fake_user, fake_pool, review):
     review(_all_statuses_rows(uuid4()))
 

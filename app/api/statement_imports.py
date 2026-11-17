@@ -516,7 +516,7 @@ class ReviewGroupsResponse(BaseModel):
 @router.get("/{import_id}/groups", response_model=ReviewGroupsResponse)
 async def review_groups_endpoint(
     import_id: UUID,
-    tab: Literal["all", "decide", "decided", "sorted", "handled"] = Query(default="decide"),
+    tab: Literal["all", "approved", "decide", "decided", "sorted", "handled"] = Query(default="decide"),
     handled_as: Literal["charge", "loan", "transfer", "saving"] | None = Query(default=None),
     params: ListParams = Depends(list_params),
     user_id: UUID = Depends(get_current_user_id),
@@ -526,7 +526,8 @@ async def review_groups_endpoint(
     grouped by payee. decide = still open (with suggestions); decided =
     filed from this review (each group's apply_id undoes it); sorted =
     categorised some other way; handled = handled at import (ab-281);
-    all = every group, each carrying its status, Pending first (ab-289).
+    all = every group, each carrying its status, Pending first; approved =
+    decided + sorted (ab-289).
     handled_as narrows to rows handled that way."""
     check_page_size(params)
     _require_pool(pool)
@@ -543,9 +544,14 @@ async def review_groups_endpoint(
     for t, groups in grouped.items():
         for g in groups:
             g["status"] = t
-    pool_of_groups = [g for t in REVIEW_TABS for g in grouped[t]] if tab == "all" else grouped[tab]
+    if tab == "all":
+        pool_of_groups = [g for t in REVIEW_TABS for g in grouped[t]]
+    elif tab == "approved":
+        pool_of_groups = grouped["decided"] + grouped["sorted"]
+    else:
+        pool_of_groups = grouped[tab]
     items, total = select_groups(
-        pool_of_groups, **params.model_dump(), handled_as=handled_as, status_first=tab == "all"
+        pool_of_groups, **params.model_dump(), handled_as=handled_as, status_first=tab in ("all", "approved")
     )
     return {
         "items": items,
