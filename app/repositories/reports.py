@@ -5,6 +5,8 @@ from uuid import UUID
 
 import asyncpg
 
+from app.repositories.budget_plans import plan_totals
+
 ZERO = Decimal("0.00")
 
 
@@ -415,35 +417,12 @@ async def get_budget_plans_report(
 
     result = []
     for plan in plans:
-        total_expenditure = await pool.fetchval(
-            """
-            SELECT COALESCE(SUM(a.amount), 0)
-            FROM allocations a
-            JOIN transactions t ON t.id = a.transaction_id
-            WHERE a.currency = $1
-              AND t.direction = 'out'
-              AND a.transfer_reason_id IS NULL
-              AND t.txn_date >= $2::date
-              AND t.txn_date <= $3::date
-            """,
-            plan["currency"],
-            plan["starts_at"],
-            plan["ends_at"],
-        )
-        total_income = await pool.fetchval(
-            """
-            SELECT COALESCE(SUM(a.amount), 0)
-            FROM allocations a
-            JOIN transactions t ON t.id = a.transaction_id
-            WHERE a.currency = $1
-              AND t.direction = 'in'
-              AND a.transfer_reason_id IS NULL
-              AND t.txn_date >= $2::date
-              AND t.txn_date <= $3::date
-            """,
-            plan["currency"],
-            plan["starts_at"],
-            plan["ends_at"],
+        total_income, total_expenditure = await plan_totals(
+            pool,
+            user_id=user_id,
+            currency=plan["currency"],
+            starts_at=plan["starts_at"],
+            ends_at=plan["ends_at"],
         )
         result.append({**plan, "money_in": total_income, "money_out": total_expenditure})
 
