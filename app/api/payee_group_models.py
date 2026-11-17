@@ -38,8 +38,10 @@ class GroupSuggestion(BaseModel):
     category_id: UUID | None = None
     category_name: str
     is_new_category: bool
-    source: Literal["your_rule", "this_statement", "others", "directory"]
+    source: Literal["your_rule", "this_statement", "others", "directory", "keyword"]
     merchant_name: str | None = None
+    # ab-290: the description keyword behind it ("salary"), if any.
+    keyword: str | None = None
 
 
 class PayeeGroup(BaseModel):

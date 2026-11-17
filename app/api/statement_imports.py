@@ -37,6 +37,7 @@ from app.repositories.statement_imports import (
 from app.repositories.notifications import generate_budget_alerts
 from app.repositories.sub_ledgers import list_sub_ledgers
 from app.services.allocations import AllocationRejected, alert_groups
+from app.services.description_keywords import load_keyword_context
 from app.services.category_suggestions import (
     Directory,
     apply_learned_names,
@@ -145,8 +146,10 @@ class PreviewSuggestion(BaseModel):
     is_new_category: bool
     # others = what most users chose (3+ voted, a clear leader); overrides
     # directory (the starter/admin list).
-    source: Literal["your_rule", "this_statement", "others", "directory"]
+    source: Literal["your_rule", "this_statement", "others", "directory", "keyword"]
     merchant_name: str | None = None
+    # ab-290: the description keyword behind it ("salary"), if any.
+    keyword: str | None = None
 
 
 class PreviewRow(BaseModel):
@@ -425,6 +428,7 @@ async def _load_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id: UUID) -
         categories = await get_user_categories(pool, user_id=user_id)
         name_keys, number_keys = shared_vote_lookups(rows, keys, directory)
         shared_votes = await get_shared_votes(pool, name_keys=name_keys, number_keys=number_keys)
+        keywords = await load_keyword_context(pool, user_id=user_id, rows=rows)
     except HTTPException:
         raise
     except Exception:
@@ -437,7 +441,8 @@ async def _load_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id: UUID) -
         ) from None
 
     preview_rows = build_preview_rows(
-        rows, keys=keys, rules=rules, directory=directory, categories=categories, shared_votes=shared_votes
+        rows, keys=keys, rules=rules, directory=directory, categories=categories, shared_votes=shared_votes,
+        keywords=keywords,
     )
     return {
         "import": statement_import,

@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.core.db import get_pool
 from app.core.security import get_current_user_id
 from app.main import app
+from app.services.description_keywords import KeywordContext
 
 API = "app.api.statement_imports"
 IMPORT_ID = uuid4()
@@ -65,6 +66,7 @@ def patch_reads(monkeypatch, *, imp=None, rows=(), rules=(), directory=(), categ
         "get_blocked_numbers": AsyncMock(return_value=[]),
         "get_user_categories": AsyncMock(return_value=list(categories)),
         "get_shared_votes": AsyncMock(return_value=dict(shared_votes or {})),
+        "load_keyword_context": AsyncMock(return_value=KeywordContext()),
         "get_learned_names": AsyncMock(return_value=dict(learned_names or {})),
         "handle_import_by_id": AsyncMock(return_value=None),
     }

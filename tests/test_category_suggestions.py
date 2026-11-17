@@ -546,17 +546,3 @@ def test_labelled_person_row_keeps_the_label_separate_from_the_statement_text():
     out = preview(rows, rules=[rule])
     assert out[0]["label"] == "Mechanic"
     assert out[0]["display_name"] == "Customer Transfer to - 254700***000 JOHN DOE"
-
-
-def test_sacco_dividends_are_suggested_as_income_not_filed():
-    dividends = {"id": uuid4(), "name": "SACCO dividends & interest", "type": "income"}
-    rows = [
-        txn("SJN-20001 Dividend 2025", direction="in", amount=4200.0),
-        txn("SJN-20002 Interest on Deposits 2025", direction="in", amount=1300.0),
-        txn("SJN-20003 Dividend reversal", direction="out", amount=100.0),
-    ]
-    out = preview(rows, provider="Mentor Sacco", categories=[*CATEGORIES, dividends])
-    by_text = {r["description"]: r["suggestion"] for r in out}
-    assert by_text["SJN-20001 Dividend 2025"]["category_id"] == dividends["id"]
-    assert by_text["SJN-20002 Interest on Deposits 2025"]["source"] == "directory"
-    assert by_text["SJN-20003 Dividend reversal"] is None

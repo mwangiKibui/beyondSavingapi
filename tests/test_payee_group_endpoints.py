@@ -14,6 +14,7 @@ from app.core.security import get_current_user_id
 from app.main import app
 from app.services.allocations import AllocationPlan, AllocationRejected
 from app.services.category_applies import ApplyResult
+from app.services.description_keywords import KeywordContext
 
 IMPORT_ID = uuid4()
 GROCERIES = {"id": uuid4(), "name": "Groceries", "type": "expense"}
@@ -148,6 +149,7 @@ def review(monkeypatch):
             "get_blocked_numbers": AsyncMock(return_value=[]),
             "get_user_categories": AsyncMock(return_value=[GROCERIES]),
             "get_shared_votes": AsyncMock(return_value={}),
+            "load_keyword_context": AsyncMock(return_value=KeywordContext()),
             "get_learned_names": AsyncMock(return_value={}),
             "handle_import_by_id": AsyncMock(return_value=None),
         }

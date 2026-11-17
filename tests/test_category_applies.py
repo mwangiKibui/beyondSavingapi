@@ -2,13 +2,14 @@
 the earlier-rows follow-up. Repositories are mocked; SQL is checked live."""
 
 from datetime import date, datetime, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 from uuid import uuid4
 
 import pytest
 
 import app.services.category_applies as svc
 from app.services.allocations import AllocationRejected
+from app.services.description_keywords import KeywordContext, KeywordList
 from app.services.category_applies import ApplyGroup, apply_earlier, apply_groups, reopen_lines, undo_apply
 
 SECRET = "test-secret"
@@ -39,6 +40,10 @@ def db(monkeypatch):
         "get_user_rules": AsyncMock(return_value=[]),
         "get_user_categories": AsyncMock(return_value=[GROCERIES, SALARY]),
         "get_shared_votes": AsyncMock(return_value={}),
+        "load_keyword_context": AsyncMock(return_value=KeywordContext()),
+        "get_keyword_choice_rows": AsyncMock(return_value=[]),
+        "save_keyword_choices": AsyncMock(),
+        "delete_keyword_choices": AsyncMock(),
         "create_categories": AsyncMock(return_value=[]),
         "insert_apply": AsyncMock(side_effect=lambda conn, **kw: uuid4()),
         "insert_applied_allocations": AsyncMock(),
@@ -430,3 +435,69 @@ async def test_reopen_rejections(db, found, code):
         await reopen_lines(object(), user_id=USER, apply_id=uuid4(), transaction_ids=[uuid4()])
     assert exc.value.status_code == code
     db["delete_apply_line_allocations"].assert_not_awaited()
+
+
+# --- description keywords (ab-290) ------------------------------------------
+
+CONSULTING = {"id": uuid4(), "name": "Consulting", "type": "income"}
+SALARY_KW_ID = uuid4()
+BANK_SALARY = "SALARY NOV 2026"
+
+
+@pytest.fixture
+def keywords(db):
+    db["get_user_categories"].return_value = [GROCERIES, SALARY, CONSULTING]
+    db["load_keyword_context"].return_value = KeywordContext(keywords=KeywordList.from_rows([
+        {"id": SALARY_KW_ID, "pattern": "SALARY", "direction": "in", "category_name": "Salary"},
+    ]))
+    return db
+
+
+async def test_filing_a_keyword_row_another_way_saves_the_users_choice(keywords):
+    r = row(BANK_SALARY, direction="in", amount=80000)
+    await run(keywords, [r], [ApplyGroup(transaction_ids=[r["id"]], category_id=CONSULTING["id"], remember=True)])
+
+    keywords["save_keyword_choices"].assert_awaited_once_with(
+        ANY, user_id=USER, keyword_ids=[SALARY_KW_ID], category_id=CONSULTING["id"]
+    )
+    assert keywords["delete_keyword_choices"].await_args.kwargs["keyword_ids"] == []
+
+
+async def test_filing_it_the_lists_way_drops_the_users_choice(keywords):
+    r = row(BANK_SALARY, direction="in", amount=80000)
+    await run(keywords, [r], [ApplyGroup(transaction_ids=[r["id"]], use_suggestion=True, remember=True)])
+
+    assert keywords["delete_keyword_choices"].await_args.kwargs["keyword_ids"] == [SALARY_KW_ID]
+    assert keywords["save_keyword_choices"].await_args.kwargs["keyword_ids"] == []
+
+
+async def test_remember_off_learns_no_keyword_choice(keywords):
+    r = row(BANK_SALARY, direction="in", amount=80000)
+    await run(keywords, [r], [ApplyGroup(transaction_ids=[r["id"]], category_id=CONSULTING["id"], remember=False)])
+    keywords["save_keyword_choices"].assert_not_awaited()
+    keywords["delete_keyword_choices"].assert_not_awaited()
+
+
+async def test_a_per_line_choice_learns_no_keyword_choice(keywords):
+    r = row(BANK_SALARY, direction="in", amount=80000)
+    await run(keywords, [r], [
+        ApplyGroup(transaction_ids=[r["id"]], category_id=CONSULTING["id"], remember=True, per_line=True)
+    ])
+    keywords["save_keyword_choices"].assert_not_awaited()
+
+
+async def test_the_undo_snapshot_holds_the_keyword_choices_first(keywords):
+    before = [{"keyword_id": SALARY_KW_ID, "category_id": SALARY["id"], "times": 2}]
+    keywords["get_keyword_choice_rows"].return_value = before
+    r = row(BANK_SALARY, direction="in", amount=80000)
+    await run(keywords, [r], [ApplyGroup(transaction_ids=[r["id"]], category_id=CONSULTING["id"], remember=True)])
+
+    snapshot = keywords["insert_apply"].await_args.kwargs["snapshot"]
+    assert snapshot["keyword_ids"] == [SALARY_KW_ID] and snapshot["keyword_choices"] == before
+
+
+async def test_rows_without_a_keyword_touch_no_keyword_choices(keywords):
+    r = row(GROCER, amount=500)
+    await run(keywords, [r], [ApplyGroup(transaction_ids=[r["id"]], category_id=GROCERIES["id"], remember=True)])
+    assert keywords["save_keyword_choices"].await_args.kwargs["keyword_ids"] == []
+    assert keywords["insert_apply"].await_args.kwargs["snapshot"]["keyword_ids"] == []
