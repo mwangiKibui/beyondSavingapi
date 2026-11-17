@@ -12,7 +12,6 @@ from uuid import uuid4
 
 from app.repositories.reports import (
     ReportFilters,
-    _resolve_transfer_source_label,
     build_account_summary,
     build_csv_rows,
     build_report,
@@ -374,58 +373,6 @@ def test_build_account_summary_only_counts_the_reconciled_portion_of_a_transacti
     summary = build_account_summary(rows)
 
     assert summary[0]["money_in"] == Decimal("600.00")
-
-
-def test_resolve_transfer_source_label_prefers_a_tracked_source_account():
-    row = {
-        "source_account_id": uuid4(),
-        "source_account_nickname": "M-Pesa",
-        "source_sub_ledger_id": uuid4(),
-        "source_sub_ledger_name": "Emergency Fund",
-        "source_sub_ledger_account_nickname": "KCB Savings",
-        "source_description": "Should be ignored",
-    }
-
-    assert _resolve_transfer_source_label(row) == "M-Pesa"
-
-
-def test_resolve_transfer_source_label_falls_back_to_sub_ledger_and_its_parent_account():
-    row = {
-        "source_account_id": None,
-        "source_account_nickname": None,
-        "source_sub_ledger_id": uuid4(),
-        "source_sub_ledger_name": "Emergency Fund",
-        "source_sub_ledger_account_nickname": "KCB Savings",
-        "source_description": None,
-    }
-
-    assert _resolve_transfer_source_label(row) == "KCB Savings / Emergency Fund"
-
-
-def test_resolve_transfer_source_label_falls_back_to_a_free_text_description():
-    row = {
-        "source_account_id": None,
-        "source_account_nickname": None,
-        "source_sub_ledger_id": None,
-        "source_sub_ledger_name": None,
-        "source_sub_ledger_account_nickname": None,
-        "source_description": "Cash deposit from a friend",
-    }
-
-    assert _resolve_transfer_source_label(row) == "Cash deposit from a friend"
-
-
-def test_resolve_transfer_source_label_dashes_when_nothing_is_set():
-    row = {
-        "source_account_id": None,
-        "source_account_nickname": None,
-        "source_sub_ledger_id": None,
-        "source_sub_ledger_name": None,
-        "source_sub_ledger_account_nickname": None,
-        "source_description": None,
-    }
-
-    assert _resolve_transfer_source_label(row) == "—"
 
 
 # --- filter_budget_plans_by_window (ab-152) -------------------------------

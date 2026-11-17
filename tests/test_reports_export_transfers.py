@@ -44,21 +44,25 @@ def _items():
     return [
         {
             "id": str(uuid4()),
-            "transfer_reason_name": "Sent to another of my accounts",
-            "source_label": "M-Pesa",
-            "destination_account_name": "KCB Savings",
+            "date": "2026-09-20",
+            "from_label": "M-Pesa",
+            "from_account_id": uuid4(),
+            "to_label": "KCB Savings",
+            "to_account_id": uuid4(),
+            "reason": "Sent to your KCB account",
             "amount": Decimal("500.00"),
             "currency": "KES",
-            "date": "2026-09-20",
         },
         {
             "id": str(uuid4()),
-            "transfer_reason_name": None,
-            "source_label": "Cash deposit from a friend",
-            "destination_account_name": "KCB Salary",
+            "date": "2026-09-18",
+            "from_label": "NCBA",
+            "from_account_id": None,
+            "to_label": "KCB Salary",
+            "to_account_id": uuid4(),
+            "reason": None,
             "amount": Decimal("1000.00"),
             "currency": "KES",
-            "date": "2026-09-18",
         },
     ]
 
@@ -83,14 +87,13 @@ def test_export_transfers_csv_success_shape_and_rows(client, fake_user, fake_poo
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/csv")
-    assert response.headers["content-disposition"] == 'attachment; filename="transfers.csv"'
+    assert response.headers["content-disposition"] == 'attachment; filename="funds-transfers.csv"'
 
     rows = list(csv.reader(io.StringIO(response.text)))
-    assert rows[0] == ["Transfer Nature", "Source Account", "Destination Account", "Amount", "Date"]
-    assert rows[1] == ["Sent to another of my accounts", "M-Pesa", "KCB Savings", "500.00", "2026-09-20"]
-    # No transfer_reason_name falls back to the em dash placeholder, same
-    # convention as _resolve_transfer_source_label's own "—" fallback.
-    assert rows[2] == ["—", "Cash deposit from a friend", "KCB Salary", "1000.00", "2026-09-18"]
+    assert rows[0] == ["Date", "From", "To", "Reason", "Amount", "Currency"]
+    assert rows[1] == ["2026-09-20", "M-Pesa", "KCB Savings", "Sent to your KCB account", "500.00", "KES"]
+    # No reason falls back to an em dash.
+    assert rows[2] == ["2026-09-18", "NCBA", "KCB Salary", "—", "1000.00", "KES"]
 
 
 def test_export_transfers_csv_forwards_filters(client, fake_user, fake_pool, monkeypatch):
@@ -147,7 +150,7 @@ def test_export_transfers_pdf_success_returns_valid_pdf_bytes(client, fake_user,
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/pdf")
-    assert response.headers["content-disposition"] == 'attachment; filename="transfers.pdf"'
+    assert response.headers["content-disposition"] == 'attachment; filename="funds-transfers.pdf"'
     assert response.content.startswith(b"%PDF")
 
 

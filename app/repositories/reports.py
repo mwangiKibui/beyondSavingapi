@@ -477,22 +477,76 @@ async def get_budget_plans_report(
     return result
 
 
-def _resolve_transfer_source_label(row: dict) -> str:
-    """Resolves a transfer-shaped allocation's source to a display label
-    (ab-150) - exactly one of source_account_id, source_sub_ledger_id, or
-    source_description is ever set (the mutual exclusivity Create-
-    allocations/ab-134 enforces on write), checked in that priority
-    order. The "-" fallback shouldn't normally happen (a transfer-shaped
-    allocation always has at least a description), but is kept for
-    defense in depth rather than letting a None through to the response.
-    """
-    if row["source_account_id"] is not None:
-        return row["source_account_nickname"]
+def _place(account_name: str | None, sub_ledger_name: str | None) -> str:
+    return f"{account_name} / {sub_ledger_name}" if sub_ledger_name else (account_name or "—")
+
+
+def _other_side(row: dict) -> tuple[str, UUID | None]:
+    """Where the money went to (or came from): the matched row on another
+    of the user's accounts or sub-ledgers, else what the allocation names."""
+    if row["other_id"] is not None and row["other_account_name"] is not None:
+        return _place(row["other_account_name"], row["other_sub_ledger_name"]), row["other_account_id"]
+    if row["source_account_id"] is not None and row["source_account_id"] != row["account_id"]:
+        return row["source_account_nickname"], row["source_account_id"]
     if row["source_sub_ledger_id"] is not None:
-        return f"{row['source_sub_ledger_account_nickname']} / {row['source_sub_ledger_name']}"
+        return (_place(row["source_sub_ledger_account_nickname"], row["source_sub_ledger_name"]),
+                row["source_sub_ledger_account_id"])
     if row["source_description"]:
-        return row["source_description"]
-    return "—"
+        return row["source_description"], None
+    return "—", None
+
+
+def build_funds_transfers(rows: list[dict], *, account_id: UUID | None = None) -> list[dict]:
+    """Funds transfers report (ab-291): one row per transfer, From -> To by
+    direction. When both sides of a matched pair were uploaded and filed as
+    transfers, only the money-out side is listed. account_id keeps
+    transfers with that account on either side. rows: newest first."""
+    listed = {r["transaction_id"] for r in rows}
+    out = []
+    for r in rows:
+        partner_listed = r["other_id"] is not None and r["other_is_transfer"] and r["other_id"] in listed
+        if partner_listed and (r["direction"] == "in" or (r["other_direction"] == r["direction"]
+                                                          and str(r["other_id"]) < str(r["transaction_id"]))):
+            continue  # the other side's row lists this transfer
+        own = _place(r["account_name"], r["sub_ledger_name"])
+        other, other_account_id = _other_side(r)
+        if r["direction"] == "out":
+            from_label, from_id, to_label, to_id = own, r["account_id"], other, other_account_id
+        else:
+            from_label, from_id, to_label, to_id = other, other_account_id, own, r["account_id"]
+        if account_id is not None and account_id not in (from_id, to_id):
+            continue
+        out.append({
+            "id": r["id"],
+            "date": r["date"],
+            "from_label": from_label,
+            "from_account_id": from_id,
+            "to_label": to_label,
+            "to_account_id": to_id,
+            # The detail ("Moved to your Ordinary Deposit"), else the reason.
+            "reason": r["handled_reason"] or r["transfer_reason_name"],
+            "amount": r["amount"],
+            "currency": r["currency"],
+        })
+    return out
+
+
+def funds_transfer_totals(items: list[dict]) -> list[dict]:
+    """Per account and currency: sent out and received in, across the
+    listed transfers. Only the user's own accounts are totalled."""
+    totals: dict[tuple, dict] = {}
+    for item in items:
+        for side, field in (("from", "sent"), ("to", "received")):
+            acc = item[f"{side}_account_id"]
+            if acc is None:
+                continue
+            name = item[f"{side}_label"].split(" / ")[0]
+            t = totals.setdefault((acc, item["currency"]), {
+                "account_id": acc, "account_name": name, "currency": item["currency"],
+                "sent": Decimal("0"), "received": Decimal("0"),
+            })
+            t[field] += Decimal(str(item["amount"]))
+    return sorted(totals.values(), key=lambda t: (t["account_name"].lower(), t["currency"]))
 
 
 async def get_transfers(
@@ -503,83 +557,59 @@ async def get_transfers(
     from_date: date | None,
     to_date: date | None,
 ) -> list[dict]:
-    """Account-to-Account Transfer list (ab-150, GET /reports/transfers) -
-    one row per transfer-shaped allocation (transfer_reason_id IS NOT
-    NULL), newest first. Scoped to the caller's own accounts via the
-    destination account's own user_id (dest_acc.user_id = $1) - same
-    "join through accounts to enforce ownership" convention as every
-    other endpoint in this codebase; a transfer's source side (when it's
-    a tracked account/sub-ledger rather than a free-text description) is
-    already guaranteed to belong to the same user by Create-allocations'
-    own write-time validation (ab-134), so it needs no separate scoping
-    here.
-
-    account_id (optional) matches a transfer where this account is
-    EITHER the source (source_account_id directly, or via
-    source_sub_ledger_id's parent account - ssl.account_id) OR the
-    destination (t.account_id, the account the allocation's own
-    transaction landed on). from/to filter transactions.txn_date, same
-    optional-filter convention as fetch_report_rows above.
-
-    amount/currency are the allocation's own amount/currency columns -
-    not original_amount/original_currency - mirroring fetch_report_rows'
-    own alloc_amount/alloc_currency choice above; the two pairs are
-    identical today since insert_allocations sets amount/currency equal
-    to original_amount/original_currency (no FX conversion exists yet),
-    but this keeps both reports reading from the same pair should that
-    change.
-    """
+    """Funds transfers (ab-150, reworked in ab-291; GET /reports/transfers):
+    every transfer-shaped allocation on the user's own accounts, with the
+    matched row on the other side when the two are linked
+    (transfer_group_id), shaped by build_funds_transfers. Newest first.
+    from/to filter transactions.txn_date. The other side is only read from
+    the same user's accounts."""
     rows = await pool.fetch(
         """
         SELECT
-            al.id,
-            tr.name AS transfer_reason_name,
-            al.source_account_id,
-            sa.nickname AS source_account_nickname,
-            al.source_sub_ledger_id,
-            ssl.name AS source_sub_ledger_name,
+            al.id, al.amount, al.currency,
+            al.source_account_id, sa.nickname AS source_account_nickname,
+            al.source_sub_ledger_id, ssl.name AS source_sub_ledger_name,
+            ssl.account_id AS source_sub_ledger_account_id,
             ssl_acc.nickname AS source_sub_ledger_account_nickname,
             al.source_description,
-            dest_acc.nickname AS destination_account_name,
-            al.amount,
-            al.currency,
-            t.txn_date AS date
+            tr.name AS transfer_reason_name,
+            t.id AS transaction_id, t.direction, t.txn_date AS date, t.handled_reason,
+            t.account_id, acc.nickname AS account_name, sl.name AS sub_ledger_name,
+            o.id AS other_id, o.direction AS other_direction, o.account_id AS other_account_id,
+            oacc.nickname AS other_account_name, osl.name AS other_sub_ledger_name,
+            EXISTS (
+                SELECT 1 FROM allocations oal
+                WHERE oal.transaction_id = o.id AND oal.transfer_reason_id IS NOT NULL
+            ) AS other_is_transfer
         FROM allocations al
         JOIN transactions t ON t.id = al.transaction_id
-        JOIN accounts dest_acc ON dest_acc.id = t.account_id
+        JOIN accounts acc ON acc.id = t.account_id
+        LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
         LEFT JOIN transfer_reasons tr ON tr.id = al.transfer_reason_id
-        LEFT JOIN accounts sa ON sa.id = al.source_account_id
+        LEFT JOIN accounts sa ON sa.id = al.source_account_id AND sa.user_id = $1
         LEFT JOIN sub_ledgers ssl ON ssl.id = al.source_sub_ledger_id
-        LEFT JOIN accounts ssl_acc ON ssl_acc.id = ssl.account_id
-        WHERE dest_acc.user_id = $1
+        LEFT JOIN accounts ssl_acc ON ssl_acc.id = ssl.account_id AND ssl_acc.user_id = $1
+        LEFT JOIN LATERAL (
+            SELECT o.id, o.direction, o.account_id, o.sub_ledger_id
+            FROM transactions o
+            JOIN accounts oa ON oa.id = o.account_id AND oa.user_id = $1
+            WHERE t.transfer_group_id IS NOT NULL AND o.transfer_group_id = t.transfer_group_id AND o.id <> t.id
+            ORDER BY o.id
+            LIMIT 1
+        ) o ON TRUE
+        LEFT JOIN accounts oacc ON oacc.id = o.account_id
+        LEFT JOIN sub_ledgers osl ON osl.id = o.sub_ledger_id
+        WHERE acc.user_id = $1
           AND al.transfer_reason_id IS NOT NULL
-          AND (
-              $2::uuid IS NULL
-              OR al.source_account_id = $2
-              OR ssl.account_id = $2
-              OR t.account_id = $2
-          )
-          AND ($3::date IS NULL OR t.txn_date >= $3)
-          AND ($4::date IS NULL OR t.txn_date <= $4)
-        ORDER BY t.txn_date DESC, al.created_at DESC
+          AND ($2::date IS NULL OR t.txn_date >= $2)
+          AND ($3::date IS NULL OR t.txn_date <= $3)
+        ORDER BY t.txn_date DESC, al.created_at DESC, al.id
         """,
         user_id,
-        account_id,
         from_date,
         to_date,
     )
-    return [
-        {
-            "id": row["id"],
-            "transfer_reason_name": row["transfer_reason_name"],
-            "source_label": _resolve_transfer_source_label(row),
-            "destination_account_name": row["destination_account_name"],
-            "amount": row["amount"],
-            "currency": row["currency"],
-            "date": row["date"],
-        }
-        for row in (dict(row) for row in rows)
-    ]
+    return build_funds_transfers([dict(r) for r in rows], account_id=account_id)
 
 
 async def fetch_transaction_statement_rows(pool: asyncpg.Pool, *, user_id: UUID, account_id: UUID) -> list[dict]:
