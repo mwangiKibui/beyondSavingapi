@@ -265,7 +265,9 @@ async def apply_groups(
 def _split_by_suggestion(groups: list[ApplyGroup], group_keys: list[str], preview: dict):
     """use_suggestion files each line under its own suggestion (ab-292):
     a group whose lines suggest different categories becomes one apply per
-    category. Lines with no suggestion of their own take the group's."""
+    category. Lines with no suggestion of their own take the group's.
+    When remembered, only the main (most suggested) category is made the
+    payee's default; the others learn softly."""
     out_groups, out_keys = [], []
     for g, gk in zip(groups, group_keys):
         if not g.use_suggestion:
@@ -283,8 +285,12 @@ def _split_by_suggestion(groups: list[ApplyGroup], group_keys: list[str], previe
                 raise AllocationRejected(422, "One of the groups has no suggestion")
             sid = (s["category_id"], s["category_name"].strip().lower())
             split.setdefault(sid, (s, []))[1].append(t)
-        for s, ids in split.values():
-            out_groups.append(replace(g, transaction_ids=ids, suggestion=s))
+        main = fallback and (fallback["category_id"], fallback["category_name"].strip().lower())
+        for sid, (s, ids) in split.items():
+            # Only the group's main category becomes the payee's default;
+            # the others learn as line choices (no forced top, no vote).
+            soft = g.per_line or (len(split) > 1 and sid != main)
+            out_groups.append(replace(g, transaction_ids=ids, suggestion=s, per_line=soft))
             out_keys.append(gk)
     return out_groups, out_keys
 

@@ -191,6 +191,23 @@ async def test_use_suggestion_files_each_line_under_its_own_suggestion(db):
     assert len({g["group_key"] for g in result.groups}) == 1
 
 
+async def test_a_remembered_split_makes_only_the_main_category_the_default(db):
+    small, big1, big2 = row(GROCER, amount=350), row(GROCER, amount=6500), row(GROCER, amount=7000)
+    db["get_user_categories"].return_value = [GROCERIES, VEG, SALARY]
+    db["get_user_rules"].return_value = [till_rule(GROCERIES, 9, 6000), till_rule(VEG, 3, 400)]
+
+    await run(db, [small, big1, big2], [
+        ApplyGroup(transaction_ids=[small["id"], big1["id"], big2["id"]], use_suggestion=True, remember=True)
+    ])
+
+    top = db["set_preferred_rules"].await_args_list
+    soft = db["learn_rules"].await_args_list
+    assert [c.kwargs["preferences"][0]["category_id"] for c in top] == [GROCERIES["id"]]
+    assert [c.kwargs["preferences"][0]["category_id"] for c in soft] == [VEG["id"]]
+    # Shared votes only for the main category.
+    assert db["upsert_merchant_votes"].await_count == 1
+
+
 async def test_use_suggestion_gives_lines_without_one_the_groups(db):
     a, b = row(GROCER, amount=100), row(GROCER, amount=120)
     db["get_user_rules"].return_value = [till_rule(GROCERIES, 2, None)]
