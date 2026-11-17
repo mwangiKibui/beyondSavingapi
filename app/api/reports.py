@@ -24,6 +24,7 @@ from app.repositories.reports import (
     get_report,
     get_report_csv_rows,
     get_transaction_statement,
+    funds_transfer_totals,
     get_transfers,
     resolve_report_currency,
 )
@@ -119,17 +120,29 @@ class AccountSummaryResponse(BaseModel):
 
 
 class TransferItem(BaseModel):
+    """One funds transfer (ab-291): From -> To by direction."""
     id: UUID
-    transfer_reason_name: str | None
-    source_label: str
-    destination_account_name: str
+    date: date
+    from_label: str
+    from_account_id: UUID | None
+    to_label: str
+    to_account_id: UUID | None
+    reason: str | None
     amount: Decimal
     currency: str
-    date: date
+
+
+class TransferTotal(BaseModel):
+    account_id: UUID
+    account_name: str
+    currency: str
+    sent: Decimal
+    received: Decimal
 
 
 class TransferListResponse(BaseModel):
     items: list[TransferItem]
+    totals: list[TransferTotal]
 
 
 class TransactionStatementRow(BaseModel):
@@ -373,8 +386,8 @@ async def get_transfers_endpoint(
     from_date: date | None = Query(default=None, alias="from"),
     to_date: date | None = Query(default=None, alias="to"),
 ) -> dict:
-    """Account-to-Account Transfer list (ab-150) - one row per
-    transfer-shaped allocation matching the filters, newest first (see
+    """Funds transfers (ab-150, ab-291) - one row per transfer matching the
+    filters, newest first, plus totals sent/received per account (see
     get_transfers' own docstring)."""
     _require_pool(pool)
 
@@ -395,7 +408,7 @@ async def get_transfers_endpoint(
             detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
-    return {"items": items}
+    return {"items": items, "totals": funds_transfer_totals(items)}
 
 
 # --- Account Summary export (ab-152) ------------------------------------
@@ -615,7 +628,9 @@ async def export_category_summary_pdf_endpoint(
     return _pdf_response(pdf_bytes, filename=f"{category_type}-summary.pdf")
 
 
-# --- Transfers export (ab-152) -------------------------------------------
+# --- Funds transfers export (ab-152, ab-291) -------------------------------
+
+TRANSFER_COLUMNS = ["Date", "From", "To", "Reason", "Amount", "Currency"]
 
 
 @router.get("/transfers/export.csv")
@@ -646,20 +661,10 @@ async def export_transfers_csv_endpoint(
         ) from None
 
     rows = [
-        [
-            item["transfer_reason_name"] or "—",
-            item["source_label"],
-            item["destination_account_name"],
-            item["amount"],
-            item["date"],
-        ]
+        [item["date"], item["from_label"], item["to_label"], item["reason"] or "—", item["amount"], item["currency"]]
         for item in items
     ]
-    return _csv_response(
-        ["Transfer Nature", "Source Account", "Destination Account", "Amount", "Date"],
-        rows,
-        filename="transfers.csv",
-    )
+    return _csv_response(TRANSFER_COLUMNS, rows, filename="funds-transfers.csv")
 
 
 @router.get("/transfers/export.pdf")
@@ -694,24 +699,19 @@ async def export_transfers_pdf_endpoint(
         ) from None
 
     rows = [
-        [
-            item["transfer_reason_name"] or "—",
-            item["source_label"],
-            item["destination_account_name"],
-            str(item["amount"]),
-            str(item["date"]),
-        ]
+        [str(item["date"]), item["from_label"], item["to_label"], item["reason"] or "—", str(item["amount"]),
+         item["currency"]]
         for item in items
     ]
     pdf_bytes = build_simple_table_pdf(
-        "Transfers Summary",
-        ["Transfer Nature", "Source Account", "Destination Account", "Amount", "Date"],
+        "Funds transfers",
+        TRANSFER_COLUMNS,
         rows,
         account_name=account_name,
         from_date=from_date,
         to_date=to_date,
     )
-    return _pdf_response(pdf_bytes, filename="transfers.pdf")
+    return _pdf_response(pdf_bytes, filename="funds-transfers.pdf")
 
 
 # --- Transaction Statement (2026-10-02) -----------------------------------

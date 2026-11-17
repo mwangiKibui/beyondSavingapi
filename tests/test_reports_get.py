@@ -230,12 +230,14 @@ def test_get_account_summary_logs_and_returns_generic_500_on_unexpected_error(
 def _transfer_item(**overrides):
     base = {
         "id": str(uuid4()),
-        "transfer_reason_name": "Sent to another of my accounts",
-        "source_label": "M-Pesa",
-        "destination_account_name": "KCB Savings",
+        "date": "2026-09-20",
+        "from_label": "M-Pesa",
+        "from_account_id": str(uuid4()),
+        "to_label": "KCB Savings",
+        "to_account_id": str(uuid4()),
+        "reason": "Sent to your KCB account",
         "amount": "500.00",
         "currency": "KES",
-        "date": "2026-09-20",
     }
     base.update(overrides)
     return base
@@ -258,7 +260,15 @@ def test_get_transfers_success(client, fake_user, fake_pool, monkeypatch):
     response = client.get("/reports/transfers")
 
     assert response.status_code == 200
-    assert response.json() == {"items": [item]}
+    body = response.json()
+    assert body["items"] == [item]
+    # Totals per account, by name.
+    assert body["totals"] == [
+        {"account_id": item["to_account_id"], "account_name": "KCB Savings", "currency": "KES", "sent": "0",
+         "received": "500.00"},
+        {"account_id": item["from_account_id"], "account_name": "M-Pesa", "currency": "KES", "sent": "500.00",
+         "received": "0"},
+    ]
 
 
 def test_get_transfers_forwards_filters_to_the_repository(client, fake_user, fake_pool, monkeypatch):
