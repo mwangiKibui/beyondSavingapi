@@ -506,6 +506,8 @@ class ReviewGroupsResponse(BaseModel):
     page_size: int
     # Payee groups per tab, whatever the filters.
     counts: ReviewTabCounts
+    # Statement rows per tab - the review's stat cards and progress (ab-283).
+    row_counts: ReviewTabCounts
 
 
 @router.get("/{import_id}/groups", response_model=ReviewGroupsResponse)
@@ -539,6 +541,7 @@ async def review_groups_endpoint(
         "page": params.page,
         "page_size": params.page_size,
         "counts": {t: len(g) for t, g in grouped.items()},
+        "row_counts": {t: len(rows) for t, rows in by_tab.items()},
     }
 
 

@@ -96,7 +96,18 @@ def test_uncategorised_lists_filters_and_pages_the_users_groups(client, fake_use
     assert client.get("/uncategorised/groups").json()["page_size"] == 30
 
 
-@pytest.mark.parametrize("query", ["page_size=7", "page=0", "sort=date", "direction=sideways", "kind=robot"])
+def test_uncategorised_search(client, fake_user, fake_pool, monkeypatch):
+    groups = [group("g:a"), group("g:b", name="KPLC PREPAID")]
+    monkeypatch.setattr(f"{UNCAT}.uncategorised_groups", AsyncMock(return_value=(groups, 2)))
+
+    body = client.get("/uncategorised/groups?q=kplc").json()
+
+    assert [g["group_key"] for g in body["items"]] == ["g:b"]
+    assert (body["total"], body["row_total"]) == (1, 2)
+
+
+@pytest.mark.parametrize("query", ["page_size=7", "page=0", "sort=date", "direction=sideways", "kind=robot",
+                                   "q=" + "x" * 101])
 def test_uncategorised_rejects_bad_params(client, fake_user, fake_pool, monkeypatch, query):
     monkeypatch.setattr(f"{UNCAT}.uncategorised_groups", AsyncMock(return_value=([], 0)))
     assert client.get(f"/uncategorised/groups?{query}").status_code == 422
@@ -165,6 +176,7 @@ def test_review_groups_split_rows_into_tabs(client, fake_user, fake_pool, review
 
     decide = client.get(f"/statement-imports/{IMPORT_ID}/groups").json()
     assert decide["counts"] == {"decide": 1, "decided": 1, "sorted": 1, "handled": 1}
+    assert decide["row_counts"] == {"decide": 2, "decided": 1, "sorted": 1, "handled": 1}
     g = decide["items"][0]
     assert g["row_count"] == 2 and g["label"] == "Corner shop"
     assert g["suggestion"]["category_id"] == str(GROCERIES["id"]) and g["suggestion"]["source"] == "your_rule"
@@ -180,6 +192,15 @@ def test_review_groups_split_rows_into_tabs(client, fake_user, fake_pool, review
 
     handled = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=handled").json()["items"][0]
     assert handled["handled_as"] == "charge" and handled["handled_reason"] == "M-Pesa charge"
+
+
+def test_review_groups_search_keeps_tab_counts(client, fake_user, fake_pool, review):
+    review([txn(GROCER), txn("Pay Bill Online to 888880 - KPLC PREPAID Acc. 1")])
+
+    body = client.get(f"/statement-imports/{IMPORT_ID}/groups?q=kplc").json()
+
+    assert body["total"] == 1 and "KPLC" in body["items"][0]["rows"][0]["description"]
+    assert body["counts"]["decide"] == 2
 
 
 def test_review_groups_404_for_another_users_import(client, fake_user, fake_pool, review):

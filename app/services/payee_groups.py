@@ -144,22 +144,33 @@ def build_groups(
     return groups
 
 
+def _matches(group: dict, needle: str) -> bool:
+    """Search (ab-283): payee name, the user's label, the payee's number or
+    any statement line in the group. Runs on the importer's own rows only."""
+    texts = [group.get("display_name"), group.get("label"), group.get("number")]
+    texts += [r.get("description") for r in group.get("rows") or []]
+    return any(needle in t.lower() for t in texts if t)
+
+
 def select_groups(
     groups: list[dict],
     *,
     direction: str | None = None,
     kind: str | None = None,
+    q: str | None = None,
     sort: str = "rows",
     order: str = "desc",
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
 ) -> tuple[list[dict], int]:
-    """Filter (money in/out; people/businesses), sort, then one page.
-    Returns (page of groups, total groups after filtering)."""
+    """Filter (money in/out; people/businesses; search), sort, then one
+    page. Returns (page of groups, total groups after filtering)."""
+    needle = (q or "").strip().lower()
     out = [
         g for g in groups
         if (direction is None or g["direction"] == direction)
         and (kind is None or (kind == "person") == bool(g["is_person"]))
+        and (not needle or _matches(g, needle))
     ]
     if sort == "payee":
         sort_key = lambda g: (g["display_name"] or "").lower()  # noqa: E731
