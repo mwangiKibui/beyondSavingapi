@@ -470,3 +470,21 @@ def test_create_allocations_returns_generic_error_and_logs_on_unexpected_failure
     assert response.json()["detail"] == "Something went wrong. Please try again."
     assert "connection reset" not in response.text
     assert "connection reset" in caplog.text
+
+
+def test_create_allocations_rejects_a_money_in_reason_on_money_out(client, fake_user, fake_pool, monkeypatch):
+    """ab-285: TRANSACTION_ROW is money out; "From family" is money in."""
+    reason_id = uuid4()
+    monkeypatch.setattr("app.api.transactions.get_transaction", AsyncMock(return_value=TRANSACTION_ROW))
+    monkeypatch.setattr(
+        "app.api.transactions.get_transfer_reasons_by_ids",
+        AsyncMock(return_value=[{"id": reason_id, "name": "From family", "direction": "in"}]),
+    )
+
+    response = client.post(
+        f"/transactions/{TRANSACTION_ID}/allocations",
+        json=request_body(allocations=[{"transfer_reason_id": str(reason_id), "amount": 1000.0, "note": None}]),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "That transfer reason is for money going the other way"

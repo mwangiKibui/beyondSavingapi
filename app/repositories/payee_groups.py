@@ -75,15 +75,16 @@ async def insert_apply(
     *,
     user_id: UUID,
     import_id: UUID | None,
-    category_id: UUID,
+    category_id: UUID | None,
     group_key: str,
     remember: bool,
     snapshot: dict,
+    transfer_reason_id: UUID | None = None,
 ) -> UUID:
     return await conn.fetchval(
         """
-        INSERT INTO category_applies (user_id, import_id, category_id, group_key, remember, snapshot)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+        INSERT INTO category_applies (user_id, import_id, category_id, transfer_reason_id, group_key, remember, snapshot)
+        VALUES ($1, $2, $3, $7, $4, $5, $6::jsonb)
         RETURNING id
         """,
         user_id,
@@ -92,6 +93,7 @@ async def insert_apply(
         group_key,
         remember,
         _json(snapshot),
+        transfer_reason_id,
     )
 
 
@@ -100,17 +102,22 @@ async def insert_applied_allocations(
     *,
     apply_id: UUID,
     transaction_ids: list[UUID],
-    category_id: UUID,
+    category_id: UUID | None,
     amounts: list[float],
     currencies: list[str],
+    transfer_reason_id: UUID | None = None,
+    source_account_id: UUID | None = None,
+    source_description: str | None = None,
 ) -> None:
     """One allocation per row for its whole remaining amount, tagged with
-    the apply so undo removes exactly these."""
+    the apply so undo removes exactly these. A transfer (ab-285) carries
+    its reason and where the money came from / went to."""
     await conn.execute(
         """
         INSERT INTO allocations
-            (transaction_id, category_id, original_amount, original_currency, amount, currency, apply_id)
-        SELECT transaction_id, $2, amount, currency, amount, currency, $1
+            (transaction_id, category_id, transfer_reason_id, source_account_id, source_description,
+             original_amount, original_currency, amount, currency, apply_id)
+        SELECT transaction_id, $2, $6, $7, $8, amount, currency, amount, currency, $1
         FROM UNNEST($3::uuid[], $4::numeric[], $5::text[]) AS t(transaction_id, amount, currency)
         """,
         apply_id,
@@ -118,16 +125,20 @@ async def insert_applied_allocations(
         transaction_ids,
         amounts,
         currencies,
+        transfer_reason_id,
+        source_account_id,
+        source_description,
     )
 
 
 async def lock_apply(conn: asyncpg.Connection, *, apply_id: UUID, user_id: UUID) -> dict | None:
     row = await conn.fetchrow(
         """
-        SELECT ca.id, ca.import_id, ca.category_id, ca.group_key, ca.remember, ca.snapshot, ca.undone_at,
-               c.name AS category_name
+        SELECT ca.id, ca.import_id, ca.category_id, ca.transfer_reason_id, ca.group_key, ca.remember, ca.snapshot,
+               ca.undone_at, c.name AS category_name, tr.name AS transfer_reason_name
         FROM category_applies ca
         LEFT JOIN categories c ON c.id = ca.category_id
+        LEFT JOIN transfer_reasons tr ON tr.id = ca.transfer_reason_id
         WHERE ca.id = $1 AND ca.user_id = $2
         FOR UPDATE OF ca
         """,
@@ -140,6 +151,14 @@ async def lock_apply(conn: asyncpg.Connection, *, apply_id: UUID, user_id: UUID)
     if isinstance(out["snapshot"], str):
         out["snapshot"] = json.loads(out["snapshot"])
     return out
+
+
+async def get_apply_source(conn: asyncpg.Connection, *, apply_id: UUID) -> dict:
+    """A transfer apply's other side (ab-285): the same on all its rows."""
+    row = await conn.fetchrow(
+        "SELECT source_account_id, source_description FROM allocations WHERE apply_id = $1 LIMIT 1", apply_id
+    )
+    return dict(row) if row else {"source_account_id": None, "source_description": None}
 
 
 async def delete_apply_allocations(conn: asyncpg.Connection, *, apply_id: UUID) -> list[UUID]:
@@ -177,7 +196,7 @@ async def get_rule_rows(conn: asyncpg.Connection, *, user_id: UUID, rule_keys: l
     rows = await conn.fetch(
         """
         SELECT r.key_kind, r.key_value, r.provider, r.account_hash, r.direction, r.category_id,
-               r.label, r.user_entered_paybill, r.times_used, r.avg_amount, r.last_used_at
+               r.transfer_reason_id, r.label, r.user_entered_paybill, r.times_used, r.avg_amount, r.last_used_at
         FROM user_category_rules r
         JOIN unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
              AS k(key_kind, key_value, provider, account_hash, direction)
@@ -252,20 +271,22 @@ async def restore_snapshot(conn: asyncpg.Connection, *, user_id: UUID, snapshot:
         )
     rules = snapshot.get("rules") or []
     if rules:
-        # A category deleted since is skipped rather than failing the undo.
+        # A category or transfer reason deleted since is skipped rather
+        # than failing the undo.
         await conn.executemany(
             """
             INSERT INTO user_category_rules
                 (user_id, key_kind, key_value, provider, account_hash, direction, category_id, label,
-                 user_entered_paybill, times_used, avg_amount, last_used_at)
-            SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+                 user_entered_paybill, times_used, avg_amount, last_used_at, transfer_reason_id)
+            SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
             WHERE EXISTS (SELECT 1 FROM categories c WHERE c.id = $7 AND c.user_id = $1)
+               OR EXISTS (SELECT 1 FROM transfer_reasons t WHERE t.id = $13 AND t.user_id = $1)
             """,
             [
                 (user_id, r["key_kind"], r["key_value"], r["provider"], r["account_hash"], r["direction"],
-                 UUID(r["category_id"]), r["label"], r["user_entered_paybill"], r["times_used"],
+                 _uuid(r.get("category_id")), r["label"], r["user_entered_paybill"], r["times_used"],
                  Decimal(r["avg_amount"]) if r["avg_amount"] is not None else None,
-                 datetime.fromisoformat(r["last_used_at"]))
+                 datetime.fromisoformat(r["last_used_at"]), _uuid(r.get("transfer_reason_id")))
                 for r in rules
             ],
         )
@@ -299,6 +320,10 @@ async def restore_snapshot(conn: asyncpg.Connection, *, user_id: UUID, snapshot:
                 """,
                 vote["number_kind"], vote["number"], vote["direction"], user_id, vote["category_name"],
             )
+
+
+def _uuid(value) -> UUID | None:
+    return UUID(str(value)) if value is not None else None
 
 
 def _columns(items: list[dict], names: tuple[str, ...]) -> list[list]:

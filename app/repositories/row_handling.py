@@ -214,3 +214,102 @@ async def get_import_to_handle(conn: asyncpg.Connection, *, import_id: UUID) -> 
         import_id,
     )
     return dict(row) if row else None
+
+
+# --- ab-285: transfers filed by hand ---------------------------------------
+
+
+async def get_hand_filed_legs(conn: asyncpg.Connection, *, user_id: UUID) -> list[dict]:
+    """Rows the user filed by hand as a Funds transfer from/to one of their
+    own accounts (every allocation a transfer with that one account), not
+    yet paired with the row on that account."""
+    rows = await conn.fetch(
+        """
+        SELECT t.id, t.account_id, a.nickname, t.direction, t.amount, t.currency, t.txn_date,
+               src.source_account_id
+        FROM transactions t
+        JOIN accounts a ON a.id = t.account_id
+        JOIN LATERAL (
+            SELECT MIN(al.source_account_id::text)::uuid AS source_account_id
+            FROM allocations al
+            WHERE al.transaction_id = t.id
+            HAVING COUNT(*) > 0
+               AND COUNT(*) = COUNT(al.transfer_reason_id)
+               AND COUNT(*) = COUNT(al.source_account_id)
+               AND COUNT(DISTINCT al.source_account_id) = 1
+        ) src ON true
+        JOIN accounts sa ON sa.id = src.source_account_id AND sa.user_id = $1
+        WHERE a.user_id = $1 AND t.handled_as IS NULL AND t.transfer_group_id IS NULL
+        ORDER BY t.txn_date, t.id
+        """,
+        user_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_hand_pair_candidates(
+    conn: asyncpg.Connection, *, user_id: UUID, account_ids: list[UUID], amounts: list[float],
+    from_date: date, to_date: date,
+) -> list[dict]:
+    """Rows on the named accounts that could be the other side: unpaired,
+    never dismissed, and either a waiting transfer leg or still open.
+    Locked, so a concurrent pairing can't claim the same row."""
+    rows = await conn.fetch(
+        """
+        SELECT t.id, t.account_id, a.nickname, t.direction, t.amount, t.currency, t.txn_date, t.handled_as,
+               sl.role AS sub_ledger_role
+        FROM transactions t
+        JOIN accounts a ON a.id = t.account_id
+        LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
+        WHERE a.user_id = $1
+          AND t.account_id = ANY($2::uuid[])
+          AND t.amount = ANY($3::numeric[])
+          AND t.txn_date BETWEEN $4 AND $5
+          AND t.transfer_group_id IS NULL
+          AND NOT t.handling_dismissed
+          AND (
+                t.handled_as = 'transfer'
+             OR (t.handled_as IS NULL AND NOT EXISTS (SELECT 1 FROM allocations al WHERE al.transaction_id = t.id))
+          )
+        ORDER BY t.id
+        FOR UPDATE OF t
+        """,
+        user_id,
+        account_ids,
+        amounts,
+        from_date,
+        to_date,
+    )
+    return [dict(r) for r in rows]
+
+
+async def link_hand_pair(
+    conn: asyncpg.Connection, *, group_id: UUID, leg_id: UUID, other_id: UUID, other_reason: str
+) -> None:
+    """The hand-filed row keeps its own reason; the other side becomes a
+    handled transfer."""
+    await conn.execute("UPDATE transactions SET transfer_group_id = $1 WHERE id = $2", group_id, leg_id)
+    await conn.execute(
+        """
+        UPDATE transactions SET transfer_group_id = $1, handled_as = 'transfer', handled_reason = $3
+        WHERE id = $2
+        """,
+        group_id,
+        other_id,
+        other_reason,
+    )
+
+
+async def get_hand_paired(conn: asyncpg.Connection, *, transaction_ids: list[UUID]) -> list[dict]:
+    """For hand-filed rows (not handled at import) that are paired: the
+    row and its other side."""
+    rows = await conn.fetch(
+        """
+        SELECT t.id, o.id AS other_id
+        FROM transactions t
+        JOIN transactions o ON o.transfer_group_id = t.transfer_group_id AND o.id <> t.id
+        WHERE t.id = ANY($1::uuid[]) AND t.handled_as IS NULL AND t.transfer_group_id IS NOT NULL
+        """,
+        transaction_ids,
+    )
+    return [dict(r) for r in rows]

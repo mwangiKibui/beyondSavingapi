@@ -3,7 +3,7 @@ POST/DELETE /category-applies, POST /category-applies/{id}/earlier."""
 
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -149,6 +149,8 @@ def review(monkeypatch):
             "get_blocked_numbers": AsyncMock(return_value=[]),
             "get_user_categories": AsyncMock(return_value=[GROCERIES]),
             "get_shared_votes": AsyncMock(return_value={}),
+            "get_user_transfer_reasons": AsyncMock(return_value=[]),
+            "get_owner": AsyncMock(return_value={}),
             "load_keyword_context": AsyncMock(return_value=KeywordContext()),
             "get_learned_names": AsyncMock(return_value={}),
             "handle_import_by_id": AsyncMock(return_value=None),
@@ -470,7 +472,7 @@ def test_reopen_returns_the_reopened_lines(client, fake_user, fake_pool, applies
     response = client.post(f"/category-applies/{apply_id}/reopen", json={"transaction_ids": [str(line)]})
     assert response.status_code == 200 and response.json() == {"reopened": [str(line)]}
     kwargs = applies["reopen_lines"].await_args.kwargs
-    assert kwargs == {"user_id": fake_user, "apply_id": apply_id, "transaction_ids": [line]}
+    assert kwargs == {"user_id": fake_user, "apply_id": apply_id, "transaction_ids": [line], "secret": ANY}
 
 
 def test_reopen_needs_at_least_one_line(client, fake_user, fake_pool, applies):
@@ -503,3 +505,50 @@ def test_earlier_files_the_waiting_rows(client, fake_user, fake_pool, applies):
 def test_earlier_rejections_pass_through(client, fake_user, fake_pool, applies, code):
     applies["apply_earlier"].side_effect = AllocationRejected(code, "nope")
     assert client.post(f"/category-applies/{uuid4()}/earlier").status_code == code
+
+
+# --- ab-285: Funds transfers ----------------------------------------------------
+
+NEW_ACCOUNT = {"nickname": " Savings ", "account_type": "bank", "provider": "Equity Bank"}
+
+
+def test_apply_passes_a_transfer_and_its_other_side_through(client, fake_user, fake_pool, applies):
+    reason_id, account_id = uuid4(), uuid4()
+    created = {"id": account_id, "nickname": "Savings", "account_type": "bank", "provider": "Equity Bank",
+               "account_number": "", "currency": "KES"}
+    applies["apply_groups"].return_value = ApplyResult(
+        groups=[applied_group(category_id=None, category_name=None, transfer_reason_id=reason_id,
+                              transfer_reason_name="Between my accounts", other_account_id=account_id)],
+        created_categories=[], plan=AllocationPlan(), transactions_by_id={}, created_accounts=[created],
+    )
+    response = client.post("/category-applies", json={"groups": [
+        {"transaction_ids": [str(uuid4())], "transfer_reason_id": str(reason_id), "new_account": NEW_ACCOUNT},
+        {"transaction_ids": [str(uuid4())], "transfer_reason_id": str(reason_id), "someone_else_name": "  Mum "},
+    ]})
+
+    assert response.status_code == 201
+    first, second = applies["apply_groups"].await_args.kwargs["groups"]
+    assert first.transfer_reason_id == reason_id
+    assert first.new_account == {"nickname": "Savings", "account_type": "bank", "provider": "Equity Bank",
+                                 "account_number": "", "currency": None}
+    assert second.someone_else_name == "Mum"
+    out = response.json()
+    assert out["groups"][0]["transfer_reason_name"] == "Between my accounts"
+    assert out["groups"][0]["category_id"] is None
+    assert out["created_accounts"][0]["id"] == str(account_id)
+    assert "account_number" not in out["created_accounts"][0]
+
+
+@pytest.mark.parametrize("payload", [
+    body(transfer_reason_id=str(uuid4()), category_id=str(uuid4())),             # two choices
+    body(transfer_reason_id=str(uuid4()), use_suggestion=True),
+    body(transfer_reason_id=str(uuid4()), someone_else_name="x" * 61),
+    body(transfer_reason_id=str(uuid4()), new_account={**NEW_ACCOUNT, "provider": "Some Bank"}),
+    body(transfer_reason_id=str(uuid4()), new_account={**NEW_ACCOUNT, "account_number": "12AB"}),
+    body(transfer_reason_id=str(uuid4()), new_account={**NEW_ACCOUNT, "account_type": "mobile_money",
+                                                       "provider": "M-Pesa", "account_number": "0712"}),
+    body(transfer_reason_id=str(uuid4()), new_account={**NEW_ACCOUNT, "nickname": "  "}),
+])
+def test_apply_rejects_bad_transfer_bodies(client, fake_user, fake_pool, applies, payload):
+    assert client.post("/category-applies", json=payload).status_code == 422
+    applies["apply_groups"].assert_not_awaited()

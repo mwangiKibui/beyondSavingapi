@@ -24,6 +24,7 @@ from app.repositories.category_suggestions import (
     get_import_for_preview,
     get_import_rows,
     get_learned_names,
+    get_owner,
     get_shared_votes,
     get_user_categories,
     get_user_rules,
@@ -37,6 +38,7 @@ from app.repositories.statement_imports import (
 from app.repositories.notifications import generate_budget_alerts
 from app.repositories.sub_ledgers import list_sub_ledgers
 from app.services.allocations import AllocationRejected, alert_groups
+from app.repositories.transfer_reasons import get_user_transfer_reasons
 from app.services.description_keywords import load_keyword_context
 from app.services.category_suggestions import (
     Directory,
@@ -146,10 +148,16 @@ class PreviewSuggestion(BaseModel):
     is_new_category: bool
     # others = what most users chose (3+ voted, a clear leader); overrides
     # directory (the starter/admin list).
-    source: Literal["your_rule", "this_statement", "others", "directory", "keyword"]
+    # own_account (ab-285): money in sent by the user themselves.
+    source: Literal["your_rule", "this_statement", "others", "directory", "keyword", "own_account"]
     merchant_name: str | None = None
     # ab-290: the description keyword behind it ("salary"), if any.
     keyword: str | None = None
+    # ab-285: "transfer" = file as a Funds transfer; category_name then
+    # holds the reason's name, and transfer_reason_id is None when the
+    # reason gets created on approval.
+    kind: Literal["category", "transfer"] = "category"
+    transfer_reason_id: UUID | None = None
 
 
 class PreviewRow(BaseModel):
@@ -429,6 +437,8 @@ async def _load_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id: UUID) -
         name_keys, number_keys = shared_vote_lookups(rows, keys, directory)
         shared_votes = await get_shared_votes(pool, name_keys=name_keys, number_keys=number_keys)
         keywords = await load_keyword_context(pool, user_id=user_id, rows=rows)
+        reasons = await get_user_transfer_reasons(pool, user_id=user_id)
+        owner = await get_owner(pool, user_id=user_id)
     except HTTPException:
         raise
     except Exception:
@@ -442,7 +452,7 @@ async def _load_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id: UUID) -
 
     preview_rows = build_preview_rows(
         rows, keys=keys, rules=rules, directory=directory, categories=categories, shared_votes=shared_votes,
-        keywords=keywords,
+        keywords=keywords, reasons=reasons, owner=owner,
     )
     return {
         "import": statement_import,

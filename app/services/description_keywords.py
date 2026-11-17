@@ -25,7 +25,9 @@ class Keyword:
     id: UUID
     pattern: str
     direction: str
+    # A category NAME, or for target 'transfer' (ab-285) a transfer reason name.
     category_name: str
+    target: str = "category"
 
     @property
     def word(self) -> str:
@@ -39,19 +41,23 @@ class KeywordList:
         for k in keywords:
             entry = (len(k.pattern.strip()), _compile_pattern(k.pattern), k)
             self._by_direction.setdefault(k.direction, []).append(entry)
+        # Category keywords first, then the longest: income wording beats
+        # transfer wording ("RTGS ... SALARY" is Salary, ab-285).
         for entries in self._by_direction.values():
-            entries.sort(key=lambda e: -e[0])
+            entries.sort(key=lambda e: (e[2].target != "category", -e[0]))
 
     @classmethod
     def from_rows(cls, rows: list[dict]) -> "KeywordList":
         return cls([
-            Keyword(id=r["id"], pattern=r["pattern"], direction=r["direction"], category_name=r["category_name"])
+            Keyword(id=r["id"], pattern=r["pattern"], direction=r["direction"], category_name=r["category_name"],
+                    target=r.get("target") or "category")
             for r in rows
         ])
 
     def match(self, description: str | None, direction: str) -> Keyword | None:
-        """The longest keyword found in the description, whole words only,
-        for the row's direction."""
+        """The keyword found in the description, whole words only, for the
+        row's direction: a category keyword before a transfer one, then the
+        longest."""
         text = normalize_text(description)
         if not text:
             return None

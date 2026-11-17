@@ -303,6 +303,12 @@ async def create_allocations_endpoint(
             missing_reasons = transfer_reason_ids - found_reason_ids
             if missing_reasons:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transfer reason not found")
+            # ab-285: a money-in reason only on money in, and the other way.
+            if any(reason.get("direction") not in (None, transaction["direction"]) for reason in found_reasons):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="That transfer reason is for money going the other way",
+                )
 
         source_account_ids = {
             item.source_account_id for item in body.allocations if item.source_account_id is not None

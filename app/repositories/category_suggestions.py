@@ -6,6 +6,8 @@ a transaction so all its writes land or none do."""
 from datetime import date
 from uuid import UUID
 
+import re
+
 import asyncpg
 
 
@@ -60,7 +62,7 @@ async def get_import_rows(
                pair.id AS paired_transaction_id, pair.txn_date AS paired_txn_date,
                pair.account_nickname AS paired_account_nickname,
                COALESCE(alloc.total, 0) AS allocated,
-               alloc.category_id,
+               alloc.category_id, alloc.transfer_reason_id, alloc.transfer_reason_name,
                COALESCE(alloc.category_count, 0) AS category_count,
                COALESCE(alloc.has_uncategorised, false) AS has_uncategorised
         FROM transactions t
@@ -70,6 +72,11 @@ async def get_import_rows(
                         THEN MIN(al.category_id::text)::uuid END AS category_id,
                    COUNT(DISTINCT al.category_id) AS category_count,
                    bool_or(al.category_id IS NULL) AS has_uncategorised,
+                   -- ab-285: filed as a Funds transfer under one reason.
+                   CASE WHEN COUNT(*) = COUNT(al.transfer_reason_id) AND COUNT(DISTINCT al.transfer_reason_id) = 1
+                        THEN MIN(al.transfer_reason_id::text)::uuid END AS transfer_reason_id,
+                   CASE WHEN COUNT(*) = COUNT(al.transfer_reason_id) AND COUNT(DISTINCT al.transfer_reason_id) = 1
+                        THEN MIN(tr.name) END AS transfer_reason_name,
                    -- ab-282: the apply that filed the row, when one apply
                    -- made all its allocations; applied_here = from this
                    -- import's review (its "Decided" tab).
@@ -78,6 +85,7 @@ async def get_import_rows(
                    bool_or(ca.import_id = $1 AND ca.undone_at IS NULL) AS applied_here
             FROM allocations al
             LEFT JOIN category_applies ca ON ca.id = al.apply_id
+            LEFT JOIN transfer_reasons tr ON tr.id = al.transfer_reason_id
             WHERE al.transaction_id = t.id
         ) alloc ON true
         JOIN accounts acct ON acct.id = t.account_id
@@ -120,7 +128,7 @@ async def get_user_rules(pool: asyncpg.Pool, *, user_id: UUID, pairs: list[tuple
     rows = await pool.fetch(
         """
         SELECT r.key_kind, r.key_value, r.provider, r.account_hash, r.direction, r.category_id,
-               r.label, r.user_entered_paybill, r.times_used, r.avg_amount
+               r.transfer_reason_id, r.label, r.user_entered_paybill, r.times_used, r.avg_amount
         FROM user_category_rules r
         JOIN unnest($2::text[], $3::text[]) AS k(key_kind, key_value)
           ON k.key_kind = r.key_kind AND k.key_value = r.key_value
@@ -151,6 +159,18 @@ async def get_approved_directory(pool: asyncpg.Pool) -> list[dict]:
 async def get_blocked_numbers(pool: asyncpg.Pool) -> list[dict]:
     rows = await pool.fetch("SELECT number_kind, number FROM blocked_numbers")
     return [dict(row) for row in rows]
+
+
+async def get_owner(pool: asyncpg.Pool, *, user_id: UUID) -> dict:
+    """The user's own name and account numbers (digits only), to spot
+    money in they sent themselves (ab-285). Used in memory only."""
+    user = await pool.fetchrow("SELECT first_name, last_name FROM users WHERE id = $1", user_id)
+    numbers = await pool.fetch("SELECT account_number FROM accounts WHERE user_id = $1", user_id)
+    return {
+        "first_name": user["first_name"] if user else None,
+        "last_name": user["last_name"] if user else None,
+        "account_numbers": sorted({re.sub(r"\D", "", r["account_number"] or "") for r in numbers} - {""}),
+    }
 
 
 async def get_user_categories(pool: asyncpg.Pool, *, user_id: UUID) -> list[dict]:
@@ -360,12 +380,13 @@ async def set_preferred_rules(pool: asyncpg.Pool, *, user_id: UUID, preferences:
             FROM user_category_rules o
             WHERE o.user_id = $1 AND o.key_kind = $2 AND o.key_value = $3
               AND o.provider IS NOT DISTINCT FROM $4 AND o.account_hash IS NOT DISTINCT FROM $5
-              AND o.direction = $6 AND o.category_id <> $7
+              AND o.direction = $6
+              AND (o.category_id, o.transfer_reason_id) IS DISTINCT FROM ($7::uuid, $9::uuid)
         )
         INSERT INTO user_category_rules AS r
-            (user_id, key_kind, key_value, provider, account_hash, direction, category_id,
+            (user_id, key_kind, key_value, provider, account_hash, direction, category_id, transfer_reason_id,
              times_used, avg_amount, last_used_at)
-        SELECT $1, $2, $3, $4, $5, $6, $7, others.top + 1, round($8::numeric, 2), now() FROM others
+        SELECT $1, $2, $3, $4, $5, $6, $7, $9, others.top + 1, round($8::numeric, 2), now() FROM others
         ON CONFLICT ON CONSTRAINT user_category_rules_one_row_per_category DO UPDATE SET
             times_used = GREATEST(r.times_used + 1,
                                   (SELECT top FROM others) + 1),
@@ -376,7 +397,7 @@ async def set_preferred_rules(pool: asyncpg.Pool, *, user_id: UUID, preferences:
         """,
         [
             (user_id, p["key_kind"], p["key_value"], p["provider"], p["account_hash"], p["direction"],
-             p["category_id"], p["amount"])
+             p.get("category_id"), p["amount"], p.get("transfer_reason_id"))
             for p in preferences
         ],
     )
@@ -392,9 +413,9 @@ async def learn_rules(pool: asyncpg.Pool, *, user_id: UUID, preferences: list[di
     await pool.executemany(
         """
         INSERT INTO user_category_rules AS r
-            (user_id, key_kind, key_value, provider, account_hash, direction, category_id,
+            (user_id, key_kind, key_value, provider, account_hash, direction, category_id, transfer_reason_id,
              times_used, avg_amount, last_used_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 1, round($8::numeric, 2), now())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $9, 1, round($8::numeric, 2), now())
         ON CONFLICT ON CONSTRAINT user_category_rules_one_row_per_category DO UPDATE SET
             times_used = r.times_used + 1,
             avg_amount = round((COALESCE(r.avg_amount, $8::numeric) * r.times_used + $8::numeric)
@@ -404,7 +425,7 @@ async def learn_rules(pool: asyncpg.Pool, *, user_id: UUID, preferences: list[di
         """,
         [
             (user_id, p["key_kind"], p["key_value"], p["provider"], p["account_hash"], p["direction"],
-             p["category_id"], p["amount"])
+             p.get("category_id"), p["amount"], p.get("transfer_reason_id"))
             for p in preferences
         ],
     )

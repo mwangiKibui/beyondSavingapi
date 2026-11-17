@@ -25,8 +25,12 @@ from app.repositories.row_handling import (
     get_import_to_handle,
     get_or_create_transfer_reason,
     get_owned_providers,
+    get_hand_filed_legs,
+    get_hand_pair_candidates,
+    get_hand_paired,
     get_pair_candidates,
     get_waiting_transfer_legs,
+    link_hand_pair,
     insert_handled_allocations,
     link_transfer_pair,
     lock_import,
@@ -42,6 +46,7 @@ from app.services.row_handling import (
     PAIR_WINDOW_DAYS,
     Handling,
     classify_row,
+    plan_hand_pairs,
     plan_pairs,
     plan_saving_pairs,
 )
@@ -173,6 +178,7 @@ async def handle_import(conn: asyncpg.Connection, *, statement_import: dict, sec
             await set_transfer_group(conn, group_id=uuid4(), ids=[spending["id"], savings["id"]])
 
     result.paired = await pair_transfers(conn, user_id=user_id, secret=secret, owned=owned)
+    result.paired += await pair_hand_filed_transfers(conn, user_id=user_id)
     await mark_import_handled(conn, import_id=statement_import["id"])
     return result
 
@@ -251,36 +257,95 @@ async def undo_handling(conn: asyncpg.Connection, *, transaction_id: UUID, user_
     back_in_review = [row["id"]]
 
     other_id = row["paired_transaction_id"]
-    if other_id is not None:
-        other = await get_handled_transaction(conn, transaction_id=other_id, user_id=user_id)
-        await unlink_transfer(conn, transaction_ids=[other_id])
-        await delete_allocations(conn, transaction_ids=[other_id])
-        owned = frozenset(await get_owned_providers(conn, user_id=user_id))
-        handling = _classify(other, provider=other["provider"], owned=owned, secret=secret)
-        if handling and handling.kind == "saving":
-            # ab-259: the other side of a move inside a SACCO stays saving.
-            await set_handled(conn, transaction_ids=[other_id], kinds=["saving"], reasons=[handling.reason])
-            if float(other["amount"]) > 0:
-                await insert_handled_allocations(
-                    conn,
-                    allocations=[{
-                        "transaction_id": other_id,
-                        "amount": float(other["amount"]),
-                        "currency": other["currency"],
-                    }],
-                )
-        elif handling and handling.kind == "transfer":
-            await set_handled(conn, transaction_ids=[other_id], kinds=["transfer"], reasons=[handling.reason])
-            if float(other["amount"]) > 0:
-                reason_id = await get_or_create_transfer_reason(conn, user_id=user_id, name=BETWEEN_MY_ACCOUNTS)
-                await insert_handled_allocations(
-                    conn, allocations=[_waiting_allocation(other, reason_id=reason_id, handling=handling)]
-                )
-            await pair_transfers(conn, user_id=user_id, secret=secret, owned=owned)
-        else:
-            await set_handled(conn, transaction_ids=[other_id], kinds=[None], reasons=[None])
-            back_in_review.append(other_id)
+    if other_id is not None and await _release_other_leg(conn, other_id=other_id, user_id=user_id, secret=secret):
+        back_in_review.append(other_id)
     return back_in_review
+
+
+async def _release_other_leg(conn: asyncpg.Connection, *, other_id: UUID, user_id: UUID, secret: str) -> bool:
+    """Unpairs the other side of a transfer: back to waiting when it is a
+    transfer by itself, a saving when it is one, else back to the review
+    (returns True)."""
+    other = await get_handled_transaction(conn, transaction_id=other_id, user_id=user_id)
+    await unlink_transfer(conn, transaction_ids=[other_id])
+    if other["handled_as"] is None:
+        # ab-285: a row the user filed by hand keeps their choice.
+        return False
+    await delete_allocations(conn, transaction_ids=[other_id])
+    owned = frozenset(await get_owned_providers(conn, user_id=user_id))
+    handling = _classify(other, provider=other["provider"], owned=owned, secret=secret)
+    if handling and handling.kind == "saving":
+        # ab-259: the other side of a move inside a SACCO stays saving.
+        await set_handled(conn, transaction_ids=[other_id], kinds=["saving"], reasons=[handling.reason])
+        if float(other["amount"]) > 0:
+            await insert_handled_allocations(
+                conn,
+                allocations=[{
+                    "transaction_id": other_id,
+                    "amount": float(other["amount"]),
+                    "currency": other["currency"],
+                }],
+            )
+    elif handling and handling.kind == "transfer":
+        await set_handled(conn, transaction_ids=[other_id], kinds=["transfer"], reasons=[handling.reason])
+        if float(other["amount"]) > 0:
+            reason_id = await get_or_create_transfer_reason(conn, user_id=user_id, name=BETWEEN_MY_ACCOUNTS)
+            await insert_handled_allocations(
+                conn, allocations=[_waiting_allocation(other, reason_id=reason_id, handling=handling)]
+            )
+        await pair_transfers(conn, user_id=user_id, secret=secret, owned=owned)
+    else:
+        await set_handled(conn, transaction_ids=[other_id], kinds=[None], reasons=[None])
+        return True
+    return False
+
+
+async def pair_hand_filed_transfers(conn: asyncpg.Connection, *, user_id: UUID) -> int:
+    """ab-285: rows the user filed by hand as a Funds transfer from/to one
+    of their accounts pair with the matching row on that account, in
+    either upload order, so the move is never counted twice. The user's
+    own reason stays; the other side becomes a handled transfer."""
+    legs = await get_hand_filed_legs(conn, user_id=user_id)
+    if not legs:
+        return 0
+    window = timedelta(days=PAIR_WINDOW_DAYS)
+    candidates = await get_hand_pair_candidates(
+        conn, user_id=user_id,
+        account_ids=sorted({leg["source_account_id"] for leg in legs}, key=str),
+        amounts=sorted({float(leg["amount"]) for leg in legs}),
+        from_date=min(leg["txn_date"] for leg in legs) - window,
+        to_date=max(leg["txn_date"] for leg in legs) + window,
+    )
+    pairs = plan_hand_pairs(legs, candidates)
+    if not pairs:
+        return 0
+    reason_id = await get_or_create_transfer_reason(conn, user_id=user_id, name=BETWEEN_MY_ACCOUNTS)
+    for leg, other in pairs:
+        moved = "Moved to" if other["direction"] == "out" else "Moved from"
+        await link_hand_pair(conn, group_id=uuid4(), leg_id=leg["id"], other_id=other["id"],
+                             other_reason=f"{moved} your {leg['nickname']} account")
+        await delete_allocations(conn, transaction_ids=[other["id"]])
+        if float(other["amount"]) > 0:
+            await insert_handled_allocations(conn, allocations=[{
+                "transaction_id": other["id"], "transfer_reason_id": reason_id,
+                "source_account_id": leg["account_id"], "amount": float(other["amount"]),
+                "currency": other["currency"],
+            }])
+    return len(pairs)
+
+
+async def unpair_hand_filed(
+    conn: asyncpg.Connection, *, user_id: UUID, transaction_ids: list[UUID], secret: str
+) -> list[UUID]:
+    """Undoing a hand-filed transfer (ab-285) unpairs it; the other side
+    goes back to waiting or to the review. Returns the other sides back
+    in review."""
+    back = []
+    for pair in await get_hand_paired(conn, transaction_ids=transaction_ids):
+        await unlink_transfer(conn, transaction_ids=[pair["id"]])
+        if await _release_other_leg(conn, other_id=pair["other_id"], user_id=user_id, secret=secret):
+            back.append(pair["other_id"])
+    return back
 
 
 async def change_handled_category(

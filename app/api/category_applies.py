@@ -13,6 +13,7 @@ from app.core.config import get_settings
 from app.core.db import get_pool
 from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.security import get_current_user_id
+from app.api.accounts import AccountType, Currency, _validate_account_number, _validate_provider
 from app.repositories.category_suggestions import get_import_for_preview
 from app.repositories.notifications import generate_budget_alerts
 from app.services.allocations import AllocationRejected, alert_groups
@@ -30,14 +31,36 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/category-applies", tags=["category-applies"])
 
 
+class NewAccountRequest(BaseModel):
+    """ab-285: an account added from the transfer drawer - the same checks
+    as POST /accounts, except the number may be left out."""
+    nickname: str = Field(min_length=1, max_length=60)
+    account_type: AccountType
+    provider: str = Field(min_length=1)
+    account_number: str = ""
+    currency: Currency | None = None
+
+    @field_validator("nickname", "account_number", mode="before")
+    @classmethod
+    def _strip(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
 class ApplyGroupRequest(BaseModel):
     # The group's rows, as listed; all must be the same payee and still
     # uncategorised.
     transaction_ids: list[UUID] = Field(min_length=1, max_length=5000)
-    # Exactly one of these three (checked in the handler).
+    # Exactly one of these four (checked in the handler).
     category_id: UUID | None = None
     new_category_name: str | None = None
     use_suggestion: bool = False
+    # ab-285: file as a Funds transfer under this reason.
+    transfer_reason_id: UUID | None = None
+    # ab-285, transfers only - where the money came from (money in) or went
+    # to (money out); at most one. someone_else_name is private to the user.
+    other_account_id: UUID | None = None
+    new_account: NewAccountRequest | None = None
+    someone_else_name: str | None = None
     # "From now on": the payee's top saved choice, plus a shared vote for
     # business payees. Off learns nothing.
     remember: bool = False
@@ -45,7 +68,7 @@ class ApplyGroupRequest(BaseModel):
     # (one more use, never forced to the top) and casts no shared vote.
     per_line: bool = False
 
-    @field_validator("new_category_name", mode="before")
+    @field_validator("new_category_name", "someone_else_name", mode="before")
     @classmethod
     def _strip(cls, value):
         if isinstance(value, str):
@@ -60,6 +83,13 @@ class ApplyGroupRequest(BaseModel):
             raise ValueError("Category name must be 60 characters or fewer")
         return value
 
+    @field_validator("someone_else_name")
+    @classmethod
+    def _someone_length(cls, value):
+        if value is not None and len(value) > 60:
+            raise ValueError("Name must be 60 characters or fewer")
+        return value
+
 
 class ApplyRequest(BaseModel):
     # Set when applying from that import's review (its "Decided" tab).
@@ -70,8 +100,12 @@ class ApplyRequest(BaseModel):
 class AppliedGroup(BaseModel):
     apply_id: UUID
     group_key: str
-    category_id: UUID
-    category_name: str
+    # A category, or for a Funds transfer (ab-285) a transfer reason.
+    category_id: UUID | None = None
+    category_name: str | None = None
+    transfer_reason_id: UUID | None = None
+    transfer_reason_name: str | None = None
+    other_account_id: UUID | None = None
     remember: bool
     allocated: list[UUID]
     # Zero-amount rows: nothing to allocate.
@@ -87,9 +121,18 @@ class CreatedCategory(BaseModel):
     type: str
 
 
+class CreatedAccount(BaseModel):
+    id: UUID
+    nickname: str
+    account_type: str
+    provider: str
+    currency: str
+
+
 class ApplyResponse(BaseModel):
     groups: list[AppliedGroup]
     created_categories: list[CreatedCategory]
+    created_accounts: list[CreatedAccount] = []
 
 
 class ReopenRequest(BaseModel):
@@ -123,7 +166,11 @@ async def _alerts(pool: asyncpg.Pool, *, user_id: UUID, result: ApplyResult) -> 
 
 
 def _response(result: ApplyResult) -> dict:
-    return {"groups": result.groups, "created_categories": result.created_categories}
+    return {
+        "groups": result.groups,
+        "created_categories": result.created_categories,
+        "created_accounts": result.created_accounts,
+    }
 
 
 @router.post("", response_model=ApplyResponse, status_code=status.HTTP_201_CREATED)
@@ -133,12 +180,20 @@ async def apply_categories_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     for group in body.groups:
-        chosen = sum([group.category_id is not None, group.new_category_name is not None, group.use_suggestion])
+        chosen = sum([group.category_id is not None, group.new_category_name is not None, group.use_suggestion,
+                      group.transfer_reason_id is not None])
         if chosen != 1:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Each group needs exactly one of category_id, new_category_name or use_suggestion",
+                detail=(
+                    "Each group needs exactly one of category_id, new_category_name, use_suggestion "
+                    "or transfer_reason_id"
+                ),
             )
+        if group.new_account is not None:
+            _validate_provider(group.new_account.account_type, group.new_account.provider)
+            if group.new_account.account_number:
+                _validate_account_number(group.new_account.account_type, group.new_account.account_number)
     _require_pool(pool)
 
     try:
@@ -184,7 +239,9 @@ async def undo_apply_endpoint(
     try:
         async with pool.acquire() as conn:
             async with conn.transaction():
-                reopened = await undo_apply(conn, user_id=user_id, apply_id=apply_id)
+                reopened = await undo_apply(
+                    conn, user_id=user_id, apply_id=apply_id, secret=get_settings().suggestion_key_secret
+                )
     except AllocationRejected as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
     except Exception:
@@ -209,7 +266,8 @@ async def reopen_lines_endpoint(
         async with pool.acquire() as conn:
             async with conn.transaction():
                 reopened = await reopen_lines(
-                    conn, user_id=user_id, apply_id=apply_id, transaction_ids=body.transaction_ids
+                    conn, user_id=user_id, apply_id=apply_id, transaction_ids=body.transaction_ids,
+                    secret=get_settings().suggestion_key_secret,
                 )
     except AllocationRejected as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None

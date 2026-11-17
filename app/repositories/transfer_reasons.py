@@ -15,19 +15,33 @@ _SORT_COLUMNS = {
 # scenarios already identified (loan repayment, share/savings contribution),
 # plus a general catch-all for money sent to another of the user's own
 # accounts. Users add their own from here, same as categories.
-DEFAULT_TRANSFER_REASONS: list[str] = [
-    "Loan Repayment",
-    "Share Contribution",
-    "Savings Contribution",
-    "Sent to another of my accounts",
+# (name, direction): which way the money moves - None for either way.
+# The money-in ones are ab-285 (existing users got them in migration 000028).
+DEFAULT_TRANSFER_REASONS: list[tuple[str, str | None]] = [
+    ("Loan Repayment", "out"),
+    ("Share Contribution", "out"),
+    ("Savings Contribution", "out"),
+    ("Sent to another of my accounts", "out"),
+    ("From my savings", "in"),
+    ("From an investment / MMF", "in"),
+    ("From family", "in"),
 ]
+# What an approved transfer suggestion files under when it names no other
+# reason; also what import handling uses (row_handling.BETWEEN_MY_ACCOUNTS).
+BETWEEN_MY_ACCOUNTS = "Between my accounts"
 
 
 async def seed_default_transfer_reasons(conn: asyncpg.Connection, *, user_id: UUID) -> None:
     await conn.executemany(
-        "INSERT INTO transfer_reasons (user_id, name, is_default) VALUES ($1, $2, TRUE)",
-        [(user_id, name) for name in DEFAULT_TRANSFER_REASONS],
+        "INSERT INTO transfer_reasons (user_id, name, is_default, direction) VALUES ($1, $2, TRUE, $3)",
+        [(user_id, name, direction) for name, direction in DEFAULT_TRANSFER_REASONS],
     )
+
+
+async def get_user_transfer_reasons(conn, *, user_id: UUID) -> list[dict]:
+    """The user's reasons with their direction, for suggestions (ab-285)."""
+    rows = await conn.fetch("SELECT id, name, direction FROM transfer_reasons WHERE user_id = $1", user_id)
+    return [dict(r) for r in rows]
 
 
 async def get_transfer_reasons_by_ids(
@@ -42,7 +56,7 @@ async def get_transfer_reasons_by_ids(
     if not transfer_reason_ids:
         return []
     rows = await pool.fetch(
-        "SELECT id, name FROM transfer_reasons WHERE id = ANY($1::uuid[]) AND user_id = $2",
+        "SELECT id, name, direction FROM transfer_reasons WHERE id = ANY($1::uuid[]) AND user_id = $2",
         transfer_reason_ids,
         user_id,
     )
@@ -55,7 +69,7 @@ async def create_transfer_reason(pool: asyncpg.Pool, *, user_id: UUID, name: str
             """
             INSERT INTO transfer_reasons (user_id, name)
             VALUES ($1, $2)
-            RETURNING id, name, is_default, created_at
+            RETURNING id, name, is_default, direction, created_at
             """,
             user_id,
             name,
@@ -76,7 +90,7 @@ async def list_transfer_reasons(
     sort_dir: str,
 ) -> tuple[list[dict], int]:
     base_query = """
-        SELECT id, name, is_default
+        SELECT id, name, is_default, direction
         FROM transfer_reasons
         WHERE user_id = $1
           AND ($2::text IS NULL OR name ILIKE '%' || $2 || '%')

@@ -40,6 +40,8 @@ def db(monkeypatch):
         "get_user_rules": AsyncMock(return_value=[]),
         "get_user_categories": AsyncMock(return_value=[GROCERIES, SALARY]),
         "get_shared_votes": AsyncMock(return_value={}),
+        "get_user_transfer_reasons": AsyncMock(return_value=[]),
+        "get_owner": AsyncMock(return_value={}),
         "load_keyword_context": AsyncMock(return_value=KeywordContext()),
         "get_keyword_choice_rows": AsyncMock(return_value=[]),
         "save_keyword_choices": AsyncMock(),
@@ -61,6 +63,12 @@ def db(monkeypatch):
         "delete_apply_allocations": AsyncMock(return_value=[]),
         "restore_snapshot": AsyncMock(),
         "mark_apply_undone": AsyncMock(),
+        "get_account": AsyncMock(return_value=None),
+        "create_account": AsyncMock(),
+        "get_or_create_transfer_reason": AsyncMock(side_effect=lambda conn, **kw: uuid4()),
+        "get_apply_source": AsyncMock(return_value={"source_account_id": None, "source_description": None}),
+        "pair_hand_filed_transfers": AsyncMock(return_value=0),
+        "unpair_hand_filed": AsyncMock(return_value=[]),
     }
     for name, mock in mocks.items():
         monkeypatch.setattr(svc, name, mock)

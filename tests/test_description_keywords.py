@@ -95,7 +95,7 @@ def test_salary_is_suggested_from_the_description():
     out = preview([txn("SALARY NOV 2026")])
     s = out[0]["suggestion"]
     assert (s["category_id"], s["source"], s["keyword"]) == (SALARY["id"], "keyword", "salary")
-    assert out[0]["keyword_match"] == {"id": SALARY_KW["id"], "category_name": "Salary"}
+    assert out[0]["keyword_match"] == {"id": SALARY_KW["id"], "category_name": "Salary", "target": "category"}
 
 
 def test_a_new_category_is_offered_when_the_user_has_none():

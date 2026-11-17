@@ -13,7 +13,7 @@ _KEYWORD_COLUMNS = "id, pattern, direction, category_name, status, source, creat
 
 async def get_active_keywords(conn: asyncpg.Connection | asyncpg.Pool) -> list[dict]:
     rows = await conn.fetch(
-        "SELECT id, pattern, direction, category_name FROM description_keywords WHERE status = 'approved'"
+        "SELECT id, pattern, direction, category_name, target FROM description_keywords WHERE status = 'approved'"
     )
     return [dict(r) for r in rows]
 
