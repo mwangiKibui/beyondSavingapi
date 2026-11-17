@@ -382,6 +382,34 @@ async def set_preferred_rules(pool: asyncpg.Pool, *, user_id: UUID, preferences:
     )
 
 
+async def learn_rules(pool: asyncpg.Pool, *, user_id: UUID, preferences: list[dict]) -> None:
+    """ab-292: a choice made for one line counts one more use of that
+    category for the key and folds its amount into the typical amount -
+    without being forced to the top the way set_preferred_rules is, so a
+    line choice only becomes the payee's default once it's the most used."""
+    if not preferences:
+        return
+    await pool.executemany(
+        """
+        INSERT INTO user_category_rules AS r
+            (user_id, key_kind, key_value, provider, account_hash, direction, category_id,
+             times_used, avg_amount, last_used_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 1, round($8::numeric, 2), now())
+        ON CONFLICT ON CONSTRAINT user_category_rules_one_row_per_category DO UPDATE SET
+            times_used = r.times_used + 1,
+            avg_amount = round((COALESCE(r.avg_amount, $8::numeric) * r.times_used + $8::numeric)
+                               / (r.times_used + 1), 2),
+            last_used_at = now(),
+            updated_at = now()
+        """,
+        [
+            (user_id, p["key_kind"], p["key_value"], p["provider"], p["account_hash"], p["direction"],
+             p["category_id"], p["amount"])
+            for p in preferences
+        ],
+    )
+
+
 # --- shared Till/Paybill -> name learning (ab-253 PR 4) ---------------------
 
 

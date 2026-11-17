@@ -24,6 +24,13 @@ class GroupRow(BaseModel):
     currency: str
     description: str | None = None
     import_id: UUID | None = None
+    # An import's review (ab-292): this line's own status, category, apply
+    # and suggestion.
+    status: Literal["decide", "decided", "sorted", "handled"] | None = None
+    category_id: UUID | None = None
+    category_name: str | None = None
+    apply_id: UUID | None = None
+    suggestion: "GroupSuggestion | None" = None
 
 
 class GroupSuggestion(BaseModel):
@@ -65,6 +72,8 @@ class PayeeGroup(BaseModel):
     # An import's review only (ab-289): decide = Pending, handled =
     # Auto-suggested, decided/sorted = Approved (here / some other way).
     status: Literal["decide", "decided", "sorted", "handled"] | None = None
+    pending_count: int | None = None
+    approved_count: int | None = None
     rows: list[GroupRow]
 
 

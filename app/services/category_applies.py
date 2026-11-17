@@ -13,7 +13,7 @@ caller holds a transaction on.
 """
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from uuid import UUID
 
 import asyncpg
@@ -27,12 +27,15 @@ from app.repositories.category_suggestions import (
     get_shared_votes,
     get_user_categories,
     get_user_rules,
+    learn_rules,
     set_preferred_rules,
     upsert_merchant_votes,
     upsert_number_votes,
 )
 from app.repositories.payee_groups import (
+    count_apply_allocations,
     delete_apply_allocations,
+    delete_apply_line_allocations,
     get_merchant_votes,
     get_number_votes,
     get_rule_rows,
@@ -68,6 +71,11 @@ class ApplyGroup:
     new_category_name: str | None = None
     use_suggestion: bool = False
     remember: bool = False
+    # ab-292: a choice for one line of a payee - remember learns softly
+    # (learn_rules) and casts no shared vote.
+    per_line: bool = False
+    # Internal: the suggestion use_suggestion resolved to for these rows.
+    suggestion: dict | None = None
 
 
 @dataclass
@@ -159,6 +167,7 @@ async def apply_groups(
         group_keys.append(found.pop())
 
     keys, preview, categories, directory = await load_suggestions(conn, user_id=user_id, rows=rows, keys=raw_keys)
+    groups, group_keys = _split_by_suggestion(groups, group_keys, preview)
     by_cat_id = {c["id"]: c for c in categories}
     by_name = {_name_key(c["name"], c["type"]): c for c in categories}
 
@@ -169,9 +178,7 @@ async def apply_groups(
         wanted = CATEGORY_TYPE_FOR_DIRECTION[by_id[g.transaction_ids[0]]["direction"]]
         name = None
         if g.use_suggestion:
-            s = group_suggestion([preview.get(t, {}).get("suggestion") for t in g.transaction_ids])
-            if s is None:
-                raise AllocationRejected(422, "One of the groups has no suggestion")
+            s = g.suggestion
             if s["category_id"] is not None:
                 targets.append(("id", s["category_id"]))
                 continue
@@ -234,7 +241,7 @@ async def apply_groups(
         plan.skipped.extend(skipped)
         if g.remember and allocatable:
             await _remember(conn, user_id=user_id, rows=allocatable, keys=keys, directory=directory,
-                            category=category)
+                            category=category, per_line=g.per_line)
             remembered.append(len(results))
         results.append({
             "apply_id": apply_id,
@@ -253,6 +260,33 @@ async def apply_groups(
             results[i]["earlier_waiting"] = waiting.get(results[i]["group_key"], 0)
 
     return ApplyResult(groups=results, created_categories=created, plan=plan, transactions_by_id=by_id)
+
+
+def _split_by_suggestion(groups: list[ApplyGroup], group_keys: list[str], preview: dict):
+    """use_suggestion files each line under its own suggestion (ab-292):
+    a group whose lines suggest different categories becomes one apply per
+    category. Lines with no suggestion of their own take the group's."""
+    out_groups, out_keys = [], []
+    for g, gk in zip(groups, group_keys):
+        if not g.use_suggestion:
+            out_groups.append(g)
+            out_keys.append(gk)
+            continue
+        own = {t: preview.get(t, {}).get("suggestion") for t in g.transaction_ids}
+        fallback = group_suggestion(list(own.values()))
+        if fallback is None and not any(own.values()):
+            raise AllocationRejected(422, "One of the groups has no suggestion")
+        split: dict[tuple, tuple[dict, list[UUID]]] = {}
+        for t in g.transaction_ids:
+            s = own[t] or fallback
+            if s is None:
+                raise AllocationRejected(422, "One of the groups has no suggestion")
+            sid = (s["category_id"], s["category_name"].strip().lower())
+            split.setdefault(sid, (s, []))[1].append(t)
+        for s, ids in split.values():
+            out_groups.append(replace(g, transaction_ids=ids, suggestion=s))
+            out_keys.append(gk)
+    return out_groups, out_keys
 
 
 async def _snapshot(conn, *, user_id: UUID, rows: list[dict], keys: dict, directory: Directory) -> dict:
@@ -291,7 +325,7 @@ async def _snapshot(conn, *, user_id: UUID, rows: list[dict], keys: dict, direct
 
 
 async def _remember(conn, *, user_id: UUID, rows: list[dict], keys: dict, directory: Directory,
-                    category: dict) -> None:
+                    category: dict, per_line: bool = False) -> None:
     """Top saved choice per payee key (one per account reference), plus
     the shared votes a confirm would cast for business payees."""
     preferences: dict[tuple, dict] = {}
@@ -309,6 +343,9 @@ async def _remember(conn, *, user_id: UUID, rows: list[dict], keys: dict, direct
         amounts.setdefault(k, []).append(float(r["amount"]))
     for k, p in preferences.items():
         p["amount"] = sum(amounts[k]) / len(amounts[k])
+    if per_line:
+        await learn_rules(conn, user_id=user_id, preferences=list(preferences.values()))
+        return
     await set_preferred_rules(conn, user_id=user_id, preferences=list(preferences.values()))
 
     learning = plan_learning(
@@ -341,6 +378,27 @@ async def undo_apply(conn: asyncpg.Connection, *, user_id: UUID, apply_id: UUID)
     if applied["remember"]:
         await restore_snapshot(conn, user_id=user_id, snapshot=applied["snapshot"])
     await mark_apply_undone(conn, apply_id=apply_id)
+    return reopened
+
+
+async def reopen_lines(
+    conn: asyncpg.Connection, *, user_id: UUID, apply_id: UUID, transaction_ids: list[UUID]
+) -> list[UUID]:
+    """ab-292: puts some lines of an apply back to open, e.g. to file one
+    line differently. The rest stay filed and the saved choices stand;
+    reopening the last lines is the same as undoing the apply."""
+    applied = await lock_apply(conn, apply_id=apply_id, user_id=user_id)
+    if applied is None:
+        raise AllocationRejected(404, "Not found")
+    if applied["undone_at"] is not None:
+        raise AllocationRejected(409, "This was already undone")
+    reopened = await delete_apply_line_allocations(conn, apply_id=apply_id, transaction_ids=transaction_ids)
+    if set(transaction_ids) - set(reopened):
+        raise AllocationRejected(422, "One or more rows aren't part of this choice")
+    if await count_apply_allocations(conn, apply_id=apply_id) == 0:
+        if applied["remember"]:
+            await restore_snapshot(conn, user_id=user_id, snapshot=applied["snapshot"])
+        await mark_apply_undone(conn, apply_id=apply_id)
     return reopened
 
 

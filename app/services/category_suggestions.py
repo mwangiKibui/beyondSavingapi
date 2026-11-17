@@ -19,6 +19,7 @@ or suggested as a new category when the user has none by that name.
 """
 
 import hashlib
+import math
 import re
 from collections import Counter
 from collections.abc import Iterable
@@ -150,7 +151,8 @@ def pick_rule(rules: list[dict], *, account_hash: str | None, amount: float) -> 
     Paybill the user has used for several categories gives nothing - e.g.
     a bank Paybill used for both rent and school fees. Otherwise the most
     used category, ties broken by the closest average amount; still tied
-    means no suggestion rather than a coin toss."""
+    means no suggestion rather than a coin toss. Before that, categories
+    used at clearly different amounts pick by amount (ab-292)."""
     if not rules:
         return None
     same_account = [r for r in rules if account_hash and r["account_hash"] == account_hash]
@@ -161,8 +163,14 @@ def pick_rule(rules: list[dict], *, account_hash: str | None, amount: float) -> 
 
     totals: dict = {}
     for r in rules:
-        t = totals.setdefault(r["category_id"], {"rule": r, "times_used": 0})
+        t = totals.setdefault(r["category_id"], {"rule": r, "times_used": 0, "amount_sum": 0.0, "amount_n": 0})
         t["times_used"] += r["times_used"]
+        if r["avg_amount"] is not None:
+            t["amount_sum"] += float(r["avg_amount"]) * r["times_used"]
+            t["amount_n"] += r["times_used"]
+    by_amount = _nearest_by_amount(list(totals.values()), amount)
+    if by_amount is not None:
+        return by_amount["rule"]
     ranked = sorted(totals.values(), key=lambda t: t["times_used"], reverse=True)
     top = [t for t in ranked if t["times_used"] == ranked[0]["times_used"]]
     if len(top) == 1:
@@ -179,6 +187,39 @@ def pick_rule(rules: list[dict], *, account_hash: str | None, amount: float) -> 
     if distances[0][0] == distances[1][0]:
         return None
     return distances[0][1]["rule"]
+
+
+# A category steers by amount only once it was used this often (ab-292).
+AMOUNT_MIN_USES = 2
+# ...its typical amount is at least this many times the next one's...
+AMOUNT_MIN_RATIO = 2.0
+# ...and the line is clearly nearer it: this much closer, as a ratio.
+AMOUNT_MIN_MARGIN = math.log(1.5)
+
+
+def _nearest_by_amount(totals: list[dict], amount: float) -> dict | None:
+    """ab-292: a payee filed under several categories at clearly different
+    amounts (e.g. Vegetables ~400, Shopping ~6,000 at one supermarket)
+    gets the category whose typical amount is nearest the line's. Distance
+    is by ratio (log), so 350 vs 400 counts the same as 5,250 vs 6,000.
+    Anything less clear returns None and the most-used rule decides."""
+    if amount is None or float(amount) <= 0:
+        return None
+    usable = [
+        (math.log(t["amount_sum"] / t["amount_n"]), t)
+        for t in totals
+        if t["times_used"] >= AMOUNT_MIN_USES and t["amount_n"] and t["amount_sum"] > 0
+    ]
+    if len(usable) < 2:
+        return None
+    here = math.log(float(amount))
+    usable.sort(key=lambda lt: abs(lt[0] - here))
+    (log1, first), (log2, _) = usable[0], usable[1]
+    if abs(log1 - log2) < math.log(AMOUNT_MIN_RATIO):
+        return None
+    if abs(log2 - here) - abs(log1 - here) < AMOUNT_MIN_MARGIN:
+        return None
+    return first
 
 
 # --- the preview ----------------------------------------------------------
