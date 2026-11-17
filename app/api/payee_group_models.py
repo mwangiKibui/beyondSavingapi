@@ -74,6 +74,7 @@ Order = Literal["asc", "desc"]
 class ListParams(BaseModel):
     direction: Direction | None = None
     kind: Kind | None = None
+    q: str | None = None
     sort: Sort = "rows"
     order: Order = "desc"
     page: int = 1
@@ -83,12 +84,14 @@ class ListParams(BaseModel):
 def list_params(
     direction: Direction | None = Query(default=None),
     kind: Kind | None = Query(default=None),
+    # Search: payee name, label, number or statement text.
+    q: str | None = Query(default=None, max_length=100),
     sort: Sort = Query(default="rows"),
     order: Order = Query(default="desc"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=DEFAULT_PAGE_SIZE),
 ) -> ListParams:
-    return ListParams(direction=direction, kind=kind, sort=sort, order=order, page=page, page_size=page_size)
+    return ListParams(direction=direction, kind=kind, q=q, sort=sort, order=order, page=page, page_size=page_size)
 
 
 def check_page_size(params: ListParams) -> None:

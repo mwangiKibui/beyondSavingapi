@@ -181,6 +181,38 @@ def test_filters():
     assert [g["group_key"] for g in select_groups(sample_groups(), kind="business")[0]] == ["a"]
 
 
+def search_groups():
+    return [
+        {"group_key": "a", "display_name": "ACME SUPERMARKET", "label": None, "number": "5555555",
+         "direction": "out", "is_person": False, "row_count": 2, "total": 300,
+         "rows": [{"description": "Merchant Payment to 5555555 - ACME SUPERMARKET"}]},
+        {"group_key": "b", "display_name": "Pay Bill Online", "label": "Corner shop", "number": "888880",
+         "direction": "out", "is_person": False, "row_count": 1, "total": 50,
+         "rows": [{"description": "Pay Bill Online to 888880 - KPLC PREPAID"}]},
+        {"group_key": "c", "display_name": "REVERSAL", "label": None, "number": None,
+         "direction": "in", "is_person": False, "row_count": 1, "total": 10, "rows": [{"description": None}]},
+    ]
+
+
+@pytest.mark.parametrize("q,expected", [
+    ("acme", ["a"]),            # payee name, any case
+    ("corner", ["b"]),          # the user's label
+    ("8888", ["b"]),            # the payee's number
+    ("kplc", ["b"]),            # any statement line in the group
+    ("  Acme  ", ["a"]),        # trimmed
+    ("", ["a", "b", "c"]),      # blank = no search
+    (None, ["a", "b", "c"]),
+    ("nothing", []),
+])
+def test_search(q, expected):
+    items, total = select_groups(search_groups(), q=q)
+    assert [g["group_key"] for g in items] == expected and total == len(expected)
+
+
+def test_search_combines_with_filters():
+    assert select_groups(search_groups(), q="acme", direction="in")[0] == []
+
+
 def test_pages():
     items, total = select_groups(sample_groups(), page=2, page_size=2)
     assert [g["group_key"] for g in items] == ["b"] and total == 3
