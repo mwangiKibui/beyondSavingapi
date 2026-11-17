@@ -205,6 +205,72 @@ def test_review_groups_search_keeps_tab_counts(client, fake_user, fake_pool, rev
     assert body["suggested"] == 0
 
 
+def _all_statuses_rows(apply_id):
+    return [
+        txn("Merchant Payment to 7777777 - OTHER SHOP", allocated=100, category_id=GROCERIES["id"]),
+        txn("Pay Bill Online to 888880 - KPLC PREPAID Acc. 1", allocated=100, category_id=GROCERIES["id"],
+            apply_id=apply_id, applied_here=True),
+        txn("Pay Bill Charge", allocated=10, handled_as="charge", handled_reason="M-Pesa charge"),
+        txn("Fuliza M-Pesa", allocated=0, handled_as="loan", handled_reason="Fuliza"),
+        txn(GROCER), txn(GROCER),
+    ]
+
+
+def test_review_groups_all_lists_every_status_pending_first(client, fake_user, fake_pool, review):
+    review(_all_statuses_rows(uuid4()))
+
+    body = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=all").json()
+
+    assert [g["status"] for g in body["items"]] == ["decide", "handled", "handled", "decided", "sorted"]
+    assert body["total"] == 5
+    assert body["row_counts"]["decide"] == 2
+    # Pending groups keep their suggestions on All.
+    assert body["items"][0]["row_count"] == 2
+
+
+def test_review_groups_all_still_sorts_within_a_status(client, fake_user, fake_pool, review):
+    review(_all_statuses_rows(uuid4()))
+
+    items = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=all&sort=amount&order=desc").json()["items"]
+
+    handled = [g for g in items if g["status"] == "handled"]
+    assert [g["handled_as"] for g in handled] == ["charge", "loan"]  # 10 before 0
+    assert items[0]["status"] == "decide"
+
+
+def test_review_groups_each_tab_reports_its_status(client, fake_user, fake_pool, review):
+    review(_all_statuses_rows(uuid4()))
+    for tab in ("decide", "decided", "sorted", "handled"):
+        items = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab={tab}").json()["items"]
+        assert items and {g["status"] for g in items} == {tab}
+
+
+def test_review_groups_approved_is_decided_and_sorted(client, fake_user, fake_pool, review):
+    review(_all_statuses_rows(uuid4()))
+
+    body = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=approved").json()
+
+    assert sorted(g["status"] for g in body["items"]) == ["decided", "sorted"] and body["total"] == 2
+
+
+def test_review_groups_filter_by_handled_as(client, fake_user, fake_pool, review):
+    review(_all_statuses_rows(uuid4()))
+
+    body = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=handled&handled_as=loan").json()
+    assert [g["handled_as"] for g in body["items"]] == ["loan"] and body["total"] == 1
+
+    # On All it narrows to those handled rows only.
+    body = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=all&handled_as=charge").json()
+    assert [(g["status"], g["handled_as"]) for g in body["items"]] == [("handled", "charge")]
+    # Counts stay whatever the filters.
+    assert body["counts"] == {"decide": 1, "decided": 1, "sorted": 1, "handled": 2}
+
+
+def test_review_groups_rejects_an_unknown_handled_as(client, fake_user, fake_pool, review):
+    review([])
+    assert client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=all&handled_as=gift").status_code == 422
+
+
 def test_review_groups_404_for_another_users_import(client, fake_user, fake_pool, review):
     review([])["get_import_for_preview"].return_value = None
     assert client.get(f"/statement-imports/{IMPORT_ID}/groups").status_code == 404
