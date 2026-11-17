@@ -62,6 +62,9 @@ class PayeeGroup(BaseModel):
     # Handled tab only (ab-281).
     handled_as: Literal["charge", "loan", "transfer", "saving"] | None = None
     handled_reason: str | None = None
+    # An import's review only (ab-289): decide = Pending, handled =
+    # Auto-suggested, decided/sorted = Approved (here / some other way).
+    status: Literal["decide", "decided", "sorted", "handled"] | None = None
     rows: list[GroupRow]
 
 

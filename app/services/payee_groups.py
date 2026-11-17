@@ -18,6 +18,9 @@ ALLOWED_PAGE_SIZES = (5, 10, 20, 30)
 DEFAULT_PAGE_SIZE = 30
 SORTS = ("rows", "amount", "payee")
 REVIEW_TABS = ("decide", "decided", "sorted", "handled")
+# The review's All view (ab-289): Pending first, then Auto-suggested
+# (handled at import), then Approved (decided here or sorted earlier).
+STATUS_RANK = {"decide": 0, "handled": 1, "decided": 2, "sorted": 2}
 
 
 def extract_row_keys(rows: list[dict], *, secret: str) -> dict[UUID, RowKey]:
@@ -162,14 +165,19 @@ def select_groups(
     order: str = "desc",
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
+    handled_as: str | None = None,
+    status_first: bool = False,
 ) -> tuple[list[dict], int]:
-    """Filter (money in/out; people/businesses; search), sort, then one
-    page. Returns (page of groups, total groups after filtering)."""
+    """Filter (money in/out; people/businesses; how it was handled;
+    search), sort, then one page. status_first keeps each group's review
+    status together (STATUS_RANK) ahead of the chosen sort. Returns (page
+    of groups, total groups after filtering)."""
     needle = (q or "").strip().lower()
     out = [
         g for g in groups
         if (direction is None or g["direction"] == direction)
         and (kind is None or (kind == "person") == bool(g["is_person"]))
+        and (handled_as is None or g.get("handled_as") == handled_as)
         and (not needle or _matches(g, needle))
     ]
     if sort == "payee":
@@ -180,5 +188,7 @@ def select_groups(
         sort_key = lambda g: (g["row_count"], g["total"])  # noqa: E731
     out.sort(key=lambda g: g["group_key"])  # stable tie-break
     out.sort(key=sort_key, reverse=order == "desc")
+    if status_first:
+        out.sort(key=lambda g: STATUS_RANK[g["status"]])
     start = (page - 1) * page_size
     return out[start:start + page_size], len(out)

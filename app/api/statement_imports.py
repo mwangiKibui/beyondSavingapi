@@ -516,7 +516,8 @@ class ReviewGroupsResponse(BaseModel):
 @router.get("/{import_id}/groups", response_model=ReviewGroupsResponse)
 async def review_groups_endpoint(
     import_id: UUID,
-    tab: Literal["decide", "decided", "sorted", "handled"] = Query(default="decide"),
+    tab: Literal["all", "decide", "decided", "sorted", "handled"] = Query(default="decide"),
+    handled_as: Literal["charge", "loan", "transfer", "saving"] | None = Query(default=None),
     params: ListParams = Depends(list_params),
     user_id: UUID = Depends(get_current_user_id),
     pool: asyncpg.Pool | None = Depends(get_pool),
@@ -524,7 +525,9 @@ async def review_groups_endpoint(
     """The review's payee table (ab-282): one tab of the import's rows,
     grouped by payee. decide = still open (with suggestions); decided =
     filed from this review (each group's apply_id undoes it); sorted =
-    categorised some other way; handled = handled at import (ab-281)."""
+    categorised some other way; handled = handled at import (ab-281);
+    all = every group, each carrying its status, Pending first (ab-289).
+    handled_as narrows to rows handled that way."""
     check_page_size(params)
     _require_pool(pool)
     loaded = await _load_preview(pool, import_id=import_id, user_id=user_id)
@@ -537,7 +540,13 @@ async def review_groups_endpoint(
         t: build_groups(rows, keys=loaded["keys"], preview=preview if t == "decide" else None, category_names=names)
         for t, rows in by_tab.items()
     }
-    items, total = select_groups(grouped[tab], **params.model_dump())
+    for t, groups in grouped.items():
+        for g in groups:
+            g["status"] = t
+    pool_of_groups = [g for t in REVIEW_TABS for g in grouped[t]] if tab == "all" else grouped[tab]
+    items, total = select_groups(
+        pool_of_groups, **params.model_dump(), handled_as=handled_as, status_first=tab == "all"
+    )
     return {
         "items": items,
         "total": total,
