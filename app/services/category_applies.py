@@ -32,6 +32,11 @@ from app.repositories.category_suggestions import (
     upsert_merchant_votes,
     upsert_number_votes,
 )
+from app.repositories.description_keywords import (
+    delete_keyword_choices,
+    get_keyword_choice_rows,
+    save_keyword_choices,
+)
 from app.repositories.payee_groups import (
     count_apply_allocations,
     delete_apply_allocations,
@@ -48,6 +53,7 @@ from app.repositories.payee_groups import (
     restore_snapshot,
 )
 from app.services.allocations import CATEGORY_TYPE_FOR_DIRECTION, AllocationPlan, AllocationRejected
+from app.services.description_keywords import load_keyword_context
 from app.services.category_suggestions import (
     Directory,
     _is_open,
@@ -100,8 +106,10 @@ async def load_suggestions(
     categories = await get_user_categories(conn, user_id=user_id)
     name_keys, number_keys = shared_vote_lookups(rows, keys, directory)
     votes = await get_shared_votes(conn, name_keys=name_keys, number_keys=number_keys)
+    keywords = await load_keyword_context(conn, user_id=user_id, rows=rows)
     preview = build_preview_rows(
-        rows, keys=keys, rules=rules, directory=directory, categories=categories, shared_votes=votes
+        rows, keys=keys, rules=rules, directory=directory, categories=categories, shared_votes=votes,
+        keywords=keywords,
     )
     return keys, {p["transaction_id"]: p for p in preview}, categories, directory
 
@@ -219,8 +227,8 @@ async def apply_groups(
         category = by_cat_id[category_id]
         members = [by_id[t] for t in g.transaction_ids]
         allocatable = [r for r in members if float(r["amount"]) - float(r["allocated"]) > 0]
-        snapshot = await _snapshot(conn, user_id=user_id, rows=members, keys=keys, directory=directory) \
-            if g.remember else {}
+        snapshot = await _snapshot(conn, user_id=user_id, rows=members, keys=keys, directory=directory,
+                                   preview=preview) if g.remember else {}
         apply_id = await insert_apply(
             conn, user_id=user_id, import_id=statement_import["id"] if statement_import else None,
             category_id=category_id, group_key=gk, remember=g.remember, snapshot=snapshot,
@@ -241,7 +249,7 @@ async def apply_groups(
         plan.skipped.extend(skipped)
         if g.remember and allocatable:
             await _remember(conn, user_id=user_id, rows=allocatable, keys=keys, directory=directory,
-                            category=category, per_line=g.per_line)
+                            category=category, per_line=g.per_line, preview=preview)
             remembered.append(len(results))
         results.append({
             "apply_id": apply_id,
@@ -295,7 +303,18 @@ def _split_by_suggestion(groups: list[ApplyGroup], group_keys: list[str], previe
     return out_groups, out_keys
 
 
-async def _snapshot(conn, *, user_id: UUID, rows: list[dict], keys: dict, directory: Directory) -> dict:
+def _matched_keywords(rows: list[dict], preview: dict) -> dict[UUID, dict]:
+    """Description keywords (ab-290) the rows matched, by keyword id."""
+    out = {}
+    for r in rows:
+        match = (preview.get(r["id"]) or {}).get("keyword_match")
+        if match:
+            out[match["id"]] = match
+    return out
+
+
+async def _snapshot(conn, *, user_id: UUID, rows: list[dict], keys: dict, directory: Directory,
+                    preview: dict | None = None) -> dict:
     """The user's saved choices and votes the apply is about to change."""
     rule_keys, merchant_keys, number_keys = {}, {}, {}
     for r in rows:
@@ -320,9 +339,12 @@ async def _snapshot(conn, *, user_id: UUID, rows: list[dict], keys: dict, direct
                for v in await get_merchant_votes(conn, user_id=user_id, keys=merchant_keys)}
     n_votes = {(v["number_kind"], v["number"], v["direction"]): v["category_name"]
                for v in await get_number_votes(conn, user_id=user_id, keys=number_keys)}
+    keyword_ids = sorted(_matched_keywords(rows, preview or {}), key=str)
     return {
         "rule_keys": rule_keys,
         "rules": rules,
+        "keyword_ids": keyword_ids,
+        "keyword_choices": await get_keyword_choice_rows(conn, user_id=user_id, keyword_ids=keyword_ids),
         "merchant_votes": [dict(k, category_name=m_votes.get((k["merchant_key"], k["direction"])))
                            for k in merchant_keys],
         "number_votes": [dict(k, category_name=n_votes.get((k["number_kind"], k["number"], k["direction"])))
@@ -331,9 +353,12 @@ async def _snapshot(conn, *, user_id: UUID, rows: list[dict], keys: dict, direct
 
 
 async def _remember(conn, *, user_id: UUID, rows: list[dict], keys: dict, directory: Directory,
-                    category: dict, per_line: bool = False) -> None:
+                    category: dict, per_line: bool = False, preview: dict | None = None) -> None:
     """Top saved choice per payee key (one per account reference), plus
-    the shared votes a confirm would cast for business payees."""
+    the shared votes a confirm would cast for business payees, plus the
+    user's choice for any description keyword the rows matched (ab-290)."""
+    if not per_line:
+        await _remember_keywords(conn, user_id=user_id, rows=rows, preview=preview or {}, category=category)
     preferences: dict[tuple, dict] = {}
     amounts: dict[tuple, list[float]] = {}
     for r in rows:
@@ -364,6 +389,17 @@ async def _remember(conn, *, user_id: UUID, rows: list[dict], keys: dict, direct
     )
     await upsert_merchant_votes(conn, user_id=user_id, votes=learning.merchant_votes)
     await upsert_number_votes(conn, user_id=user_id, votes=learning.number_votes)
+
+
+async def _remember_keywords(conn, *, user_id: UUID, rows: list[dict], preview: dict, category: dict) -> None:
+    """Filed the list's way: the user follows the list again. Filed another
+    way: that becomes the user's own choice for the keyword."""
+    matched = _matched_keywords(rows, preview)
+    chosen = category["name"].strip().lower()
+    same = [k for k, m in matched.items() if m["category_name"].strip().lower() == chosen]
+    other = [k for k in matched if k not in same]
+    await delete_keyword_choices(conn, user_id=user_id, keyword_ids=same)
+    await save_keyword_choices(conn, user_id=user_id, keyword_ids=other, category_id=category["id"])
 
 
 async def _waiting_counts(conn, *, user_id: UUID, secret: str, exclude: set[UUID]) -> Counter:

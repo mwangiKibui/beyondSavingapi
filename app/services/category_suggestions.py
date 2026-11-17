@@ -13,9 +13,12 @@ Order, first hit wins:
                      one category clearly leads (no admin gate, 2026-11-10);
                      overrides the shared list
   4. directory       an approved shared-list merchant (starter or admin)
-Shared categories (3 and 4) are mapped by NAME to the user's own category,
+  5. keyword         a meaningful word in the description (ab-290, see
+                     description_keywords): the user's own choice for it,
+                     else what 3+ users agreed on, else the list's category
+Shared categories (3-5) are mapped by NAME to the user's own category,
 or suggested as a new category when the user has none by that name.
-(AI suggestions, ab-256, will slot in after 4.)
+(AI suggestions, ab-256, will slot in after 5.)
 """
 
 import hashlib
@@ -24,11 +27,13 @@ import re
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
 from uuid import UUID
 
-from app.repositories.categories import DIVIDENDS_CATEGORY
-from app.services.row_handling import is_savings_earning
 from app.services.merchant_keys import RowKey, extract_key
+
+if TYPE_CHECKING:
+    from app.services.description_keywords import Keyword, KeywordContext
 
 CATEGORY_TYPE_FOR_DIRECTION = {"out": "expense", "in": "income"}
 
@@ -442,10 +447,12 @@ def build_preview_rows(
     directory: Directory,
     categories: list[dict],
     shared_votes: dict[tuple, list[dict]] | None = None,
+    keywords: "KeywordContext | None" = None,
 ) -> list[dict]:
     """rows: every transaction in the import, each with its allocated
     total and (when its allocations use exactly one category) category_id.
     shared_votes: vote totals keyed by vote_keys() tuples.
+    keywords: description keywords (ab-290), the last source before AI.
     Returns the open rows - nothing allocated yet, not a transfer - each
     with its suggestion or None."""
     shared_votes = shared_votes or {}
@@ -519,10 +526,11 @@ def build_preview_rows(
                 suggestion = _shared(merchant.category_name, by_name, wanted_type, "directory")
                 suggestion["merchant_name"] = merchant.display_name
 
-        # ab-259: dividends and interest the savings earned - suggested,
-        # never filed without the user.
-        if suggestion is None and direction == "in" and is_savings_earning(row["description"]):
-            suggestion = _shared(DIVIDENDS_CATEGORY, by_name, wanted_type, "directory")
+        # ab-290: meaningful words in the description (SALARY -> Salary;
+        # dividends and interest, ab-259). Suggested, never filed alone.
+        keyword = keywords.keywords.match(row["description"], direction) if keywords else None
+        if suggestion is None and keyword:
+            suggestion = _keyword_suggestion(keyword, keywords, by_id, by_name, wanted_type)
 
         out.append({
             "transaction_id": row["id"],
@@ -543,8 +551,29 @@ def build_preview_rows(
             "row_kind": key.row_kind,
             "paid_with_overdraft": key.paid_with_overdraft,
             "suggestion": suggestion,
+            # Which keyword the description matched, for learning the
+            # user's choice when they file the row.
+            "keyword_match": {"id": keyword.id, "category_name": keyword.category_name} if keyword else None,
         })
     return out
+
+
+def _keyword_suggestion(
+    keyword: "Keyword", ctx: "KeywordContext", by_id: dict, by_name: dict, wanted_type: str
+) -> dict:
+    """The user's own choice for the keyword, else what 3+ users agreed
+    on, else the list's category."""
+    from app.services.description_keywords import pick_shared_keyword
+
+    own = by_id.get(ctx.choices.get(keyword.id))
+    if own and own["type"] == wanted_type:
+        suggestion = _existing(own, "your_rule")
+    elif shared := pick_shared_keyword(ctx.shared.get(keyword.id, [])):
+        suggestion = _shared(shared, by_name, wanted_type, "others")
+    else:
+        suggestion = _shared(keyword.category_name, by_name, wanted_type, "keyword")
+    suggestion["keyword"] = keyword.word
+    return suggestion
 
 
 def _display_name(key: RowKey, known_as: str | None, description: str | None) -> str:

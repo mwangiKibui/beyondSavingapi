@@ -9,6 +9,8 @@ from uuid import UUID
 
 import asyncpg
 
+from app.repositories.description_keywords import restore_keyword_choices
+
 # Rows a user still has to categorise: statement rows with nothing
 # allocated, not a transfer leg, not handled at import, and not part of an
 # import whose review is still open (those wait in that review instead).
@@ -228,6 +230,11 @@ async def get_number_votes(conn: asyncpg.Connection, *, user_id: UUID, keys: lis
 async def restore_snapshot(conn: asyncpg.Connection, *, user_id: UUID, snapshot: dict) -> None:
     """Puts the user's saved choices and shared votes for the snapshotted
     keys back exactly as they were before the apply."""
+    # ab-290: description keyword choices (absent from older snapshots).
+    keyword_ids = [UUID(str(k)) for k in snapshot.get("keyword_ids") or []]
+    await restore_keyword_choices(
+        conn, user_id=user_id, keyword_ids=keyword_ids, choices=snapshot.get("keyword_choices") or []
+    )
     rule_keys = snapshot.get("rule_keys") or []
     if rule_keys:
         await conn.execute(
