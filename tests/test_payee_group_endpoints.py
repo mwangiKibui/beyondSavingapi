@@ -571,3 +571,23 @@ def test_apply_rejects_bad_refunds(client, fake_user, fake_pool, applies, payloa
     response = client.post("/category-applies", json=payload)
     assert response.status_code == 422 and response.json()["detail"] == detail
     applies["apply_groups"].assert_not_awaited()
+
+
+def test_review_lines_carry_account_sub_ledger_kind_and_other_side(client, fake_user, fake_pool, review):
+    """ab-288, through the real response: what the Allocation drawer needs."""
+    account, ledger, reason = uuid4(), uuid4(), uuid4()
+    review([
+        txn("Deposit", direction="in", account_id=account, sub_ledger_id=ledger, sub_ledger_name="Deposits",
+            sub_ledger_role="spending"),
+        txn("Customer Transfer to 0700000000", allocated=100, apply_id=uuid4(), applied_here=True,
+            transfer_reason_id=reason, transfer_reason_name="Between my accounts",
+            source_account_name="Equity Savings", account_id=account),
+    ])
+    body = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=decide").json()
+    [line] = body["items"][0]["rows"]
+    assert (line["account_id"], line["sub_ledger_id"], line["sub_ledger_name"], line["sub_ledger_role"]) == (
+        str(account), str(ledger), "Deposits", "spending")
+    assert body["items"][0]["sub_ledger_id"] == str(ledger)
+
+    [filed] = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=decided").json()["items"][0]["rows"]
+    assert (filed["kind"], filed["other_side"], filed["account_id"]) == ("transfer", "Equity Savings", str(account))
