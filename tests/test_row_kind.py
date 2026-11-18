@@ -164,3 +164,18 @@ def test_golden_dashboard_matches_the_report():
     report = build_report(FIXTURE, currency="KES")
     assert (dash["total_in"], dash["total_out"], dash["total_saving"]) == (
         report["total_in"], report["total_out"], report["total_saving"])
+
+
+def test_a_transfer_split_with_a_saving_part_is_netted_out_whole_everywhere():
+    """A row split between a transfer and a saving category counts nowhere,
+    in the report and the dashboard alike."""
+    rows = txn("out", 5000, [(None, uuid4(), 3000), (SAVE, None, 2000)])
+    report = build_report(rows, currency="KES")
+    assert (report["total_out"], report["total_saving"]) == (D("0"), D("0"))
+    from app.services.row_kind import transaction_saving
+    dash = build_dashboard([{
+        "account_id": ACC, "account_nickname": "M-Pesa", "transaction_id": rows[0]["transaction_id"],
+        "txn_amount": D("5000"), "direction": "out", "kind": transaction_kind(rows),
+        "saving": transaction_saving(rows),
+    }], total_budget=D("0"), currency="KES")
+    assert (dash["total_out"], dash["total_saving"]) == (D("0"), D("0"))

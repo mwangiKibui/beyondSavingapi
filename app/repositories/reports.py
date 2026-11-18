@@ -169,7 +169,9 @@ def build_report(rows: list[dict], *, currency: str) -> dict:
             ZERO,
         )
 
-        saving = transaction_saving(alloc_rows)
+        # A transfer or borrowed money is netted out whole, its saving part
+        # too - the same as the dashboard (ab-287).
+        saving = transaction_saving(alloc_rows) if kind in ("counted", "saving") else ZERO
         total_saving += saving
         if kind == "counted":
             if direction == "in":
