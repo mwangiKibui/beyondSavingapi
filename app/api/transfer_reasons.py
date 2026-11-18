@@ -33,6 +33,8 @@ class TransferReasonResponse(BaseModel):
     id: UUID
     name: str
     is_default: bool
+    # 'in', 'out', or None for either way (ab-285).
+    direction: str | None = None
     created_at: datetime
 
 
@@ -40,6 +42,7 @@ class TransferReasonListItem(BaseModel):
     id: UUID
     name: str
     is_default: bool
+    direction: str | None = None
 
 
 class TransferReasonListResponse(BaseModel):

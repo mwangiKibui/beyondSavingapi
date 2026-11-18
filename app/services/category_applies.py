@@ -24,6 +24,7 @@ from app.repositories.category_suggestions import (
     get_blocked_numbers,
     get_import_rows,
     get_learned_names,
+    get_owner,
     get_shared_votes,
     get_user_categories,
     get_user_rules,
@@ -32,6 +33,9 @@ from app.repositories.category_suggestions import (
     upsert_merchant_votes,
     upsert_number_votes,
 )
+from app.repositories.accounts import DuplicateAccount, create_account, get_account
+from app.repositories.row_handling import get_or_create_transfer_reason
+from app.repositories.transfer_reasons import get_user_transfer_reasons
 from app.repositories.description_keywords import (
     delete_keyword_choices,
     get_keyword_choice_rows,
@@ -41,6 +45,7 @@ from app.repositories.payee_groups import (
     count_apply_allocations,
     delete_apply_allocations,
     delete_apply_line_allocations,
+    get_apply_source,
     get_merchant_votes,
     get_number_votes,
     get_rule_rows,
@@ -53,6 +58,7 @@ from app.repositories.payee_groups import (
     restore_snapshot,
 )
 from app.services.allocations import CATEGORY_TYPE_FOR_DIRECTION, AllocationPlan, AllocationRejected
+from app.services.import_handling import pair_hand_filed_transfers, unpair_hand_filed
 from app.services.description_keywords import load_keyword_context
 from app.services.category_suggestions import (
     Directory,
@@ -66,7 +72,13 @@ from app.services.category_suggestions import (
     vote_keys,
 )
 from app.services.merchant_keys import RowKey
-from app.services.payee_groups import build_groups, extract_row_keys, group_suggestion, payee_group_key
+from app.services.payee_groups import (
+    _suggestion_id,
+    build_groups,
+    extract_row_keys,
+    group_suggestion,
+    payee_group_key,
+)
 from app.services.suggestion_learning import ConfirmedRow, plan_learning
 
 
@@ -80,6 +92,14 @@ class ApplyGroup:
     # ab-292: a choice for one line of a payee - remember learns softly
     # (learn_rules) and casts no shared vote.
     per_line: bool = False
+    # ab-285: file the rows as a Funds transfer under this reason instead.
+    transfer_reason_id: UUID | None = None
+    # ab-285, transfers only - the other side, at most one of: one of the
+    # user's accounts, an account added now (nickname, account_type,
+    # provider, account_number, currency), or someone else (private name).
+    other_account_id: UUID | None = None
+    new_account: dict | None = None
+    someone_else_name: str | None = None
     # Internal: the suggestion use_suggestion resolved to for these rows.
     suggestion: dict | None = None
 
@@ -90,6 +110,20 @@ class ApplyResult:
     created_categories: list[dict]
     plan: AllocationPlan = field(repr=False)
     transactions_by_id: dict = field(repr=False)
+    created_accounts: list[dict] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _Target:
+    """What one group files under: a category or a transfer reason."""
+    kind: str  # "category" | "transfer"
+    id: UUID
+
+
+def _is_transfer(g: ApplyGroup) -> bool:
+    return g.transfer_reason_id is not None or bool(
+        g.use_suggestion and g.suggestion and g.suggestion.get("kind") == "transfer"
+    )
 
 
 async def load_suggestions(
@@ -107,9 +141,11 @@ async def load_suggestions(
     name_keys, number_keys = shared_vote_lookups(rows, keys, directory)
     votes = await get_shared_votes(conn, name_keys=name_keys, number_keys=number_keys)
     keywords = await load_keyword_context(conn, user_id=user_id, rows=rows)
+    reasons = await get_user_transfer_reasons(conn, user_id=user_id)
+    owner = await get_owner(conn, user_id=user_id)
     preview = build_preview_rows(
         rows, keys=keys, rules=rules, directory=directory, categories=categories, shared_votes=votes,
-        keywords=keywords,
+        keywords=keywords, reasons=reasons, owner=owner,
     )
     return keys, {p["transaction_id"]: p for p in preview}, categories, directory
 
@@ -179,10 +215,22 @@ async def apply_groups(
     by_cat_id = {c["id"]: c for c in categories}
     by_name = {_name_key(c["name"], c["type"]): c for c in categories}
 
-    # Each group's target: an existing category id, or a name to get-or-create.
+    # Each group's target: an existing category id, or a name to get-or-create,
+    # or a transfer reason (ab-285) by id or by name.
     targets: list[tuple[str, object]] = []
     to_create: dict[tuple[str, str], str] = {}
     for g in groups:
+        has_other_side = g.other_account_id is not None or g.new_account is not None or g.someone_else_name
+        if has_other_side and not _is_transfer(g):
+            raise AllocationRejected(422, "Only a Funds transfer takes where the money came from or went to")
+        if g.transfer_reason_id is not None:
+            targets.append(("reason", g.transfer_reason_id))
+            continue
+        if g.use_suggestion and g.suggestion.get("kind") == "transfer":
+            s = g.suggestion
+            targets.append(("reason", s["transfer_reason_id"]) if s["transfer_reason_id"] is not None
+                           else ("reason_name", s["category_name"]))
+            continue
         wanted = CATEGORY_TYPE_FOR_DIRECTION[by_id[g.transaction_ids[0]]["direction"]]
         name = None
         if g.use_suggestion:
@@ -210,21 +258,39 @@ async def apply_groups(
         by_cat_id[c["id"]] = c
         by_name[_name_key(c["name"], c["type"])] = c
 
-    category_ids = [by_name[value]["id"] if kind == "name" else value for kind, value in targets]
-    for g, category_id in zip(groups, category_ids):
-        category = by_cat_id.get(category_id)
+    reasons = await _resolve_reasons(conn, user_id=user_id, targets=targets)
+    resolved: list[_Target] = []
+    for g, (kind, value) in zip(groups, targets):
+        direction = by_id[g.transaction_ids[0]]["direction"]
+        if kind in ("reason", "reason_name"):
+            reason = reasons.get(value)
+            if reason is None:
+                raise AllocationRejected(404, "Transfer reason not found")
+            if reason["direction"] not in (None, direction):
+                raise AllocationRejected(422, "That transfer reason is for money going the other way")
+            resolved.append(_Target("transfer", reason["id"]))
+            continue
+        category = by_cat_id.get(by_name[value]["id"] if kind == "name" else value)
         if category is None:
             raise AllocationRejected(404, "Category not found")
-        if category["type"] != CATEGORY_TYPE_FOR_DIRECTION[by_id[g.transaction_ids[0]]["direction"]]:
+        if category["type"] != CATEGORY_TYPE_FOR_DIRECTION[direction]:
             raise AllocationRejected(
                 422, "A category's type doesn't match one of the selected transactions' direction"
             )
+        resolved.append(_Target("category", category["id"]))
+    reasons_by_id = {r["id"]: r for r in reasons.values()}
+
+    others, created_accounts = await _resolve_other_sides(conn, user_id=user_id, groups=groups, rows_by_id=by_id)
 
     plan = AllocationPlan()
     results = []
     remembered = []
-    for g, gk, category_id in zip(groups, group_keys, category_ids):
-        category = by_cat_id[category_id]
+    for g, gk, target, other in zip(groups, group_keys, resolved, others):
+        is_transfer = target.kind == "transfer"
+        category = None if is_transfer else by_cat_id[target.id]
+        reason = reasons_by_id[target.id] if is_transfer else None
+        category_id = None if is_transfer else target.id
+        reason_id = target.id if is_transfer else None
         members = [by_id[t] for t in g.transaction_ids]
         allocatable = [r for r in members if float(r["amount"]) - float(r["allocated"]) > 0]
         snapshot = await _snapshot(conn, user_id=user_id, rows=members, keys=keys, directory=directory,
@@ -232,42 +298,113 @@ async def apply_groups(
         apply_id = await insert_apply(
             conn, user_id=user_id, import_id=statement_import["id"] if statement_import else None,
             category_id=category_id, group_key=gk, remember=g.remember, snapshot=snapshot,
+            transfer_reason_id=reason_id,
         )
         if allocatable:
             amounts = [float(r["amount"]) - float(r["allocated"]) for r in allocatable]
             await insert_applied_allocations(
                 conn, apply_id=apply_id, transaction_ids=[r["id"] for r in allocatable], category_id=category_id,
-                amounts=amounts, currencies=[r["currency"] for r in allocatable],
+                amounts=amounts, currencies=[r["currency"] for r in allocatable], transfer_reason_id=reason_id,
+                source_account_id=other["account_id"], source_description=other["description"],
             )
             for r, amount in zip(allocatable, amounts):
-                plan.transaction_ids.append(r["id"])
-                plan.category_ids.append(category_id)
-                plan.amounts.append(amount)
-                plan.currencies.append(r["currency"])
+                # Transfers are never spending or income: no budget alerts.
+                if not is_transfer:
+                    plan.transaction_ids.append(r["id"])
+                    plan.category_ids.append(category_id)
+                    plan.amounts.append(amount)
+                    plan.currencies.append(r["currency"])
                 plan.updated.append(r["id"])
         skipped = [r["id"] for r in members if r not in allocatable]
         plan.skipped.extend(skipped)
         if g.remember and allocatable:
-            await _remember(conn, user_id=user_id, rows=allocatable, keys=keys, directory=directory,
-                            category=category, per_line=g.per_line, preview=preview)
+            if is_transfer:
+                await _remember_transfer(conn, user_id=user_id, rows=allocatable, keys=keys, directory=directory,
+                                         reason_id=reason_id, per_line=g.per_line)
+            else:
+                await _remember(conn, user_id=user_id, rows=allocatable, keys=keys, directory=directory,
+                                category=category, per_line=g.per_line, preview=preview)
             remembered.append(len(results))
         results.append({
             "apply_id": apply_id,
             "group_key": gk,
             "category_id": category_id,
-            "category_name": category["name"],
+            "category_name": category["name"] if category else None,
+            "transfer_reason_id": reason_id,
+            "transfer_reason_name": reason["name"] if reason else None,
+            "other_account_id": other["account_id"],
             "remember": g.remember,
             "allocated": [r["id"] for r in allocatable],
             "skipped": skipped,
             "earlier_waiting": 0,
         })
 
+    # ab-285: a transfer from/to one of the user's accounts pairs with that
+    # account's row when its statement is already uploaded.
+    if any(o["account_id"] is not None for o in others):
+        await pair_hand_filed_transfers(conn, user_id=user_id)
+
     if remembered:
         waiting = await _waiting_counts(conn, user_id=user_id, secret=secret, exclude=set(all_ids))
         for i in remembered:
             results[i]["earlier_waiting"] = waiting.get(results[i]["group_key"], 0)
 
-    return ApplyResult(groups=results, created_categories=created, plan=plan, transactions_by_id=by_id)
+    return ApplyResult(groups=results, created_categories=created, plan=plan, transactions_by_id=by_id,
+                       created_accounts=created_accounts)
+
+
+async def _resolve_reasons(conn, *, user_id: UUID, targets: list[tuple[str, object]]) -> dict:
+    """The user's transfer reasons the targets name, keyed by the target
+    value (id or name). A suggested reason the user doesn't have yet (e.g.
+    "Between my accounts") is created, for either direction."""
+    if not any(kind in ("reason", "reason_name") for kind, _ in targets):
+        return {}
+    mine = await get_user_transfer_reasons(conn, user_id=user_id)
+    by_id = {r["id"]: r for r in mine}
+    by_lower = {r["name"].strip().lower(): r for r in mine}
+    out = {}
+    for kind, value in targets:
+        if kind == "reason" and value in by_id:
+            out[value] = by_id[value]
+        elif kind == "reason_name":
+            reason = by_lower.get(value.strip().lower())
+            if reason is None:
+                rid = await get_or_create_transfer_reason(conn, user_id=user_id, name=value.strip())
+                reason = {"id": rid, "name": value.strip(), "direction": None}
+                by_lower[value.strip().lower()] = reason
+            out[value] = reason
+    return out
+
+
+async def _resolve_other_sides(conn, *, user_id: UUID, groups: list[ApplyGroup], rows_by_id: dict):
+    """Each transfer group's other side as {account_id, description}. The
+    account must be the user's (two-user isolation) and not the rows' own
+    account; an account added from the drawer is created here, in the same
+    save, with the same checks as POST /accounts."""
+    out, created = [], []
+    for g in groups:
+        given = sum([g.other_account_id is not None, g.new_account is not None, bool(g.someone_else_name)])
+        if given > 1:
+            raise AllocationRejected(422, "Pick one of: one of your accounts, a new account, or someone else")
+        own_accounts = {rows_by_id[t]["account_id"] for t in g.transaction_ids}
+        account_id = None
+        if g.other_account_id is not None:
+            if await get_account(conn, account_id=g.other_account_id, user_id=user_id) is None:
+                raise AllocationRejected(422, "Account not found")
+            account_id = g.other_account_id
+        elif g.new_account is not None:
+            new = dict(g.new_account)
+            new["currency"] = new.get("currency") or rows_by_id[g.transaction_ids[0]]["currency"]
+            try:
+                account = await create_account(conn, user_id=user_id, **new)
+            except DuplicateAccount:
+                raise AllocationRejected(409, "An account with that number already exists") from None
+            created.append(account)
+            account_id = account["id"]
+        if account_id is not None and account_id in own_accounts:
+            raise AllocationRejected(422, "Pick a different account from the one these rows are on")
+        out.append({"account_id": account_id, "description": g.someone_else_name or None})
+    return out, created
 
 
 def _split_by_suggestion(groups: list[ApplyGroup], group_keys: list[str], preview: dict):
@@ -291,9 +428,9 @@ def _split_by_suggestion(groups: list[ApplyGroup], group_keys: list[str], previe
             s = own[t] or fallback
             if s is None:
                 raise AllocationRejected(422, "One of the groups has no suggestion")
-            sid = (s["category_id"], s["category_name"].strip().lower())
+            sid = _suggestion_id(s)
             split.setdefault(sid, (s, []))[1].append(t)
-        main = fallback and (fallback["category_id"], fallback["category_name"].strip().lower())
+        main = fallback and _suggestion_id(fallback)
         for sid, (s, ids) in split.items():
             # Only the group's main category becomes the payee's default;
             # the others learn as line choices (no forced top, no vote).
@@ -391,10 +528,34 @@ async def _remember(conn, *, user_id: UUID, rows: list[dict], keys: dict, direct
     await upsert_number_votes(conn, user_id=user_id, votes=learning.number_votes)
 
 
+async def _remember_transfer(conn, *, user_id: UUID, rows: list[dict], keys: dict, directory: Directory,
+                             reason_id: UUID, per_line: bool = False) -> None:
+    """ab-285: a remembered transfer is a private saved choice only - no
+    shared merchant/number vote and no keyword learning, for any payee."""
+    preferences: dict[tuple, dict] = {}
+    amounts: dict[tuple, list[float]] = {}
+    for r in rows:
+        key = keys[r["id"]]
+        rk = rule_key(key, directory)
+        if rk is None:
+            continue
+        k = (*rk, key.account_hash, r["direction"])
+        preferences[k] = {
+            "key_kind": rk[0], "key_value": rk[1], "provider": rk[2], "account_hash": key.account_hash,
+            "direction": r["direction"], "category_id": None, "transfer_reason_id": reason_id,
+        }
+        amounts.setdefault(k, []).append(float(r["amount"]))
+    for k, p in preferences.items():
+        p["amount"] = sum(amounts[k]) / len(amounts[k])
+    save = learn_rules if per_line else set_preferred_rules
+    await save(conn, user_id=user_id, preferences=list(preferences.values()))
+
+
 async def _remember_keywords(conn, *, user_id: UUID, rows: list[dict], preview: dict, category: dict) -> None:
     """Filed the list's way: the user follows the list again. Filed another
     way: that becomes the user's own choice for the keyword."""
-    matched = _matched_keywords(rows, preview)
+    # Transfer wording (ab-285) is too general to learn a category from.
+    matched = {k: m for k, m in _matched_keywords(rows, preview).items() if m.get("target", "category") == "category"}
     chosen = category["name"].strip().lower()
     same = [k for k, m in matched.items() if m["category_name"].strip().lower() == chosen]
     other = [k for k in matched if k not in same]
@@ -409,8 +570,11 @@ async def _waiting_counts(conn, *, user_id: UUID, secret: str, exclude: set[UUID
     return Counter(payee_group_key(keys[r["id"]], r["direction"], r["id"]) for r in rows)
 
 
-async def undo_apply(conn: asyncpg.Connection, *, user_id: UUID, apply_id: UUID) -> list[UUID]:
-    """Returns the rows that are open again."""
+async def undo_apply(
+    conn: asyncpg.Connection, *, user_id: UUID, apply_id: UUID, secret: str | None = None
+) -> list[UUID]:
+    """Returns the rows that are open again (a paired transfer's other
+    side included, when it goes back to the review - ab-285)."""
     applied = await lock_apply(conn, apply_id=apply_id, user_id=user_id)
     if applied is None:
         raise AllocationRejected(404, "Not found")
@@ -420,11 +584,14 @@ async def undo_apply(conn: asyncpg.Connection, *, user_id: UUID, apply_id: UUID)
     if applied["remember"]:
         await restore_snapshot(conn, user_id=user_id, snapshot=applied["snapshot"])
     await mark_apply_undone(conn, apply_id=apply_id)
+    if applied.get("transfer_reason_id") is not None and secret is not None:
+        reopened += await unpair_hand_filed(conn, user_id=user_id, transaction_ids=reopened, secret=secret)
     return reopened
 
 
 async def reopen_lines(
-    conn: asyncpg.Connection, *, user_id: UUID, apply_id: UUID, transaction_ids: list[UUID]
+    conn: asyncpg.Connection, *, user_id: UUID, apply_id: UUID, transaction_ids: list[UUID],
+    secret: str | None = None,
 ) -> list[UUID]:
     """ab-292: puts some lines of an apply back to open, e.g. to file one
     line differently. The rest stay filed and the saved choices stand;
@@ -441,6 +608,8 @@ async def reopen_lines(
         if applied["remember"]:
             await restore_snapshot(conn, user_id=user_id, snapshot=applied["snapshot"])
         await mark_apply_undone(conn, apply_id=apply_id)
+    if applied.get("transfer_reason_id") is not None and secret is not None:
+        reopened += await unpair_hand_filed(conn, user_id=user_id, transaction_ids=reopened, secret=secret)
     return reopened
 
 
@@ -458,7 +627,12 @@ async def apply_earlier(conn: asyncpg.Connection, *, user_id: UUID, apply_id: UU
     waiting = [r["id"] for r in rows if payee_group_key(keys[r["id"]], r["direction"], r["id"]) == applied["group_key"]]
     if not waiting:
         return ApplyResult(groups=[], created_categories=[], plan=AllocationPlan(), transactions_by_id={})
-    return await apply_groups(
-        conn, user_id=user_id, secret=secret,
-        groups=[ApplyGroup(transaction_ids=waiting, category_id=applied["category_id"])],
-    )
+    if applied.get("transfer_reason_id") is not None:
+        source = await get_apply_source(conn, apply_id=apply_id)
+        group = ApplyGroup(
+            transaction_ids=waiting, transfer_reason_id=applied["transfer_reason_id"],
+            other_account_id=source["source_account_id"], someone_else_name=source["source_description"],
+        )
+    else:
+        group = ApplyGroup(transaction_ids=waiting, category_id=applied["category_id"])
+    return await apply_groups(conn, user_id=user_id, secret=secret, groups=[group])

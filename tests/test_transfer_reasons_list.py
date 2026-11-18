@@ -13,6 +13,7 @@ SAMPLE_ITEM = {
     "id": str(uuid4()),
     "name": "Loan Repayment",
     "is_default": True,
+    "direction": "out",
 }
 
 

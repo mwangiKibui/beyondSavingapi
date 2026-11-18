@@ -126,6 +126,33 @@ def _loan_or_charge(*, provider: str, description: str | None, direction: str, k
 PAIR_WINDOW_DAYS = 2
 
 
+def plan_hand_pairs(legs: list[dict], candidates: list[dict]) -> list[tuple[dict, dict]]:
+    """ab-285: pairs each row filed by hand as a transfer from/to one of the
+    user's accounts with the row on THAT account going the other way: same
+    amount, within PAIR_WINDOW_DAYS, not on a loan or locked-savings
+    ledger. Closest date wins, then a waiting leg over an open row; each
+    row pairs at most once."""
+    used: set = set()
+    pairs = []
+    for leg in sorted(legs, key=lambda r: (r["txn_date"], str(r["id"]))):
+        options = []
+        for c in candidates:
+            if c["id"] in used or c["account_id"] != leg["source_account_id"]:
+                continue
+            if c["direction"] == leg["direction"] or float(c["amount"]) != float(leg["amount"]):
+                continue
+            gap = abs((c["txn_date"] - leg["txn_date"]).days)
+            if gap > PAIR_WINDOW_DAYS or c.get("sub_ledger_role") not in (None, "spending"):
+                continue
+            options.append((gap, 0 if c.get("handled_as") == "transfer" else 1, str(c["id"]), c))
+        if not options:
+            continue
+        other = min(options, key=lambda o: o[:3])[3]
+        used.add(other["id"])
+        pairs.append((leg, other))
+    return pairs
+
+
 def plan_pairs(legs: list[dict], candidates: list[dict]) -> list[tuple[dict, dict]]:
     """Pairs each waiting transfer leg with one row on another of the
     user's accounts: at the leg's target provider, the other direction,

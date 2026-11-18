@@ -53,7 +53,8 @@ def review_tab(row: dict) -> str:
 
 
 def _suggestion_id(s: dict) -> tuple:
-    return (s["category_id"], s["category_name"].strip().lower())
+    # A Funds transfer (ab-285) never merges with a category of the same name.
+    return (s.get("kind", "category"), s["category_id"], s["category_name"].strip().lower())
 
 
 def group_suggestion(suggestions: list[dict | None]) -> dict | None:
@@ -134,6 +135,9 @@ def build_groups(
             "suggestion": group_suggestion([preview.get(r["id"], {}).get("suggestion") for r in members]),
             "category_id": category_id,
             "category_name": category_names.get(category_id) if category_id else None,
+            # ab-285: every row filed as a Funds transfer under one reason.
+            "transfer_reason_id": _same([r.get("transfer_reason_id") for r in members]),
+            "transfer_reason_name": _same([r.get("transfer_reason_name") for r in members]),
             "apply_id": _same([r.get("apply_id") for r in members]),
             "handled_as": latest.get("handled_as"),
             "handled_reason": _same([r.get("handled_reason") for r in members]),
@@ -149,6 +153,8 @@ def build_groups(
                     "status": statuses[i] if with_status else None,
                     "category_id": r.get("category_id"),
                     "category_name": category_names.get(r.get("category_id")) if r.get("category_id") else None,
+                    "transfer_reason_id": r.get("transfer_reason_id"),
+                    "transfer_reason_name": r.get("transfer_reason_name"),
                     "apply_id": r.get("apply_id"),
                     "suggestion": preview.get(r["id"], {}).get("suggestion"),
                 }

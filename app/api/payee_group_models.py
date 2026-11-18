@@ -29,6 +29,8 @@ class GroupRow(BaseModel):
     status: Literal["decide", "decided", "sorted", "handled"] | None = None
     category_id: UUID | None = None
     category_name: str | None = None
+    transfer_reason_id: UUID | None = None
+    transfer_reason_name: str | None = None
     apply_id: UUID | None = None
     suggestion: "GroupSuggestion | None" = None
 
@@ -38,10 +40,16 @@ class GroupSuggestion(BaseModel):
     category_id: UUID | None = None
     category_name: str
     is_new_category: bool
-    source: Literal["your_rule", "this_statement", "others", "directory", "keyword"]
+    # own_account (ab-285): money in sent by the user themselves.
+    source: Literal["your_rule", "this_statement", "others", "directory", "keyword", "own_account"]
     merchant_name: str | None = None
     # ab-290: the description keyword behind it ("salary"), if any.
     keyword: str | None = None
+    # ab-285: "transfer" = file as a Funds transfer; category_name then
+    # holds the reason's name, and transfer_reason_id is None when the
+    # reason gets created on approval.
+    kind: Literal["category", "transfer"] = "category"
+    transfer_reason_id: UUID | None = None
 
 
 class PayeeGroup(BaseModel):
@@ -67,6 +75,9 @@ class PayeeGroup(BaseModel):
     # same apply (undo it with DELETE /category-applies/{apply_id}).
     category_id: UUID | None = None
     category_name: str | None = None
+    # ab-285: every row filed as a Funds transfer under this reason.
+    transfer_reason_id: UUID | None = None
+    transfer_reason_name: str | None = None
     apply_id: UUID | None = None
     # Handled tab only (ab-281).
     handled_as: Literal["charge", "loan", "transfer", "saving"] | None = None

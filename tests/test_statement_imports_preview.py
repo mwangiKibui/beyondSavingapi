@@ -66,6 +66,8 @@ def patch_reads(monkeypatch, *, imp=None, rows=(), rules=(), directory=(), categ
         "get_blocked_numbers": AsyncMock(return_value=[]),
         "get_user_categories": AsyncMock(return_value=list(categories)),
         "get_shared_votes": AsyncMock(return_value=dict(shared_votes or {})),
+        "get_user_transfer_reasons": AsyncMock(return_value=[]),
+        "get_owner": AsyncMock(return_value={}),
         "load_keyword_context": AsyncMock(return_value=KeywordContext()),
         "get_learned_names": AsyncMock(return_value=dict(learned_names or {})),
         "handle_import_by_id": AsyncMock(return_value=None),

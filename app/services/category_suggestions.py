@@ -149,6 +149,13 @@ class Directory:
 # --- the user's own rules -------------------------------------------------
 
 
+def rule_target(rule: dict) -> tuple:
+    """What a rule files under: a category, or a transfer reason (ab-285)."""
+    if rule.get("transfer_reason_id") is not None:
+        return ("transfer", rule["transfer_reason_id"])
+    return ("category", rule["category_id"])
+
+
 def pick_rule(rules: list[dict], *, account_hash: str | None, amount: float) -> dict | None:
     """rules: the user's rules for one key and direction, one per category.
 
@@ -163,12 +170,12 @@ def pick_rule(rules: list[dict], *, account_hash: str | None, amount: float) -> 
     same_account = [r for r in rules if account_hash and r["account_hash"] == account_hash]
     if same_account:
         rules = same_account
-    elif len({r["category_id"] for r in rules}) > 1 and any(r["account_hash"] for r in rules):
+    elif len({rule_target(r) for r in rules}) > 1 and any(r["account_hash"] for r in rules):
         return None
 
     totals: dict = {}
     for r in rules:
-        t = totals.setdefault(r["category_id"], {"rule": r, "times_used": 0, "amount_sum": 0.0, "amount_n": 0})
+        t = totals.setdefault(rule_target(r), {"rule": r, "times_used": 0, "amount_sum": 0.0, "amount_n": 0})
         t["times_used"] += r["times_used"]
         if r["avg_amount"] is not None:
             t["amount_sum"] += float(r["avg_amount"]) * r["times_used"]
@@ -448,14 +455,22 @@ def build_preview_rows(
     categories: list[dict],
     shared_votes: dict[tuple, list[dict]] | None = None,
     keywords: "KeywordContext | None" = None,
+    reasons: list[dict] | None = None,
+    owner: dict | None = None,
 ) -> list[dict]:
     """rows: every transaction in the import, each with its allocated
     total and (when its allocations use exactly one category) category_id.
     shared_votes: vote totals keyed by vote_keys() tuples.
     keywords: description keywords (ab-290), the last source before AI.
+    reasons: the user's transfer reasons (id, name, direction), so a
+    remembered or suggested transfer can be named (ab-285).
+    owner: the user's first_name, last_name and account_numbers, to spot
+    money in sent by the user themselves (ab-285). Matched in memory only.
     Returns the open rows - nothing allocated yet, not a transfer - each
     with its suggestion or None."""
     shared_votes = shared_votes or {}
+    reasons_by_id = {r["id"]: r for r in reasons or []}
+    reasons_by_name = {r["name"].strip().lower(): r for r in reasons or []}
     by_id = {c["id"]: c for c in categories}
     by_name = {(c["name"].strip().lower(), c["type"]): c for c in categories}
 
@@ -491,12 +506,17 @@ def build_preview_rows(
         if rk:
             candidates = [
                 r for r in rules_by_key.get((*rk, direction), [])
-                if r["category_id"] in by_id and by_id[r["category_id"]]["type"] == wanted_type
+                if (r["category_id"] in by_id and by_id[r["category_id"]]["type"] == wanted_type)
+                or _reason_fits(reasons_by_id.get(r.get("transfer_reason_id")), direction)
             ]
             picked = pick_rule(candidates, account_hash=key.account_hash, amount=row["amount"])
             if picked:
                 label = next((r["label"] for r in candidates if r["label"]), None)
-                suggestion = _existing(by_id[picked["category_id"]], "your_rule")
+                suggestion = (
+                    _transfer(reasons_by_id[picked["transfer_reason_id"]], "your_rule")
+                    if picked.get("transfer_reason_id") is not None
+                    else _existing(by_id[picked["category_id"]], "your_rule")
+                )
                 # A Paybill the user typed for a reference row names the
                 # merchant for them, if the shared list knows it.
                 typed = next((r.get("user_entered_paybill") for r in candidates if r.get("user_entered_paybill")), None)
@@ -511,6 +531,11 @@ def build_preview_rows(
                 category = by_id.get(ranked[0][0])
                 if category and category["type"] == wanted_type:
                     suggestion = _existing(category, "this_statement")
+
+        # ab-285: money in sent by the user themselves (their own name, or
+        # one of their account numbers) - a Funds transfer, suggested only.
+        if suggestion is None and direction == "in" and owner and _from_owner(row["description"], owner):
+            suggestion = _transfer_named(BETWEEN_MY_ACCOUNTS, reasons_by_name, "own_account")
 
         if suggestion is None:
             name_key, number_key = vote_keys(key, direction, directory)
@@ -530,7 +555,7 @@ def build_preview_rows(
         # dividends and interest, ab-259). Suggested, never filed alone.
         keyword = keywords.keywords.match(row["description"], direction) if keywords else None
         if suggestion is None and keyword:
-            suggestion = _keyword_suggestion(keyword, keywords, by_id, by_name, wanted_type)
+            suggestion = _keyword_suggestion(keyword, keywords, by_id, by_name, wanted_type, reasons_by_name)
 
         out.append({
             "transaction_id": row["id"],
@@ -553,18 +578,27 @@ def build_preview_rows(
             "suggestion": suggestion,
             # Which keyword the description matched, for learning the
             # user's choice when they file the row.
-            "keyword_match": {"id": keyword.id, "category_name": keyword.category_name} if keyword else None,
+            "keyword_match": (
+                {"id": keyword.id, "category_name": keyword.category_name, "target": keyword.target}
+                if keyword else None
+            ),
         })
     return out
 
 
 def _keyword_suggestion(
-    keyword: "Keyword", ctx: "KeywordContext", by_id: dict, by_name: dict, wanted_type: str
+    keyword: "Keyword", ctx: "KeywordContext", by_id: dict, by_name: dict, wanted_type: str,
+    reasons_by_name: dict | None = None,
 ) -> dict:
     """The user's own choice for the keyword, else what 3+ users agreed
-    on, else the list's category."""
+    on, else the list's category. Transfer wording (ab-285) always
+    suggests a Funds transfer."""
     from app.services.description_keywords import pick_shared_keyword
 
+    if keyword.target == "transfer":
+        suggestion = _transfer_named(keyword.category_name, reasons_by_name or {}, "keyword")
+        suggestion["keyword"] = keyword.word
+        return suggestion
     own = by_id.get(ctx.choices.get(keyword.id))
     if own and own["type"] == wanted_type:
         suggestion = _existing(own, "your_rule")
@@ -605,6 +639,49 @@ def _existing(category: dict, source: str) -> dict:
         "source": source,
         "merchant_name": None,
     }
+
+
+# --- Funds transfers (ab-285) ---------------------------------------------
+
+BETWEEN_MY_ACCOUNTS = "Between my accounts"
+
+
+def _reason_fits(reason: dict | None, direction: str) -> bool:
+    return reason is not None and reason.get("direction") in (None, direction)
+
+
+def _transfer(reason: dict, source: str) -> dict:
+    """A Funds transfer suggestion under one of the user's reasons.
+    category_name carries the reason's name so the review can show it."""
+    return {"kind": "transfer", "transfer_reason_id": reason["id"], "category_id": None,
+            "category_name": reason["name"], "is_new_category": False, "source": source, "merchant_name": None}
+
+
+def _transfer_named(name: str, reasons_by_name: dict, source: str) -> dict:
+    """By reason name; a reason the user doesn't have yet is created when
+    the suggestion is approved."""
+    reason = reasons_by_name.get(name.strip().lower())
+    if reason:
+        return _transfer(reason, source)
+    return {"kind": "transfer", "transfer_reason_id": None, "category_id": None, "category_name": name.strip(),
+            "is_new_category": False, "source": source, "merchant_name": None}
+
+
+_DIGITS = re.compile(r"\d+")
+
+
+def _from_owner(description: str | None, owner: dict) -> bool:
+    """The user's own first AND last name as whole words, or one of their
+    account numbers (6+ digits), in the description."""
+    text = (description or "").upper()
+    if not text:
+        return False
+    first, last = (owner.get("first_name") or "").strip().upper(), (owner.get("last_name") or "").strip().upper()
+    words = set(re.findall(r"[A-Z]+", text))
+    if len(first) >= 2 and len(last) >= 2 and first in words and last in words:
+        return True
+    found = set(_DIGITS.findall(text))
+    return any(n in found for n in (owner.get("account_numbers") or []) if n and len(n) >= 6)
 
 
 def new_category_names(preview_rows: list[dict]) -> list[str]:

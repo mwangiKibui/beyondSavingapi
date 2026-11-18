@@ -50,6 +50,10 @@ def repo(monkeypatch):
         "unlink_transfer": AsyncMock(),
         "set_transfer_group": AsyncMock(),
         "get_category": AsyncMock(return_value=None),
+        "get_hand_filed_legs": AsyncMock(return_value=[]),
+        "get_hand_pair_candidates": AsyncMock(return_value=[]),
+        "link_hand_pair": AsyncMock(),
+        "get_hand_paired": AsyncMock(return_value=[]),
     }
     for name, mock in mocks.items():
         monkeypatch.setattr(f"{SVC}.{name}", mock)
