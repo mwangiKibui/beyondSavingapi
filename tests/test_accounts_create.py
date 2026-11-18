@@ -251,3 +251,30 @@ def test_create_account_logs_and_returns_generic_500_on_unexpected_error(
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(error_records) == 1
     assert error_records[0].exc_info is not None
+
+
+# 2026-11-18: a Kenyan mobile number the way people type it - 07..., 01...,
+# 254..., +254... - is saved as its 9 digits (shown as +254 712...).
+@pytest.mark.parametrize("typed", ["0722746084", "722746084", "254722746084", "+254722746084", "+254 722 746 084"])
+def test_create_account_saves_a_mobile_number_as_its_nine_digits(client, fake_user, fake_pool, monkeypatch, typed):
+    create = AsyncMock(return_value={
+        "id": str(uuid4()), "nickname": "M-Pesa", "account_type": "mobile_money", "provider": "M-Pesa",
+        "account_number": "722746084", "currency": "KES", "is_active": True,
+        "created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    monkeypatch.setattr("app.api.accounts.create_account", create)
+    response = client.post("/accounts", json={
+        "nickname": "M-Pesa", "account_type": "mobile_money", "provider": "M-Pesa",
+        "account_number": typed, "currency": "KES",
+    })
+    assert response.status_code == 201
+    assert create.await_args.kwargs["account_number"] == "722746084"
+
+
+@pytest.mark.parametrize("typed", ["072274608", "07227460845", "0822746084", "25472274608", "+25507227460", "0722-abc"])
+def test_create_account_rejects_a_mobile_number_that_isnt_kenyan(client, fake_user, fake_pool, typed):
+    response = client.post("/accounts", json={
+        "nickname": "M-Pesa", "account_type": "mobile_money", "provider": "M-Pesa",
+        "account_number": typed, "currency": "KES",
+    })
+    assert response.status_code == 422

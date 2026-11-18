@@ -226,7 +226,9 @@ async def apply_categories_endpoint(
         if group.new_account is not None:
             _validate_provider(group.new_account.account_type, group.new_account.provider)
             if group.new_account.account_number:
-                _validate_account_number(group.new_account.account_type, group.new_account.account_number)
+                group.new_account.account_number = _validate_account_number(
+                    group.new_account.account_type, group.new_account.account_number
+                )
     _require_pool(pool)
 
     try:
