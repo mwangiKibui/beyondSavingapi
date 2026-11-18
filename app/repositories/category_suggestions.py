@@ -18,7 +18,7 @@ async def get_import_for_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id
         """
         SELECT si.id, si.account_id, a.nickname AS account_nickname, a.provider,
                si.file_name, si.status, si.period_start, si.period_end, si.row_count, si.created_at,
-               si.reviewed_at, si.error_detail, si.handled_at, a.user_id
+               si.reviewed_at, si.allocated_at, si.error_detail, si.handled_at, a.user_id
         FROM statement_imports si
         JOIN accounts a ON a.id = si.account_id
         WHERE si.id = $1 AND a.user_id = $2
@@ -57,7 +57,7 @@ async def get_import_rows(
                t.balance_after,
                t.account_id, t.handled_as, t.handled_reason, t.handling_dismissed,
                t.sub_ledger_id, sl.name AS sub_ledger_name, sl.role AS sub_ledger_role,
-               t.import_id, si.file_name, acct.nickname AS account_nickname,
+               t.import_id, si.file_name, si.created_at AS import_created_at, acct.nickname AS account_nickname,
                alloc.apply_id, COALESCE(alloc.applied_here, false) AS applied_here,
                pair.id AS paired_transaction_id, pair.txn_date AS paired_txn_date,
                pair.account_nickname AS paired_account_nickname,

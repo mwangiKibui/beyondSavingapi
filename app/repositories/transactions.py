@@ -332,6 +332,10 @@ async def list_transactions(
     # not a narrower browse combined with whatever other filters happen
     # to be set - matching ab-49's already-shipped UI behavior against
     # mock data.
+    # "This upload" is the same set of rows its review lists
+    # (category_suggestions.get_import_rows): the rows it created, plus
+    # statement rows already on the account for its period - a re-upload's
+    # rows were deduped and still carry the first upload's import_id.
     # allocated (via the LATERAL join) is computed once and reused both for
     # the status column and the status_filter branch below - see
     # get_transaction's own comment on the reconciled/partial/unreconciled
@@ -355,7 +359,23 @@ async def list_transactions(
             ) alloc ON true
             WHERE a.user_id = $1
               AND (
-                ($8::uuid IS NOT NULL AND t.import_id = $8)
+                ($8::uuid IS NOT NULL AND (
+                  t.import_id = $8
+                  OR EXISTS (
+                    SELECT 1 FROM statement_imports si
+                    WHERE si.id = $8
+                      AND si.account_id = t.account_id
+                      AND t.source = 'statement'
+                      AND si.period_start IS NOT NULL AND si.period_end IS NOT NULL
+                      AND t.txn_date BETWEEN si.period_start AND si.period_end
+                      AND (
+                        NOT EXISTS (SELECT 1 FROM statement_import_sub_ledgers s WHERE s.import_id = $8)
+                        OR t.sub_ledger_id IN (
+                          SELECT s.sub_ledger_id FROM statement_import_sub_ledgers s WHERE s.import_id = $8
+                        )
+                      )
+                  )
+                ))
                 OR (
                   $8::uuid IS NULL
                   AND ($2::uuid IS NULL OR t.account_id = $2)

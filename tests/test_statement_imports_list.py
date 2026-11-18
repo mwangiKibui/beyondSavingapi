@@ -62,7 +62,8 @@ def test_list_statement_imports_defaults(client, fake_user, fake_pool, monkeypat
 
     assert response.status_code == 200
     body = response.json()
-    assert body == {"items": [{**SAMPLE_ITEM, "reviewed_at": None, "progress": None}], "total": 1, "page": 1,
+    assert body == {"items": [{**SAMPLE_ITEM, "reviewed_at": None, "allocated_at": None, "progress": None}],
+                    "total": 1, "page": 1,
                     "page_size": 10}
 
     _, kwargs = mock_list.call_args
@@ -147,7 +148,20 @@ def test_list_includes_review_progress(client, fake_user, fake_pool, monkeypatch
     monkeypatch.setattr("app.api.statement_imports.list_statement_imports",
                         AsyncMock(return_value=([reviewing, done], 2)))
     items = client.get("/statement-imports").json()["items"]
-    assert items[0]["progress"] == {"step": "review", "reviewed_count": 12, "total_count": 40,
+    # ab-296: an old saved draft belongs to what is now the Allocation step.
+    assert items[0]["progress"] == {"step": "allocation", "reviewed_count": 12, "total_count": 40,
                                     "updated_at": "2026-11-11T12:00:00Z"}
     assert items[0]["reviewed_at"] is None
     assert items[1]["progress"] is None and items[1]["reviewed_at"] == "2026-11-10T09:00:00Z"
+
+
+
+def test_list_says_when_the_user_moved_on_to_review(client, fake_user, fake_pool, monkeypatch):
+    """ab-296: allocated_at - on the Review step, not finished yet."""
+    in_review = {**SAMPLE_ITEM, "id": str(uuid4()), "status": "parsed", "reviewed_at": None,
+                 "allocated_at": "2026-11-18T10:00:00Z", "progress_step": None, "progress_reviewed_count": None,
+                 "progress_total_count": None, "progress_updated_at": None}
+    monkeypatch.setattr("app.api.statement_imports.list_statement_imports",
+                        AsyncMock(return_value=([in_review], 1)))
+    item = client.get("/statement-imports").json()["items"][0]
+    assert item["allocated_at"] == "2026-11-18T10:00:00Z" and item["reviewed_at"] is None

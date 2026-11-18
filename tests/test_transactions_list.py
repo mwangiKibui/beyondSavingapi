@@ -185,3 +185,31 @@ def test_list_transactions_logs_and_returns_generic_500_on_unexpected_error(
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(error_records) == 1
     assert error_records[0].exc_info is not None
+
+
+def test_import_filter_includes_rows_a_reupload_deduped():
+    """A re-uploaded statement's rows were deduped and keep the first
+    upload's import_id; "View transactions" for the re-upload must still
+    list them, like its review does (same account, period and sub-ledgers)."""
+    import asyncio
+
+    from app.repositories.transactions import list_transactions
+
+    seen: list[str] = []
+
+    class Pool:
+        async def fetchrow(self, query, *args):
+            seen.append(query)
+            return {"total": 0}
+
+        async def fetch(self, query, *args):
+            return []
+
+    asyncio.run(list_transactions(
+        Pool(), user_id=uuid4(), account_id=None, from_date=None, to_date=None, direction=None, status=None,
+        import_id=uuid4(), search=None, page=1, page_size=10, sort_by="txn_date", sort_dir="desc",
+    ))
+    query = " ".join(seen[0].split())
+    assert "t.import_id = $8 OR EXISTS ( SELECT 1 FROM statement_imports si WHERE si.id = $8" in query
+    assert "t.txn_date BETWEEN si.period_start AND si.period_end" in query
+    assert "statement_import_sub_ledgers" in query

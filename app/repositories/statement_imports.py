@@ -22,7 +22,7 @@ async def list_statement_imports(
         SELECT
             si.id, si.account_id, a.nickname AS account_nickname, si.file_name,
             si.status, si.period_start, si.period_end, si.row_count,
-            si.error_detail, si.created_at, si.reviewed_at,
+            si.error_detail, si.created_at, si.reviewed_at, si.allocated_at,
             p.step AS progress_step, p.reviewed_count AS progress_reviewed_count,
             p.total_count AS progress_total_count, p.updated_at AS progress_updated_at
         FROM statement_imports si
@@ -104,6 +104,16 @@ async def add_import_sub_ledgers(pool: asyncpg.Pool, *, import_id: UUID, sub_led
     await pool.executemany(
         "INSERT INTO statement_import_sub_ledgers (import_id, sub_ledger_id) VALUES ($1, $2)",
         [(import_id, sub_ledger_id) for sub_ledger_id in sub_ledger_ids],
+    )
+
+
+async def set_import_allocated(pool: asyncpg.Pool, *, import_id: UUID, allocated: bool):
+    """ab-296: the user moved on from Allocation to Review (or back).
+    Callers check the import is the user's first."""
+    return await pool.fetchval(
+        "UPDATE statement_imports SET allocated_at = CASE WHEN $2 THEN now() END WHERE id = $1 RETURNING allocated_at",
+        import_id,
+        allocated,
     )
 
 

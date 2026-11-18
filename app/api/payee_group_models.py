@@ -1,7 +1,7 @@
 """Response shapes and list parameters shared by the payee-group endpoints
 (ab-282): Transactions -> Uncategorised and an import's review tabs."""
 
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -24,6 +24,10 @@ class GroupRow(BaseModel):
     currency: str
     description: str | None = None
     import_id: UUID | None = None
+    # ab-296: the upload that first recorded the row (import_id's file and
+    # when it was uploaded) - a re-upload's rows were recorded earlier.
+    file_name: str | None = None
+    imported_at: datetime | None = None
     # An import's review (ab-292): this line's own status, category, apply
     # and suggestion.
     status: Literal["decide", "decided", "sorted", "handled"] | None = None
