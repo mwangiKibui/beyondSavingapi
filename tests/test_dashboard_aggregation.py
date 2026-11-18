@@ -20,7 +20,7 @@ def _row(**overrides):
         "transaction_id": None,
         "txn_amount": None,
         "direction": None,
-        "has_transfer_allocation": False,
+        "kind": "counted",
     }
     base.update(overrides)
     return base
@@ -80,7 +80,7 @@ def test_build_dashboard_excludes_a_transaction_with_a_transfer_shaped_allocatio
             transaction_id=uuid4(),
             txn_amount=Decimal("300.00"),
             direction="out",
-            has_transfer_allocation=True,
+            kind="transfer",
         ),
     ]
 
@@ -173,7 +173,7 @@ def test_saving_is_apart_from_money_in_and_out():
     account_id = uuid4()
     rows = [
         _row(account_id=account_id, transaction_id=uuid4(), txn_amount=Decimal("3000.00"), direction="in",
-             handled_as="saving", saving=Decimal("3000.00")),
+             kind="saving", saving=Decimal("3000.00")),
         _row(account_id=account_id, transaction_id=uuid4(), txn_amount=Decimal("1200.00"), direction="out",
              saving=Decimal("1000.00")),
         _row(account_id=account_id, transaction_id=uuid4(), txn_amount=Decimal("8000.00"), direction="in",

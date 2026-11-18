@@ -10,6 +10,8 @@ from uuid import uuid4
 
 import pytest
 
+from app.services.row_kind import COUNTED_ALLOCATION_SQL
+
 from app.repositories import budget_plans, reports
 
 USER = uuid4()
@@ -62,8 +64,8 @@ def assert_user_scoped(sql, args):
 
 
 def assert_counted_only(sql):
-    assert "a.transfer_reason_id IS NULL" in sql
-    assert "NOT (t.handled_as = 'loan' AND a.category_id IS NULL)" in sql
+    # ab-287: transfers, borrowed money and saving are left out by kind.
+    assert COUNTED_ALLOCATION_SQL in sql
 
 
 @pytest.mark.asyncio

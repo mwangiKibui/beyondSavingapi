@@ -4,7 +4,7 @@ from uuid import UUID
 
 import asyncpg
 
-from app.services.saving import HANDLED_SAVING_SQL
+from app.services.row_kind import TRANSACTION_KIND_SQL, TRANSACTION_SAVING_SQL
 from app.repositories.reports import (
     ZERO,
     fetch_budget_plan_rows,
@@ -50,41 +50,19 @@ async def fetch_dashboard_rows(
             t.id AS transaction_id,
             t.amount AS txn_amount,
             t.direction,
-            t.handled_as,
-            -- Netted out of totals: a transfer, or (ab-281) a loan row handled
-            -- at import with no category - borrowed money isn't income/expense.
-            (
-                EXISTS (
-                    SELECT 1 FROM allocations al
-                    WHERE al.transaction_id = t.id AND al.transfer_reason_id IS NOT NULL
-                )
-                OR (
-                    t.handled_as = 'loan'
-                    AND NOT EXISTS (
-                        SELECT 1 FROM allocations al
-                        WHERE al.transaction_id = t.id AND al.category_id IS NOT NULL
-                    )
-                )
-            ) AS has_transfer_allocation,
-            -- ab-259: what the row adds to savings (app.services.saving):
-            -- all of it when handled as saving, else the part filed under
-            -- a saving category.
-            CASE
-                WHEN t.handled_as = 'saving' THEN {HANDLED_SAVING_SQL}
-                WHEN t.direction = 'out' THEN COALESCE((
-                    SELECT SUM(al.amount) FROM allocations al
-                    JOIN categories c ON c.id = al.category_id
-                    WHERE al.transaction_id = t.id AND c.entry_type = 'saving'
-                ), 0)
-                ELSE 0
-            END AS saving
+            -- ab-287: what the row is (app.services.row_kind) and what it
+            -- adds to savings.
+            {TRANSACTION_KIND_SQL} AS kind,
+            {TRANSACTION_SAVING_SQL} AS saving
         FROM accounts a
         LEFT JOIN transactions t
             ON t.account_id = a.id AND t.txn_date >= $3 AND t.txn_date <= $4
         LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
         WHERE a.user_id = $1 AND a.currency = $2
         ORDER BY a.nickname
-        """.replace("{HANDLED_SAVING_SQL}", HANDLED_SAVING_SQL),
+        """.replace("{TRANSACTION_KIND_SQL}", TRANSACTION_KIND_SQL).replace(
+            "{TRANSACTION_SAVING_SQL}", TRANSACTION_SAVING_SQL
+        ),
         user_id,
         currency,
         from_date,
@@ -121,12 +99,12 @@ def build_dashboard(rows: list[dict], *, total_budget: Decimal, currency: str) -
                 "saving": ZERO,
             },
         )
-        if row["transaction_id"] is None or row["has_transfer_allocation"]:
+        if row["transaction_id"] is None or row["kind"] in ("transfer", "borrowed"):
             continue
         saving = row.get("saving") or ZERO
         bucket["saving"] += saving
         total_saving += saving
-        if row.get("handled_as") == "saving":
+        if row["kind"] == "saving":
             continue  # ab-259: neither income nor spending
         if row["direction"] == "in":
             bucket["money_in"] += row["txn_amount"]
