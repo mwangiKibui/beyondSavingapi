@@ -119,6 +119,37 @@ def test_create_account_accepts_exactly_9_digit_mobile_number(client, fake_user,
     assert response.status_code == 201
 
 
+def test_create_account_accepts_a_money_market_fund(client, fake_user, fake_pool, monkeypatch):
+    # ab-288: MMFs are an account type of their own.
+    payload = {
+        "nickname": "My MMF",
+        "account_type": "money_market",
+        "provider": "CIC Money Market Fund",
+        "account_number": "100200300",
+        "currency": "KES",
+    }
+    created = {
+        **payload,
+        "id": str(uuid4()),
+        "is_active": True,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    monkeypatch.setattr("app.api.accounts.create_account", AsyncMock(return_value=created))
+
+    response = client.post("/accounts", json=payload)
+    assert response.status_code == 201
+    assert response.json()["account_type"] == "money_market"
+
+
+def test_create_account_rejects_a_bank_as_a_money_market_provider(client, fake_user, fake_pool):
+    response = client.post(
+        "/accounts",
+        json={**VALID_PAYLOAD, "account_type": "money_market", "provider": "Equity Bank"},
+    )
+    assert response.status_code == 422
+
+
 def test_create_account_rejects_account_number_over_20_digits(client, fake_user, fake_pool):
     response = client.post(
         "/accounts", json={**VALID_PAYLOAD, "account_number": "1" * 21}

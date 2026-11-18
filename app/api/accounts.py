@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
 
-AccountType = Literal["bank", "mobile_money", "sacco"]
+AccountType = Literal["bank", "mobile_money", "sacco", "money_market"]
 Currency = Literal["KES", "USD", "EUR", "GBP", "UGX", "TZS"]
 
 # MVP1 supports a fixed set of institutions per account type - keep in
@@ -34,6 +34,14 @@ PROVIDERS_BY_TYPE: dict[str, list[str]] = {
     "bank": ["Equity Bank", "NCBA Bank"],
     "mobile_money": ["M-Pesa", "Airtel Money"],
     "sacco": ["Mentor Sacco", "Biashara Sacco"],
+    # ab-288: money market funds - no statement parser yet; tracked as the
+    # other side of Funds transfers.
+    "money_market": [
+        "CIC Money Market Fund",
+        "Sanlam Money Market Fund",
+        "Etica Money Market Fund",
+        "Old Mutual Money Market Fund",
+    ],
 }
 
 MOBILE_NUMBER_LENGTH = 9
