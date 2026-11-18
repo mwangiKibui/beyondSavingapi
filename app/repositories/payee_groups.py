@@ -46,11 +46,13 @@ async def lock_rows_for_apply(
         """
         SELECT t.id, t.txn_date, t.amount, t.currency, t.direction, t.description, t.import_id,
                t.account_id, a.provider, (t.transfer_group_id IS NOT NULL) AS is_transfer, t.handled_as,
+               sl.role AS sub_ledger_role,
                COALESCE((SELECT SUM(al.original_amount) FROM allocations al WHERE al.transaction_id = t.id), 0)
                    AS allocated,
                NULL::uuid AS category_id
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
+        LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
         WHERE t.id = ANY($1::uuid[]) AND a.user_id = $2
         ORDER BY t.id
         FOR UPDATE OF t
@@ -80,11 +82,13 @@ async def insert_apply(
     remember: bool,
     snapshot: dict,
     transfer_reason_id: UUID | None = None,
+    kind: str = "expense",
 ) -> UUID:
     return await conn.fetchval(
         """
-        INSERT INTO category_applies (user_id, import_id, category_id, transfer_reason_id, group_key, remember, snapshot)
-        VALUES ($1, $2, $3, $7, $4, $5, $6::jsonb)
+        INSERT INTO category_applies
+            (user_id, import_id, category_id, transfer_reason_id, group_key, remember, snapshot, kind)
+        VALUES ($1, $2, $3, $7, $4, $5, $6::jsonb, $8)
         RETURNING id
         """,
         user_id,
@@ -94,6 +98,19 @@ async def insert_apply(
         remember,
         _json(snapshot),
         transfer_reason_id,
+        kind,
+    )
+
+
+async def set_rows_handled(conn: asyncpg.Connection, *, transaction_ids: list[UUID], handled_as: str | None) -> None:
+    """ab-288: Saving / Borrowed filed by the user set how the row is
+    handled; undoing it clears that again (a row is only ever filed while
+    it is open, i.e. not handled)."""
+    await conn.execute(
+        "UPDATE transactions SET handled_as = $2, handled_reason = $3 WHERE id = ANY($1::uuid[])",
+        transaction_ids,
+        handled_as,
+        "Filed by you" if handled_as else None,
     )
 
 
@@ -135,6 +152,7 @@ async def lock_apply(conn: asyncpg.Connection, *, apply_id: UUID, user_id: UUID)
     row = await conn.fetchrow(
         """
         SELECT ca.id, ca.import_id, ca.category_id, ca.transfer_reason_id, ca.group_key, ca.remember, ca.snapshot,
+               ca.kind,
                ca.undone_at, c.name AS category_name, c.type AS category_type, tr.name AS transfer_reason_name
         FROM category_applies ca
         LEFT JOIN categories c ON c.id = ca.category_id

@@ -56,7 +56,10 @@ from app.repositories.payee_groups import (
     lock_rows_for_apply,
     mark_apply_undone,
     restore_snapshot,
+    set_rows_handled,
 )
+from app.repositories.transfer_reasons import BETWEEN_MY_ACCOUNTS
+from app.services.sub_ledger_roles import SAVING_ROLES
 from app.services.allocations import CATEGORY_TYPE_FOR_DIRECTION, AllocationPlan, AllocationRejected
 from app.services.import_handling import pair_hand_filed_transfers, unpair_hand_filed
 from app.services.description_keywords import load_keyword_context
@@ -103,6 +106,9 @@ class ApplyGroup:
     # ab-286: money in filed as a refund of an EXPENSE category - it lowers
     # that category's spending. Never remembered.
     refund: bool = False
+    # ab-288: what the money is - expense, income, refund, transfer, saving,
+    # borrowed, loan_repayment. None: worked out from the fields above.
+    kind: str | None = None
     # Internal: the suggestion use_suggestion resolved to for these rows.
     suggestion: dict | None = None
 
@@ -123,7 +129,43 @@ class _Target:
     id: UUID
 
 
+KINDS = ("expense", "income", "refund", "transfer", "saving", "borrowed", "loan_repayment")
+# Saving / Borrowed file the row by how it's handled, with no category.
+HANDLED_AS_FOR_KIND = {"saving": "saving", "borrowed": "loan"}
+
+
+def _normalise(g: ApplyGroup, row: dict) -> ApplyGroup:
+    """Checks a group's kind (ab-288) against its rows and folds it into the
+    fields the rest of apply_groups reads."""
+    kind, direction = g.kind, row["direction"]
+    if kind is None:
+        return g
+    if kind not in KINDS:
+        raise AllocationRejected(422, "Unknown kind")
+    allowed = {
+        "out": {"expense", "transfer", "saving", "loan_repayment"},
+        "in": {"income", "transfer", "refund", "borrowed", "saving"},
+    }[direction]
+    if kind not in allowed:
+        raise AllocationRejected(422, "That type isn't for money going this way")
+    if kind == "saving" and direction == "in" and row.get("sub_ledger_role") not in SAVING_ROLES:
+        raise AllocationRejected(422, "Money in is saving only on a SACCO deposits or shares sub-ledger")
+    if kind in HANDLED_AS_FOR_KIND:
+        if g.remember:
+            raise AllocationRejected(422, "Saving and Borrowed aren't remembered")
+        if g.category_id or g.new_category_name or g.use_suggestion or g.transfer_reason_id:
+            raise AllocationRejected(422, "Saving and Borrowed take no category or reason")
+        return g
+    if kind == "refund":
+        return replace(g, refund=True)
+    if kind == "transfer" and g.transfer_reason_id is None and not g.use_suggestion:
+        return g  # filed under "Between my accounts" (see apply_groups)
+    return g
+
+
 def _is_transfer(g: ApplyGroup) -> bool:
+    if g.kind == "transfer":
+        return True
     return g.transfer_reason_id is not None or bool(
         g.use_suggestion and g.suggestion and g.suggestion.get("kind") == "transfer"
     )
@@ -165,6 +207,18 @@ async def uncategorised_groups(
         conn, user_id=user_id, rows=rows, keys=extract_row_keys(rows, secret=secret)
     )
     return build_groups(rows, keys=keys, preview=preview), len(rows)
+
+
+def _apply_kind(g: ApplyGroup, target: "_Target", category: dict | None, direction: str) -> str:
+    if target.kind == "handling":
+        return g.kind
+    if target.kind == "transfer":
+        return "transfer"
+    if g.refund:
+        return "refund"
+    if direction == "out" and category.get("entry_type") == "loan_repayment":
+        return "loan_repayment"
+    return category["type"]
 
 
 def _wanted_type(direction: str, refund: bool) -> str:
@@ -220,6 +274,7 @@ async def apply_groups(
         group_keys.append(found.pop())
 
     keys, preview, categories, directory = await load_suggestions(conn, user_id=user_id, rows=rows, keys=raw_keys)
+    groups = [_normalise(g, by_id[g.transaction_ids[0]]) for g in groups]
     groups, group_keys = _split_by_suggestion(groups, group_keys, preview)
     by_cat_id = {c["id"]: c for c in categories}
     by_name = {_name_key(c["name"], c["type"]): c for c in categories}
@@ -232,6 +287,12 @@ async def apply_groups(
         has_other_side = g.other_account_id is not None or g.new_account is not None or g.someone_else_name
         if has_other_side and not _is_transfer(g):
             raise AllocationRejected(422, "Only a Funds transfer takes where the money came from or went to")
+        if g.kind in HANDLED_AS_FOR_KIND:
+            targets.append(("handling", g.kind))
+            continue
+        if g.kind == "transfer" and g.transfer_reason_id is None and not g.use_suggestion:
+            targets.append(("reason_name", BETWEEN_MY_ACCOUNTS))
+            continue
         if g.transfer_reason_id is not None:
             targets.append(("reason", g.transfer_reason_id))
             continue
@@ -273,6 +334,9 @@ async def apply_groups(
     resolved: list[_Target] = []
     for g, (kind, value) in zip(groups, targets):
         direction = by_id[g.transaction_ids[0]]["direction"]
+        if kind == "handling":
+            resolved.append(_Target("handling", None))
+            continue
         if kind in ("reason", "reason_name"):
             reason = reasons.get(value)
             if reason is None:
@@ -288,6 +352,8 @@ async def apply_groups(
             raise AllocationRejected(
                 422, "A category's type doesn't match one of the selected transactions' direction"
             )
+        if g.kind == "loan_repayment" and category.get("entry_type") != "loan_repayment":
+            raise AllocationRejected(422, "A loan repayment needs a loan-repayment category")
         resolved.append(_Target("category", category["id"]))
     reasons_by_id = {r["id"]: r for r in reasons.values()}
 
@@ -298,10 +364,12 @@ async def apply_groups(
     remembered = []
     for g, gk, target, other in zip(groups, group_keys, resolved, others):
         is_transfer = target.kind == "transfer"
-        category = None if is_transfer else by_cat_id[target.id]
+        is_handling = target.kind == "handling"
+        category = by_cat_id[target.id] if target.kind == "category" else None
         reason = reasons_by_id[target.id] if is_transfer else None
-        category_id = None if is_transfer else target.id
+        category_id = target.id if target.kind == "category" else None
         reason_id = target.id if is_transfer else None
+        kind = _apply_kind(g, target, category, by_id[g.transaction_ids[0]]["direction"])
         members = [by_id[t] for t in g.transaction_ids]
         allocatable = [r for r in members if float(r["amount"]) - float(r["allocated"]) > 0]
         snapshot = await _snapshot(conn, user_id=user_id, rows=members, keys=keys, directory=directory,
@@ -309,8 +377,11 @@ async def apply_groups(
         apply_id = await insert_apply(
             conn, user_id=user_id, import_id=statement_import["id"] if statement_import else None,
             category_id=category_id, group_key=gk, remember=g.remember, snapshot=snapshot,
-            transfer_reason_id=reason_id,
+            transfer_reason_id=reason_id, kind=kind,
         )
+        if is_handling:
+            await set_rows_handled(conn, transaction_ids=[r["id"] for r in members],
+                                   handled_as=HANDLED_AS_FOR_KIND[kind])
         if allocatable:
             amounts = [float(r["amount"]) - float(r["allocated"]) for r in allocatable]
             await insert_applied_allocations(
@@ -319,8 +390,8 @@ async def apply_groups(
                 source_account_id=other["account_id"], source_description=other["description"],
             )
             for r, amount in zip(allocatable, amounts):
-                # Transfers are never spending or income: no budget alerts.
-                if not is_transfer and not g.refund:
+                # Only spending can cross a budget: no alerts for the rest.
+                if category_id is not None and not g.refund:
                     plan.transaction_ids.append(r["id"])
                     plan.category_ids.append(category_id)
                     plan.amounts.append(amount)
@@ -344,6 +415,7 @@ async def apply_groups(
             "transfer_reason_id": reason_id,
             "transfer_reason_name": reason["name"] if reason else None,
             "is_refund": g.refund,
+            "kind": kind,
             "other_account_id": other["account_id"],
             "remember": g.remember,
             "allocated": [r["id"] for r in allocatable],
@@ -593,6 +665,8 @@ async def undo_apply(
     if applied["undone_at"] is not None:
         raise AllocationRejected(409, "This was already undone")
     reopened = await delete_apply_allocations(conn, apply_id=apply_id)
+    if applied.get("kind") in HANDLED_AS_FOR_KIND:
+        await set_rows_handled(conn, transaction_ids=reopened, handled_as=None)
     if applied["remember"]:
         await restore_snapshot(conn, user_id=user_id, snapshot=applied["snapshot"])
     await mark_apply_undone(conn, apply_id=apply_id)
@@ -616,6 +690,8 @@ async def reopen_lines(
     reopened = await delete_apply_line_allocations(conn, apply_id=apply_id, transaction_ids=transaction_ids)
     if set(transaction_ids) - set(reopened):
         raise AllocationRejected(422, "One or more rows aren't part of this choice")
+    if applied.get("kind") in HANDLED_AS_FOR_KIND:
+        await set_rows_handled(conn, transaction_ids=reopened, handled_as=None)
     if await count_apply_allocations(conn, apply_id=apply_id) == 0:
         if applied["remember"]:
             await restore_snapshot(conn, user_id=user_id, snapshot=applied["snapshot"])
@@ -639,7 +715,9 @@ async def apply_earlier(conn: asyncpg.Connection, *, user_id: UUID, apply_id: UU
     waiting = [r["id"] for r in rows if payee_group_key(keys[r["id"]], r["direction"], r["id"]) == applied["group_key"]]
     if not waiting:
         return ApplyResult(groups=[], created_categories=[], plan=AllocationPlan(), transactions_by_id={})
-    if applied.get("transfer_reason_id") is not None:
+    if applied.get("kind") in HANDLED_AS_FOR_KIND:
+        group = ApplyGroup(transaction_ids=waiting, kind=applied["kind"])
+    elif applied.get("transfer_reason_id") is not None:
         source = await get_apply_source(conn, apply_id=apply_id)
         group = ApplyGroup(
             transaction_ids=waiting, transfer_reason_id=applied["transfer_reason_id"],

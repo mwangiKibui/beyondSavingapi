@@ -23,6 +23,9 @@ SUB_LEDGER = {
 }
 
 
+from tests.test_payee_group_endpoints import FakePool  # noqa: E402
+
+
 @pytest.fixture(scope="module")
 def client():
     with TestClient(app) as c:
@@ -195,7 +198,10 @@ def test_create_sub_ledger_rejects_unknown_role(client, fake_user, fake_pool, mo
     assert response.status_code == 422
 
 
-def test_update_sub_ledger_role_only(client, fake_user, fake_pool, monkeypatch):
+def test_update_sub_ledger_role_only(client, fake_user, monkeypatch):
+    app.dependency_overrides[get_pool] = lambda: FakePool()
+    rehandle = AsyncMock(return_value=3)
+    monkeypatch.setattr("app.api.sub_ledgers.rehandle_sub_ledger", rehandle)
     monkeypatch.setattr("app.api.sub_ledgers.get_account", AsyncMock(return_value=FAKE_ACCOUNT))
     mock_update = AsyncMock(return_value=SUB_LEDGER)
     monkeypatch.setattr("app.api.sub_ledgers.update_sub_ledger", mock_update)
@@ -204,3 +210,16 @@ def test_update_sub_ledger_role_only(client, fake_user, fake_pool, monkeypatch):
 
     assert response.status_code == 200
     assert mock_update.call_args.kwargs["role"] == "shares"
+    # ab-288: rows nobody touched follow the new role.
+    assert rehandle.await_args.kwargs["sub_ledger_id"] == SUB_LEDGER_ID
+    assert response.json()["rehandled"] == 3
+    app.dependency_overrides.pop(get_pool, None)
+
+
+def test_renaming_a_sub_ledger_rehandles_nothing(client, fake_user, fake_pool, monkeypatch):
+    rehandle = AsyncMock()
+    monkeypatch.setattr("app.api.sub_ledgers.rehandle_sub_ledger", rehandle)
+    monkeypatch.setattr("app.api.sub_ledgers.get_account", AsyncMock(return_value=FAKE_ACCOUNT))
+    monkeypatch.setattr("app.api.sub_ledgers.update_sub_ledger", AsyncMock(return_value=SUB_LEDGER))
+    client.patch(f"{_base_url()}/{SUB_LEDGER_ID}", json={"name": "Deposits"})
+    rehandle.assert_not_awaited()

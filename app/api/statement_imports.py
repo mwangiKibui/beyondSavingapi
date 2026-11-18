@@ -553,14 +553,15 @@ async def review_groups_endpoint(
     preview = {p["transaction_id"]: p for p in loaded["preview_rows"]}
     names = {c["id"]: c["name"] for c in loaded["categories"]}
     types = {c["id"]: c["type"] for c in loaded["categories"]}
+    entry_types = {c["id"]: c.get("entry_type") for c in loaded["categories"]}
     # One row per payee across Pending and Approved (ab-292); handled rows
     # group on their own.
     not_handled = [r for t in ("decide", "decided", "sorted") for r in by_tab[t]]
     all_groups = build_groups(
         not_handled, keys=loaded["keys"], preview=preview, category_names=names, with_status=True,
-        category_types=types,
+        category_types=types, category_entry_types=entry_types,
     ) + build_groups(by_tab["handled"], keys=loaded["keys"], category_names=names, with_status=True,
-                     category_types=types)
+                     category_types=types, category_entry_types=entry_types)
 
     def in_tab(g: dict, t: str) -> bool:
         if t == "all":

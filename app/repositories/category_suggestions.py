@@ -174,7 +174,7 @@ async def get_owner(pool: asyncpg.Pool, *, user_id: UUID) -> dict:
 
 
 async def get_user_categories(pool: asyncpg.Pool, *, user_id: UUID) -> list[dict]:
-    rows = await pool.fetch("SELECT id, name, type FROM categories WHERE user_id = $1", user_id)
+    rows = await pool.fetch("SELECT id, name, type, entry_type FROM categories WHERE user_id = $1", user_id)
     return [dict(row) for row in rows]
 
 

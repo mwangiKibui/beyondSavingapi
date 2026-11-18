@@ -3,6 +3,7 @@ import's review or from Transactions -> Uncategorised; undo one apply; and
 file a remembered payee's rows still waiting from earlier statements."""
 
 import logging
+from typing import Literal
 from uuid import UUID
 
 import asyncpg
@@ -56,6 +57,9 @@ class ApplyGroupRequest(BaseModel):
     use_suggestion: bool = False
     # ab-285: file as a Funds transfer under this reason.
     transfer_reason_id: UUID | None = None
+    # ab-288: what the money is. Saving and Borrowed take no category or
+    # reason; a transfer with no reason files under "Between my accounts".
+    kind: Literal["expense", "income", "refund", "transfer", "saving", "borrowed", "loan_repayment"] | None = None
     # ab-285, transfers only - where the money came from (money in) or went
     # to (money out); at most one. someone_else_name is private to the user.
     other_account_id: UUID | None = None
@@ -110,6 +114,7 @@ class AppliedGroup(BaseModel):
     transfer_reason_name: str | None = None
     other_account_id: UUID | None = None
     is_refund: bool = False
+    kind: str | None = None
     remember: bool
     allocated: list[UUID]
     # Zero-amount rows: nothing to allocate.
@@ -186,7 +191,11 @@ async def apply_categories_endpoint(
     for group in body.groups:
         chosen = sum([group.category_id is not None, group.new_category_name is not None, group.use_suggestion,
                       group.transfer_reason_id is not None])
-        if chosen != 1:
+        # ab-288: these kinds need no target (or have a default one).
+        targetless = group.kind in ("saving", "borrowed") or (group.kind == "transfer" and chosen == 0)
+        if group.kind == "refund":
+            group.refund = True
+        if chosen != 1 and not targetless:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=(

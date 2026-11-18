@@ -48,6 +48,7 @@ def db(monkeypatch):
         "delete_keyword_choices": AsyncMock(),
         "create_categories": AsyncMock(return_value=[]),
         "insert_apply": AsyncMock(side_effect=lambda conn, **kw: uuid4()),
+        "set_rows_handled": AsyncMock(),
         "insert_applied_allocations": AsyncMock(),
         "get_rule_rows": AsyncMock(return_value=[]),
         "get_merchant_votes": AsyncMock(return_value=[]),

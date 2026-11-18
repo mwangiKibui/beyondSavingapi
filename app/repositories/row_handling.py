@@ -313,3 +313,31 @@ async def get_hand_paired(conn: asyncpg.Connection, *, transaction_ids: list[UUI
         transaction_ids,
     )
     return [dict(r) for r in rows]
+
+
+async def get_rehandle_rows(conn: asyncpg.Connection, *, user_id: UUID, sub_ledger_id: UUID) -> list[dict]:
+    """ab-288: a sub-ledger's rows nobody has touched - open with nothing
+    allocated, or handled at import and never filed, edited, paired or
+    marked "Not ..." by the user - locked for re-handling."""
+    rows = await conn.fetch(
+        """
+        SELECT t.id, t.account_id, t.description, t.direction, t.amount, t.currency, t.handled_as,
+               sl.role AS sub_ledger_role, a.provider
+        FROM transactions t
+        JOIN accounts a ON a.id = t.account_id
+        JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
+        WHERE t.sub_ledger_id = $1 AND a.user_id = $2
+          AND t.transfer_group_id IS NULL
+          AND NOT t.handling_dismissed
+          AND t.handled_reason IS DISTINCT FROM 'Filed by you'
+          AND NOT EXISTS (
+              SELECT 1 FROM allocations al
+              WHERE al.transaction_id = t.id AND (t.handled_as IS NULL OR al.apply_id IS NOT NULL)
+          )
+        ORDER BY t.txn_date, t.id
+        FOR UPDATE OF t
+        """,
+        sub_ledger_id,
+        user_id,
+    )
+    return [dict(r) for r in rows]
