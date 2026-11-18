@@ -594,3 +594,26 @@ def test_review_lines_carry_account_sub_ledger_kind_and_other_side(client, fake_
 
     [filed] = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=decided").json()["items"][0]["rows"]
     assert (filed["kind"], filed["other_side"], filed["account_id"]) == ("transfer", "Equity Savings", str(account))
+
+
+
+# --- ab-296: the Review step lists every row, unpaged ---------------------------
+
+
+def test_review_lists_every_group_and_row_unpaged(client, fake_user, fake_pool, review):
+    review(_all_statuses_rows(uuid4()))
+
+    body = client.get(f"/statement-imports/{IMPORT_ID}/review").json()
+
+    assert sorted(g["status"] for g in body["items"]) == ["decide", "decided", "handled", "handled", "sorted"]
+    assert sum(len(g["rows"]) for g in body["items"]) == 6
+    assert body["row_counts"]["decide"] == 2
+    # Each line carries what the Allocation step shows for it.
+    line = next(r for g in body["items"] if g["status"] == "decided" for r in g["rows"])
+    assert line["category_name"] == "Groceries" and line["status"] == "decided"
+
+
+def test_review_needs_auth_and_ownership(client, fake_user, fake_pool, review, monkeypatch):
+    review([])
+    monkeypatch.setattr("app.api.statement_imports.get_import_for_preview", AsyncMock(return_value=None))
+    assert client.get(f"/statement-imports/{IMPORT_ID}/review").status_code == 404

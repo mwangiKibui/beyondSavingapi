@@ -42,10 +42,11 @@ def fake_user():
     app.dependency_overrides.pop(get_current_user_id, None)
 
 
-def import_row(status="parsed", reviewed_at=None, error_detail=None):
+def import_row(status="parsed", reviewed_at=None, error_detail=None, allocated_at=None):
     return {"id": IMPORT_ID, "error_detail": error_detail, "account_id": uuid4(), "account_nickname": "My M-Pesa", "provider": "M-Pesa",
             "file_name": "statement.pdf", "status": status, "period_start": date(2026, 10, 1),
             "period_end": date(2026, 10, 31), "row_count": 3, "reviewed_at": reviewed_at,
+            "allocated_at": allocated_at,
             "created_at": datetime(2026, 11, 1, tzinfo=timezone.utc)}
 
 
@@ -109,15 +110,18 @@ def test_another_users_import_is_not_found(client, fake_user, fake_pool, monkeyp
 # --- GET ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("status,reviewed_at,step", [
-    ("pending", None, "processing"),
-    ("failed", None, "failed"),
-    ("parsed", None, "review"),
-    ("parsed", UPDATED, "done"),
+# ab-296: Upload, Processing, Allocation, Review, Finish import.
+@pytest.mark.parametrize("status,reviewed_at,allocated_at,step", [
+    ("pending", None, None, "processing"),
+    ("failed", None, None, "failed"),
+    ("parsed", None, None, "allocation"),
+    ("parsed", None, UPDATED, "review"),
+    ("parsed", UPDATED, None, "done"),
+    ("parsed", UPDATED, UPDATED, "done"),
 ])
 def test_without_saved_progress_the_step_comes_from_the_import(client, fake_user, fake_pool, monkeypatch,
-                                                               status, reviewed_at, step):
-    patch_repo(monkeypatch, imp=import_row(status, reviewed_at))
+                                                               status, reviewed_at, allocated_at, step):
+    patch_repo(monkeypatch, imp=import_row(status, reviewed_at, allocated_at=allocated_at))
     body = client.get(url()).json()
     assert body == {"step": step, "draft": {"rows": {}, "labels": {}, "paybills": {}},
                     "reviewed_count": 0, "total_count": 0, "updated_at": None, "error_detail": None}
@@ -135,7 +139,8 @@ def test_saved_progress_is_returned(client, fake_user, fake_pool, monkeypatch):
     patch_repo(monkeypatch, imp=import_row(), progress={"step": "review", "draft": draft, "reviewed_count": 1,
                                                         "total_count": 2, "updated_at": UPDATED})
     body = client.get(url()).json()
-    assert body["step"] == "review" and body["reviewed_count"] == 1 and body["total_count"] == 2
+    # ab-296: the import says which step it's on; an old draft only adds counts.
+    assert body["step"] == "allocation" and body["reviewed_count"] == 1 and body["total_count"] == 2
     assert body["draft"]["rows"] == {str(NAIVAS["id"]): {"category_id": str(GROCERIES["id"]),
                                                          "new_category_name": None, "unlabelled": False}}
 
@@ -245,3 +250,58 @@ def test_rows_categorised_elsewhere_since_drop_out_of_the_counts():
     keys = extract_keys(ROWS, provider="M-Pesa", secret=SECRET)
     draft = {"rows": {DONE["id"]: {"category_id": GROCERIES["id"]}, NAIVAS["id"]: {"category_id": GROCERIES["id"]}}}
     assert progress_counts(ROWS, keys, draft) == (1, 2)
+
+
+# --- ab-296: moving between Allocation and Review -----------------------------
+
+
+def step_url():
+    return f"/statement-imports/{IMPORT_ID}/step"
+
+
+def test_step_requires_auth(client):
+    assert client.put(step_url(), json={"step": "review"}).status_code == 401
+
+
+@pytest.mark.parametrize("step,allocated", [("review", True), ("allocation", False)])
+def test_step_moves_between_allocation_and_review(client, fake_user, fake_pool, monkeypatch, step, allocated):
+    patch_repo(monkeypatch, imp=import_row())
+    set_allocated = AsyncMock(return_value=UPDATED if allocated else None)
+    monkeypatch.setattr(f"{API}.set_import_allocated", set_allocated)
+    response = client.put(step_url(), json={"step": step})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"step": step}
+    assert set_allocated.await_args.kwargs == {"import_id": IMPORT_ID, "allocated": allocated}
+
+
+def test_step_on_a_finished_import_reads_done(client, fake_user, fake_pool, monkeypatch):
+    # "Review again" moves around freely; the import stays finished.
+    patch_repo(monkeypatch, imp=import_row(reviewed_at=UPDATED))
+    monkeypatch.setattr(f"{API}.set_import_allocated", AsyncMock(return_value=UPDATED))
+    assert client.put(step_url(), json={"step": "review"}).json() == {"step": "review"}
+
+
+def test_step_before_processing_finishes_is_a_conflict(client, fake_user, fake_pool, monkeypatch):
+    patch_repo(monkeypatch, imp=import_row("pending"))
+    set_allocated = AsyncMock()
+    monkeypatch.setattr(f"{API}.set_import_allocated", set_allocated)
+    assert client.put(step_url(), json={"step": "review"}).status_code == 409
+    set_allocated.assert_not_awaited()
+
+
+def test_step_of_another_users_import_is_not_found(client, fake_user, fake_pool, monkeypatch):
+    patch_repo(monkeypatch, imp=None)
+    assert client.put(step_url(), json={"step": "review"}).status_code == 404
+
+
+@pytest.mark.parametrize("body", [{"step": "done"}, {"step": "processing"}, {}])
+def test_step_only_takes_allocation_or_review(client, fake_user, fake_pool, monkeypatch, body):
+    patch_repo(monkeypatch, imp=import_row())
+    assert client.put(step_url(), json=body).status_code == 422
+
+
+def test_step_failure_is_a_generic_500(client, fake_user, fake_pool, monkeypatch):
+    patch_repo(monkeypatch, imp=import_row())
+    monkeypatch.setattr(f"{API}.set_import_allocated", AsyncMock(side_effect=RuntimeError("db down")))
+    response = client.put(step_url(), json={"step": "review"})
+    assert response.status_code == 500 and "db down" not in response.text

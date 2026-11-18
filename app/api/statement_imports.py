@@ -34,6 +34,7 @@ from app.repositories.statement_imports import (
     add_import_sub_ledgers,
     create_statement_import,
     list_statement_imports,
+    set_import_allocated,
 )
 from app.repositories.notifications import generate_budget_alerts
 from app.repositories.sub_ledgers import list_sub_ledgers
@@ -106,6 +107,8 @@ class StatementImportListItem(BaseModel):
     created_at: datetime
     # ab-265: set once the review was confirmed ("Done").
     reviewed_at: datetime | None = None
+    # ab-296: set while the user is on the Review step (moved on from Allocation).
+    allocated_at: datetime | None = None
     # ab-265: an unfinished review's saved progress; null when none.
     progress: ListProgress | None = None
 
@@ -116,6 +119,8 @@ def _list_item(row: dict) -> dict:
     total = row.pop("progress_total_count", None)
     updated = row.pop("progress_updated_at", None)
     if step is not None:
+        # ab-296: an old saved draft ("review") belongs to what is now Allocation.
+        step = "allocation" if step == "review" else step
         row["progress"] = {"step": step, "reviewed_count": reviewed, "total_count": total, "updated_at": updated}
     return row
 
@@ -547,21 +552,7 @@ async def review_groups_endpoint(
     check_page_size(params)
     _require_pool(pool)
     loaded = await _load_preview(pool, import_id=import_id, user_id=user_id)
-    by_tab: dict[str, list[dict]] = {t: [] for t in REVIEW_TABS}
-    for row in loaded["rows"]:
-        by_tab[review_tab(row)].append(row)
-    preview = {p["transaction_id"]: p for p in loaded["preview_rows"]}
-    names = {c["id"]: c["name"] for c in loaded["categories"]}
-    types = {c["id"]: c["type"] for c in loaded["categories"]}
-    entry_types = {c["id"]: c.get("entry_type") for c in loaded["categories"]}
-    # One row per payee across Pending and Approved (ab-292); handled rows
-    # group on their own.
-    not_handled = [r for t in ("decide", "decided", "sorted") for r in by_tab[t]]
-    all_groups = build_groups(
-        not_handled, keys=loaded["keys"], preview=preview, category_names=names, with_status=True,
-        category_types=types, category_entry_types=entry_types,
-    ) + build_groups(by_tab["handled"], keys=loaded["keys"], category_names=names, with_status=True,
-                     category_types=types, category_entry_types=entry_types)
+    all_groups, by_tab = _review_groups(loaded)
 
     def in_tab(g: dict, t: str) -> bool:
         if t == "all":
@@ -585,6 +576,48 @@ async def review_groups_endpoint(
             1 for g in all_groups if any(r["status"] == "decide" and r["suggestion"] for r in g["rows"])
         ),
     }
+
+
+class ImportReviewResponse(BaseModel):
+    # Every payee group and line, unpaged; the Review step lists the lines.
+    items: list[PayeeGroup]
+    row_counts: ReviewTabCounts
+
+
+@router.get("/{import_id}/review", response_model=ImportReviewResponse)
+async def import_review_endpoint(
+    import_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """ab-296: the Review step - every row of the import with what it was
+    allocated as (built like the Allocation table), for the read-only
+    table and its CSV. Only ever the importer's own rows."""
+    _require_pool(pool)
+    loaded = await _load_preview(pool, import_id=import_id, user_id=user_id)
+    all_groups, by_tab = _review_groups(loaded)
+    return {"items": all_groups, "row_counts": {t: len(rows) for t, rows in by_tab.items()}}
+
+
+def _review_groups(loaded: dict) -> tuple[list[dict], dict[str, list[dict]]]:
+    """Every payee group of an import, each carrying its status, and the
+    import's rows by review tab."""
+    by_tab: dict[str, list[dict]] = {t: [] for t in REVIEW_TABS}
+    for row in loaded["rows"]:
+        by_tab[review_tab(row)].append(row)
+    preview = {p["transaction_id"]: p for p in loaded["preview_rows"]}
+    names = {c["id"]: c["name"] for c in loaded["categories"]}
+    types = {c["id"]: c["type"] for c in loaded["categories"]}
+    entry_types = {c["id"]: c.get("entry_type") for c in loaded["categories"]}
+    # One row per payee across Pending and Approved (ab-292); handled rows
+    # group on their own.
+    not_handled = [r for t in ("decide", "decided", "sorted") for r in by_tab[t]]
+    all_groups = build_groups(
+        not_handled, keys=loaded["keys"], preview=preview, category_names=names, with_status=True,
+        category_types=types, category_entry_types=entry_types,
+    ) + build_groups(by_tab["handled"], keys=loaded["keys"], category_names=names, with_status=True,
+                     category_types=types, category_entry_types=entry_types)
+    return all_groups, by_tab
 
 
 @router.get("/{import_id}/preview.csv", response_class=Response)
@@ -764,7 +797,8 @@ async def confirm_statement_import_endpoint(
 # resumed on any device; the uploads list (ab-267) shows "N of M". The row
 # is deleted on confirm (reviewed_at records "finished") or on discard.
 
-ProgressStep = Literal["processing", "review", "failed", "done"]
+# ab-296: Upload, Processing, Allocation, Review, Finish import ("done").
+ProgressStep = Literal["processing", "allocation", "review", "failed", "done"]
 
 
 class ProgressResponse(BaseModel):
@@ -789,7 +823,9 @@ def _derived_step(statement_import: dict) -> str:
         return "processing"
     if statement_import["status"] == "failed":
         return "failed"
-    return "done" if statement_import.get("reviewed_at") else "review"
+    if statement_import.get("reviewed_at"):
+        return "done"
+    return "review" if statement_import.get("allocated_at") else "allocation"
 
 
 async def _owned_import(pool: asyncpg.Pool, *, import_id: UUID, user_id: UUID) -> dict:
@@ -817,7 +853,8 @@ async def get_import_progress_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
         ) from None
     if saved is not None:
-        return {**saved, "error_detail": None}
+        # The import says which step it's on (ab-296); an old draft only adds counts.
+        return {**saved, "step": _derived_step(statement_import), "error_detail": None}
     return {
         "step": _derived_step(statement_import),
         "draft": Draft(),
@@ -867,7 +904,7 @@ async def save_import_progress_endpoint(
             if not picked <= own:
                 raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unknown category")
         reviewed_count, total_count = progress_counts(rows, keys, draft.model_dump())
-        return await upsert_progress(
+        saved = await upsert_progress(
             pool,
             import_id=import_id,
             step=body.step,
@@ -875,6 +912,7 @@ async def save_import_progress_endpoint(
             reviewed_count=reviewed_count,
             total_count=total_count,
         )
+        return {**saved, "step": _derived_step(statement_import)}
     except HTTPException:
         raise
     except Exception:
@@ -904,3 +942,41 @@ async def discard_import_progress_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
         ) from None
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- ab-296: Allocation <-> Review ---------------------------------------------
+
+
+class StepRequest(BaseModel):
+    step: Literal["allocation", "review"]
+
+
+class StepResponse(BaseModel):
+    step: Literal["allocation", "review"]
+
+
+@router.put("/{import_id}/step", response_model=StepResponse)
+async def set_import_step_endpoint(
+    import_id: UUID,
+    body: StepRequest,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """Moves the upload wizard between Allocation and Review, so a resumed
+    import lands where the user left it. Finishing is still POST /confirm."""
+    _require_pool(pool)
+    try:
+        statement_import = await _owned_import(pool, import_id=import_id, user_id=user_id)
+        if statement_import["status"] != "parsed":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="This statement hasn't finished processing yet"
+            )
+        await set_import_allocated(pool, import_id=import_id, allocated=body.step == "review")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error moving import %s to %s, user %s", import_id, body.step, user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
+        ) from None
+    return {"step": body.step}
