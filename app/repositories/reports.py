@@ -8,10 +8,12 @@ import asyncpg
 from app.repositories.budget_plans import plan_totals
 from app.services.row_kind import (
     BUCKET,
+    counted_amount,
     is_transfer_allocation_sql,
     kind_of_row,
     saved_amount,
     transaction_kind,
+    transaction_refund,
     transaction_saving,
 )
 
@@ -175,7 +177,10 @@ def build_report(rows: list[dict], *, currency: str) -> dict:
         total_saving += saving
         if kind == "counted":
             if direction == "in":
-                total_in += txn_amount
+                # ab-286: the part filed as a refund comes off money out.
+                refund = transaction_refund(alloc_rows)
+                total_in += txn_amount - refund
+                total_out -= refund
             else:
                 total_out += txn_amount - saving
 
@@ -203,7 +208,7 @@ def build_report(rows: list[dict], *, currency: str) -> dict:
                     "total": ZERO,
                 },
             )
-            bucket["total"] += row["alloc_amount"]
+            bucket["total"] += counted_amount(row_kind, row["alloc_amount"])
 
     return {
         "currency": currency,
@@ -252,7 +257,8 @@ def build_csv_rows(rows: list[dict]) -> list[dict]:
     for alloc_rows in _group_by_transaction(rows).values():
         first = alloc_rows[0]
         category_names = [
-            row["category_name"]
+            # ab-286: a refund reads "Refund · Groceries".
+            f"Refund · {row['category_name']}" if kind_of_row(row) == "refund" else row["category_name"]
             for row in alloc_rows
             if row["category_id"] is not None and kind_of_row(row) != "transfer"
         ]
@@ -305,6 +311,7 @@ async def fetch_account_summary_rows(pool: asyncpg.Pool, *, user_id: UUID, accou
             al.amount AS alloc_amount,
             al.transfer_reason_id,
             al.category_id,
+            c.type AS category_type,
             c.entry_type AS category_entry_type,
             t.handled_as,
             sl.role AS sub_ledger_role
@@ -352,7 +359,8 @@ def build_account_summary(rows: list[dict]) -> list[dict]:
         # ab-287: where the allocation counts (app.services.row_kind) -
         # transfers and borrowed money count nowhere; saving is neither
         # income nor spending (ab-259).
-        bucket_name = BUCKET[kind_of_row(row)]
+        kind = kind_of_row(row)
+        bucket_name = BUCKET[kind]
         if bucket_name == "saving":
             bucket["saving"] += saved_amount(
                 handled_as=row.get("handled_as"), direction=row["direction"],
@@ -361,7 +369,7 @@ def build_account_summary(rows: list[dict]) -> list[dict]:
         elif bucket_name == "in":
             bucket["money_in"] += row["alloc_amount"]
         elif bucket_name == "out":
-            bucket["money_out"] += row["alloc_amount"]
+            bucket["money_out"] += counted_amount(kind, row["alloc_amount"])
 
     return sorted(summary.values(), key=lambda b: b["account_nickname"])
 

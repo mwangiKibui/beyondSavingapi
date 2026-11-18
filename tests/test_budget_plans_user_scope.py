@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.services.row_kind import COUNTED_ALLOCATION_SQL
+from app.services.row_kind import ALLOCATION_KIND_SQL
 
 from app.repositories import budget_plans, reports
 
@@ -65,7 +65,7 @@ def assert_user_scoped(sql, args):
 
 def assert_counted_only(sql):
     # ab-287: transfers, borrowed money and saving are left out by kind.
-    assert COUNTED_ALLOCATION_SQL in sql
+    assert ALLOCATION_KIND_SQL in sql
 
 
 @pytest.mark.asyncio
@@ -97,7 +97,9 @@ async def test_money_flows_list_only_the_users_rows():
     for sql, args in queries:
         assert_user_scoped(sql, args)
         assert_counted_only(sql)
-    assert {args[2] for _, args in queries} == {"in", "out"}
+    # ab-286: Money Out lists refunds too (negative).
+    assert sorted(tuple(args[2]) for _, args in queries) == [
+        ("income",), ("spending", "loan_repayment", "refund")]
 
 
 @pytest.mark.asyncio

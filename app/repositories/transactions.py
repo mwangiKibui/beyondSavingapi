@@ -166,6 +166,8 @@ async def get_allocations(pool: asyncpg.Pool, *, transaction_id: UUID) -> list[d
     rows = await pool.fetch(
         """
         SELECT al.id, al.category_id, c.name AS category_name,
+               -- ab-286: money in under an expense category is a refund.
+               (t.direction = 'in' AND c.type = 'expense') AS is_refund,
                al.transfer_reason_id, tr.name AS transfer_reason_name,
                al.source_account_id, sa.nickname AS source_account_name,
                al.source_sub_ledger_id, ssl.name AS source_sub_ledger_name,
@@ -173,6 +175,7 @@ async def get_allocations(pool: asyncpg.Pool, *, transaction_id: UUID) -> list[d
                al.amount, al.currency, al.original_amount, al.original_currency,
                al.note, al.created_at
         FROM allocations al
+        JOIN transactions t ON t.id = al.transaction_id
         LEFT JOIN categories c ON c.id = al.category_id
         LEFT JOIN transfer_reasons tr ON tr.id = al.transfer_reason_id
         LEFT JOIN accounts sa ON sa.id = al.source_account_id

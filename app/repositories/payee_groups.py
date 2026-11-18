@@ -135,7 +135,7 @@ async def lock_apply(conn: asyncpg.Connection, *, apply_id: UUID, user_id: UUID)
     row = await conn.fetchrow(
         """
         SELECT ca.id, ca.import_id, ca.category_id, ca.transfer_reason_id, ca.group_key, ca.remember, ca.snapshot,
-               ca.undone_at, c.name AS category_name, tr.name AS transfer_reason_name
+               ca.undone_at, c.name AS category_name, c.type AS category_type, tr.name AS transfer_reason_name
         FROM category_applies ca
         LEFT JOIN categories c ON c.id = ca.category_id
         LEFT JOIN transfer_reasons tr ON tr.id = ca.transfer_reason_id

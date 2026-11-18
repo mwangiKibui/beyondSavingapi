@@ -148,6 +148,9 @@ class AllocationItem(BaseModel):
     id: UUID
     category_id: UUID | None = None
     category_name: str | None = None
+    # ab-286: money in under an expense category - it lowers that
+    # category's spending.
+    is_refund: bool = False
     # Transfer-shaped split fields (ab-134) - all None for an ordinary
     # categorized/no-category allocation. Source names are resolved here
     # (not just ids) so the frontend can render a transfer-shaped split
@@ -215,6 +218,8 @@ class AllocationCreateItem(BaseModel):
     source_description: str | None = None
     amount: float
     note: str | None = None
+    # ab-286: money in filed as a refund of this EXPENSE category.
+    refund: bool = False
 
 
 class CreateAllocationsRequest(BaseModel):
@@ -339,9 +344,27 @@ async def create_allocations_endpoint(
         # or transfer-shaped split, neither of which has a type to compare.
         expected_type = _CATEGORY_TYPE_FOR_DIRECTION[transaction["direction"]]
         for index, item in enumerate(body.allocations, start=1):
+            if item.refund:
+                # ab-286: a refund is money in, under an expense category,
+                # and is never remembered.
+                if transaction["direction"] != "in":
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"Split {index}: Only money in can be a refund",
+                    )
+                if item.category_id is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"Split {index}: A refund needs the expense category it comes off",
+                    )
+                if body.update_rule:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Refunds aren't remembered"
+                    )
             if item.category_id is None:
                 continue
-            if categories_by_id[item.category_id]["type"] != expected_type:
+            wanted = "expense" if item.refund else expected_type
+            if categories_by_id[item.category_id]["type"] != wanted:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=f"Split {index}: Category type doesn't match this transaction's direction",
@@ -388,7 +411,8 @@ async def create_allocations_endpoint(
         try:
             category_amounts: dict[UUID, Decimal] = {}
             for item in body.allocations:
-                if item.category_id is None:
+                # A refund only ever lowers spending - no new alert (ab-286).
+                if item.category_id is None or item.refund:
                     continue
                 category_amounts[item.category_id] = category_amounts.get(
                     item.category_id, Decimal(0)

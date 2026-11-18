@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 
 from app.repositories.dashboard import build_dashboard
-from app.repositories.reports import build_account_summary, build_report
+from app.repositories.reports import build_csv_rows, build_account_summary, build_report
 from app.services.row_kind import (
     BUCKET,
     COUNTED_KINDS,
@@ -21,7 +21,7 @@ from app.services.row_kind import (
 D = Decimal
 
 
-def expected_kind(direction, handled_as, has_category, entry_type, has_transfer_reason):
+def expected_kind(direction, handled_as, has_category, entry_type, has_transfer_reason, category_type):
     """The ticket's precedence table, written out independently."""
     if has_transfer_reason:
         return "transfer"
@@ -29,6 +29,8 @@ def expected_kind(direction, handled_as, has_category, entry_type, has_transfer_
         return "saving"
     if handled_as == "loan" and not has_category:
         return "borrowed"
+    if direction == "in" and category_type == "expense":
+        return "refund"
     if direction == "out" and entry_type == "saving":
         return "saving"
     if direction == "out" and entry_type == "loan_repayment":
@@ -36,7 +38,8 @@ def expected_kind(direction, handled_as, has_category, entry_type, has_transfer_
     return "spending" if direction == "out" else "income"
 
 
-# Every combination (an allocation with no category has no entry type).
+# Every combination (an allocation with no category has no entry type
+# or category type; only expense categories have a non-general entry type).
 SIGNALS = [
     s for s in product(
         ("in", "out"),
@@ -44,25 +47,29 @@ SIGNALS = [
         (True, False),
         (None, "general", "saving", "loan_repayment"),
         (True, False),
+        (None, "income", "expense"),
     )
-    if s[2] or s[3] is None
+    if (s[2] or (s[3] is None and s[5] is None)) and (not s[2] or s[5] is not None)
+    and (s[5] != "income" or s[3] in (None, "general"))
 ]
 
 
-@pytest.mark.parametrize("direction, handled_as, has_category, entry_type, has_transfer_reason", SIGNALS)
-def test_every_combination_of_signals(direction, handled_as, has_category, entry_type, has_transfer_reason):
+@pytest.mark.parametrize(
+    "direction, handled_as, has_category, entry_type, has_transfer_reason, category_type", SIGNALS)
+def test_every_combination_of_signals(direction, handled_as, has_category, entry_type, has_transfer_reason,
+                                      category_type):
     got = allocation_kind(direction=direction, handled_as=handled_as, has_category=has_category,
-                          entry_type=entry_type, has_transfer_reason=has_transfer_reason)
-    assert got == expected_kind(direction, handled_as, has_category, entry_type, has_transfer_reason)
+                          entry_type=entry_type, has_transfer_reason=has_transfer_reason, category_type=category_type)
+    assert got == expected_kind(direction, handled_as, has_category, entry_type, has_transfer_reason, category_type)
     assert got in KINDS
 
 
 def test_buckets():
     assert {k: BUCKET[k] for k in KINDS} == {
         "spending": "out", "loan_repayment": "out", "income": "in", "saving": "saving",
-        "borrowed": None, "transfer": None, "refund": None,
+        "borrowed": None, "transfer": None, "refund": "out",
     }
-    assert COUNTED_KINDS == {"spending", "loan_repayment", "income"}
+    assert COUNTED_KINDS == {"spending", "loan_repayment", "income", "refund"}
 
 
 def r(**kw):
@@ -179,3 +186,53 @@ def test_a_transfer_split_with_a_saving_part_is_netted_out_whole_everywhere():
         "saving": transaction_saving(rows),
     }], total_budget=D("0"), currency="KES")
     assert (dash["total_out"], dash["total_saving"]) == (D("0"), D("0"))
+
+
+
+# --- ab-286: refunds ----------------------------------------------------------
+
+
+def test_a_refund_lowers_spending_and_adds_no_income():
+    """KES 1,000 groceries spent, then KES 400 refunded."""
+    rows = [*txn("out", 1000, [(GROC, None, 1000)]), *txn("in", 400, [(GROC, None, 400)])]
+    for r in rows:
+        r["category_type"] = "expense"
+    report = build_report(rows, currency="KES")
+    assert (report["total_in"], report["total_out"]) == (D("0"), D("600"))
+    [groc] = report["by_category"]
+    assert groc["total"] == D("600")
+    [acc] = build_account_summary(rows)
+    assert (acc["money_in"], acc["money_out"]) == (D("0"), D("600"))
+
+
+def test_refunds_beyond_spending_show_the_real_negative_number():
+    rows = txn("in", 500, [(GROC, None, 500)])
+    for r in rows:
+        r["category_type"] = "expense"
+    report = build_report(rows, currency="KES")
+    assert (report["total_in"], report["total_out"], report["by_category"][0]["total"]) == (
+        D("0"), D("-500"), D("-500"))
+
+
+def test_part_refund_part_income_on_one_row():
+    rows = txn("in", 1000, [(GROC, None, 300), (SALARY, None, 700)])
+    report = build_report(rows, currency="KES")
+    assert (report["total_in"], report["total_out"]) == (D("700"), D("-300"))
+
+
+def test_dashboard_takes_refunds_off_money_out():
+    dash = build_dashboard([{
+        "account_id": ACC, "account_nickname": "M-Pesa", "transaction_id": uuid4(), "txn_amount": D("400"),
+        "direction": "in", "kind": "counted", "saving": D("0"), "refund": D("400"),
+    }], total_budget=D("0"), currency="KES")
+    assert (dash["total_in"], dash["total_out"], dash["accounts"][0]["money_out"]) == (D("0"), D("-400"), D("-400"))
+
+
+
+def test_the_export_labels_a_refund():
+    rows = txn("in", 400, [(GROC, None, 400)])
+    for r in rows:
+        r.update(category_type="expense", category_name="Groceries", txn_date=None, account_nickname="M-Pesa",
+                 txn_currency="KES", counterparty=None, description=None)
+    [csv_row] = build_csv_rows(rows)
+    assert csv_row["categories"] == "Refund · Groceries"

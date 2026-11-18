@@ -4,7 +4,7 @@ from uuid import UUID
 
 import asyncpg
 
-from app.services.row_kind import TRANSACTION_KIND_SQL, TRANSACTION_SAVING_SQL
+from app.services.row_kind import TRANSACTION_KIND_SQL, TRANSACTION_REFUND_SQL, TRANSACTION_SAVING_SQL
 from app.repositories.reports import (
     ZERO,
     fetch_budget_plan_rows,
@@ -53,7 +53,8 @@ async def fetch_dashboard_rows(
             -- ab-287: what the row is (app.services.row_kind) and what it
             -- adds to savings.
             {TRANSACTION_KIND_SQL} AS kind,
-            {TRANSACTION_SAVING_SQL} AS saving
+            {TRANSACTION_SAVING_SQL} AS saving,
+            {TRANSACTION_REFUND_SQL} AS refund
         FROM accounts a
         LEFT JOIN transactions t
             ON t.account_id = a.id AND t.txn_date >= $3 AND t.txn_date <= $4
@@ -62,7 +63,7 @@ async def fetch_dashboard_rows(
         ORDER BY a.nickname
         """.replace("{TRANSACTION_KIND_SQL}", TRANSACTION_KIND_SQL).replace(
             "{TRANSACTION_SAVING_SQL}", TRANSACTION_SAVING_SQL
-        ),
+        ).replace("{TRANSACTION_REFUND_SQL}", TRANSACTION_REFUND_SQL),
         user_id,
         currency,
         from_date,
@@ -107,8 +108,12 @@ def build_dashboard(rows: list[dict], *, total_budget: Decimal, currency: str) -
         if row["kind"] == "saving":
             continue  # ab-259: neither income nor spending
         if row["direction"] == "in":
-            bucket["money_in"] += row["txn_amount"]
-            total_in += row["txn_amount"]
+            # ab-286: the part filed as a refund comes off money out.
+            refund = row.get("refund") or ZERO
+            bucket["money_in"] += row["txn_amount"] - refund
+            total_in += row["txn_amount"] - refund
+            bucket["money_out"] -= refund
+            total_out -= refund
         else:
             bucket["money_out"] += row["txn_amount"] - saving
             total_out += row["txn_amount"] - saving

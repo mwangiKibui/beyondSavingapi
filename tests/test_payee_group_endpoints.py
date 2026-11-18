@@ -552,3 +552,22 @@ def test_apply_passes_a_transfer_and_its_other_side_through(client, fake_user, f
 def test_apply_rejects_bad_transfer_bodies(client, fake_user, fake_pool, applies, payload):
     assert client.post("/category-applies", json=payload).status_code == 422
     applies["apply_groups"].assert_not_awaited()
+
+
+
+# --- ab-286: refunds ------------------------------------------------------------
+
+
+def test_apply_passes_a_refund_through(client, fake_user, fake_pool, applies):
+    client.post("/category-applies", json=body(category_id=str(uuid4()), refund=True))
+    assert applies["apply_groups"].await_args.kwargs["groups"][0].refund is True
+
+
+@pytest.mark.parametrize("payload, detail", [
+    (body(refund=True, use_suggestion=True), "A refund needs the expense category it comes off"),
+    (body(refund=True, category_id=str(uuid4()), remember=True), "Refunds aren't remembered"),
+])
+def test_apply_rejects_bad_refunds(client, fake_user, fake_pool, applies, payload, detail):
+    response = client.post("/category-applies", json=payload)
+    assert response.status_code == 422 and response.json()["detail"] == detail
+    applies["apply_groups"].assert_not_awaited()

@@ -31,6 +31,8 @@ class GroupRow(BaseModel):
     category_name: str | None = None
     transfer_reason_id: UUID | None = None
     transfer_reason_name: str | None = None
+    # ab-286: filed as a refund of category_name (an expense category).
+    is_refund: bool = False
     apply_id: UUID | None = None
     suggestion: "GroupSuggestion | None" = None
 
@@ -78,6 +80,7 @@ class PayeeGroup(BaseModel):
     # ab-285: every row filed as a Funds transfer under this reason.
     transfer_reason_id: UUID | None = None
     transfer_reason_name: str | None = None
+    is_refund: bool = False
     apply_id: UUID | None = None
     # Handled tab only (ab-281).
     handled_as: Literal["charge", "loan", "transfer", "saving"] | None = None

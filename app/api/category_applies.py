@@ -61,6 +61,9 @@ class ApplyGroupRequest(BaseModel):
     other_account_id: UUID | None = None
     new_account: NewAccountRequest | None = None
     someone_else_name: str | None = None
+    # ab-286: money in filed as a refund of an expense category (with
+    # category_id or new_category_name). Refunds are never remembered.
+    refund: bool = False
     # "From now on": the payee's top saved choice, plus a shared vote for
     # business payees. Off learns nothing.
     remember: bool = False
@@ -106,6 +109,7 @@ class AppliedGroup(BaseModel):
     transfer_reason_id: UUID | None = None
     transfer_reason_name: str | None = None
     other_account_id: UUID | None = None
+    is_refund: bool = False
     remember: bool
     allocated: list[UUID]
     # Zero-amount rows: nothing to allocate.
@@ -190,6 +194,13 @@ async def apply_categories_endpoint(
                     "or transfer_reason_id"
                 ),
             )
+        if group.refund and (group.category_id is None and group.new_category_name is None):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="A refund needs the expense category it comes off",
+            )
+        if group.refund and group.remember:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Refunds aren't remembered")
         if group.new_account is not None:
             _validate_provider(group.new_account.account_type, group.new_account.provider)
             if group.new_account.account_number:

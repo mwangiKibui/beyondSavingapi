@@ -100,6 +100,9 @@ class ApplyGroup:
     other_account_id: UUID | None = None
     new_account: dict | None = None
     someone_else_name: str | None = None
+    # ab-286: money in filed as a refund of an EXPENSE category - it lowers
+    # that category's spending. Never remembered.
+    refund: bool = False
     # Internal: the suggestion use_suggestion resolved to for these rows.
     suggestion: dict | None = None
 
@@ -162,6 +165,12 @@ async def uncategorised_groups(
         conn, user_id=user_id, rows=rows, keys=extract_row_keys(rows, secret=secret)
     )
     return build_groups(rows, keys=keys, preview=preview), len(rows)
+
+
+def _wanted_type(direction: str, refund: bool) -> str:
+    """The category type a group needs: a refund (ab-286) takes an
+    expense category on money in."""
+    return "expense" if refund else CATEGORY_TYPE_FOR_DIRECTION[direction]
 
 
 def _name_key(name: str, category_type: str) -> tuple[str, str]:
@@ -231,7 +240,9 @@ async def apply_groups(
             targets.append(("reason", s["transfer_reason_id"]) if s["transfer_reason_id"] is not None
                            else ("reason_name", s["category_name"]))
             continue
-        wanted = CATEGORY_TYPE_FOR_DIRECTION[by_id[g.transaction_ids[0]]["direction"]]
+        if g.refund and by_id[g.transaction_ids[0]]["direction"] != "in":
+            raise AllocationRejected(422, "Only money in can be a refund")
+        wanted = _wanted_type(by_id[g.transaction_ids[0]]["direction"], g.refund)
         name = None
         if g.use_suggestion:
             s = g.suggestion
@@ -273,7 +284,7 @@ async def apply_groups(
         category = by_cat_id.get(by_name[value]["id"] if kind == "name" else value)
         if category is None:
             raise AllocationRejected(404, "Category not found")
-        if category["type"] != CATEGORY_TYPE_FOR_DIRECTION[direction]:
+        if category["type"] != _wanted_type(direction, g.refund):
             raise AllocationRejected(
                 422, "A category's type doesn't match one of the selected transactions' direction"
             )
@@ -309,7 +320,7 @@ async def apply_groups(
             )
             for r, amount in zip(allocatable, amounts):
                 # Transfers are never spending or income: no budget alerts.
-                if not is_transfer:
+                if not is_transfer and not g.refund:
                     plan.transaction_ids.append(r["id"])
                     plan.category_ids.append(category_id)
                     plan.amounts.append(amount)
@@ -332,6 +343,7 @@ async def apply_groups(
             "category_name": category["name"] if category else None,
             "transfer_reason_id": reason_id,
             "transfer_reason_name": reason["name"] if reason else None,
+            "is_refund": g.refund,
             "other_account_id": other["account_id"],
             "remember": g.remember,
             "allocated": [r["id"] for r in allocatable],
@@ -634,5 +646,10 @@ async def apply_earlier(conn: asyncpg.Connection, *, user_id: UUID, apply_id: UU
             other_account_id=source["source_account_id"], someone_else_name=source["source_description"],
         )
     else:
-        group = ApplyGroup(transaction_ids=waiting, category_id=applied["category_id"])
+        group = ApplyGroup(
+            transaction_ids=waiting, category_id=applied["category_id"],
+            # ab-286: an expense category on money in was a refund.
+            refund=applied.get("category_type") == "expense"
+            and next(r["direction"] for r in rows if r["id"] == waiting[0]) == "in",
+        )
     return await apply_groups(conn, user_id=user_id, secret=secret, groups=[group])

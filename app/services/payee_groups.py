@@ -81,6 +81,7 @@ def build_groups(
     preview: dict[UUID, dict] | None = None,
     category_names: dict[UUID, str] | None = None,
     with_status: bool = False,
+    category_types: dict[UUID, str] | None = None,
 ) -> list[dict]:
     """rows: each with id, txn_date, amount, currency, direction,
     description, import_id, file_name, account_nickname and, where known,
@@ -92,6 +93,12 @@ def build_groups(
     a payee's pending and approved lines share one group."""
     preview = preview or {}
     category_names = category_names or {}
+    category_types = category_types or {}
+
+    def is_refund(r: dict) -> bool:
+        # ab-286: money in under an expense category.
+        return r["direction"] == "in" and category_types.get(r.get("category_id")) == "expense"
+
     by_key: dict[str, list[dict]] = {}
     for r in rows:
         k = payee_group_key(keys[r["id"]], r["direction"], r["id"])
@@ -135,6 +142,7 @@ def build_groups(
             "suggestion": group_suggestion([preview.get(r["id"], {}).get("suggestion") for r in members]),
             "category_id": category_id,
             "category_name": category_names.get(category_id) if category_id else None,
+            "is_refund": bool(category_id) and is_refund(latest),
             # ab-285: every row filed as a Funds transfer under one reason.
             "transfer_reason_id": _same([r.get("transfer_reason_id") for r in members]),
             "transfer_reason_name": _same([r.get("transfer_reason_name") for r in members]),
@@ -155,6 +163,7 @@ def build_groups(
                     "category_name": category_names.get(r.get("category_id")) if r.get("category_id") else None,
                     "transfer_reason_id": r.get("transfer_reason_id"),
                     "transfer_reason_name": r.get("transfer_reason_name"),
+                    "is_refund": is_refund(r),
                     "apply_id": r.get("apply_id"),
                     "suggestion": preview.get(r["id"], {}).get("suggestion"),
                 }
