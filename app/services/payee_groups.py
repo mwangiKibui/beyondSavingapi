@@ -202,6 +202,10 @@ def build_groups(
                     "currency": r["currency"],
                     "description": r["description"],
                     "import_id": r.get("import_id"),
+                    # ab-296: the upload that first recorded the row, so a
+                    # re-upload's Review can say "already recorded from ...".
+                    "file_name": r.get("file_name"),
+                    "imported_at": r.get("import_created_at"),
                     "status": statuses[i] if with_status else None,
                     "category_id": r.get("category_id"),
                     "category_name": category_names.get(r.get("category_id")) if r.get("category_id") else None,

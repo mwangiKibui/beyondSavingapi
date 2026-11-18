@@ -57,7 +57,7 @@ async def get_import_rows(
                t.balance_after,
                t.account_id, t.handled_as, t.handled_reason, t.handling_dismissed,
                t.sub_ledger_id, sl.name AS sub_ledger_name, sl.role AS sub_ledger_role,
-               t.import_id, si.file_name, acct.nickname AS account_nickname,
+               t.import_id, si.file_name, si.created_at AS import_created_at, acct.nickname AS account_nickname,
                alloc.apply_id, COALESCE(alloc.applied_here, false) AS applied_here,
                pair.id AS paired_transaction_id, pair.txn_date AS paired_txn_date,
                pair.account_nickname AS paired_account_nickname,

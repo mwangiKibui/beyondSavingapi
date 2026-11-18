@@ -617,3 +617,19 @@ def test_review_needs_auth_and_ownership(client, fake_user, fake_pool, review, m
     review([])
     monkeypatch.setattr("app.api.statement_imports.get_import_for_preview", AsyncMock(return_value=None))
     assert client.get(f"/statement-imports/{IMPORT_ID}/review").status_code == 404
+
+
+def test_review_lines_say_which_upload_first_recorded_them(client, fake_user, fake_pool, review):
+    """ab-296: a re-upload's rows were recorded by an earlier upload; the
+    Review step says so."""
+    earlier = uuid4()
+    review([
+        txn("Merchant Payment to 7777777 - OTHER SHOP"),
+        txn("Merchant Payment to 7777778 - SHOP TWO", import_id=earlier, file_name="september.pdf",
+            import_created_at=datetime(2026, 10, 1, 9, 0, tzinfo=timezone.utc)),
+    ])
+    lines = [r for g in client.get(f"/statement-imports/{IMPORT_ID}/review").json()["items"] for r in g["rows"]]
+    by_import = {r["import_id"]: r for r in lines}
+    assert by_import[str(IMPORT_ID)]["file_name"] == "statement.pdf"
+    assert by_import[str(earlier)]["file_name"] == "september.pdf"
+    assert by_import[str(earlier)]["imported_at"].startswith("2026-10-01T09:00:00")
