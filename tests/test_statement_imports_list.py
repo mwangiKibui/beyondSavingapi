@@ -62,7 +62,8 @@ def test_list_statement_imports_defaults(client, fake_user, fake_pool, monkeypat
 
     assert response.status_code == 200
     body = response.json()
-    assert body == {"items": [{**SAMPLE_ITEM, "reviewed_at": None, "allocated_at": None, "progress": None}],
+    assert body == {"items": [{**SAMPLE_ITEM, "reviewed_at": None, "allocated_at": None, "added_count": None,
+                               "progress": None}],
                     "total": 1, "page": 1,
                     "page_size": 10}
 
@@ -165,3 +166,13 @@ def test_list_says_when_the_user_moved_on_to_review(client, fake_user, fake_pool
                         AsyncMock(return_value=([in_review], 1)))
     item = client.get("/statement-imports").json()["items"][0]
     assert item["allocated_at"] == "2026-11-18T10:00:00Z" and item["reviewed_at"] is None
+
+
+
+def test_list_says_how_many_rows_each_upload_added(client, fake_user, fake_pool, monkeypatch):
+    """ab-297: 0 added from a parsed statement = it was already uploaded."""
+    dup = {**SAMPLE_ITEM, "id": str(uuid4()), "status": "parsed", "reviewed_at": None, "added_count": 0,
+           "progress_step": None, "progress_reviewed_count": None, "progress_total_count": None,
+           "progress_updated_at": None}
+    monkeypatch.setattr("app.api.statement_imports.list_statement_imports", AsyncMock(return_value=([dup], 1)))
+    assert client.get("/statement-imports").json()["items"][0]["added_count"] == 0

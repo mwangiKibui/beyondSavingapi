@@ -23,6 +23,10 @@ async def list_statement_imports(
             si.id, si.account_id, a.nickname AS account_nickname, si.file_name,
             si.status, si.period_start, si.period_end, si.row_count,
             si.error_detail, si.created_at, si.reviewed_at, si.allocated_at,
+            -- ab-297: rows this upload created; 0 from a parsed statement
+            -- means every row was already recorded by an earlier upload.
+            CASE WHEN si.status = 'parsed'
+                 THEN (SELECT COUNT(*) FROM transactions t WHERE t.import_id = si.id) END AS added_count,
             p.step AS progress_step, p.reviewed_count AS progress_reviewed_count,
             p.total_count AS progress_total_count, p.updated_at AS progress_updated_at
         FROM statement_imports si
@@ -104,6 +108,67 @@ async def add_import_sub_ledgers(pool: asyncpg.Pool, *, import_id: UUID, sub_led
     await pool.executemany(
         "INSERT INTO statement_import_sub_ledgers (import_id, sub_ledger_id) VALUES ($1, $2)",
         [(import_id, sub_ledger_id) for sub_ledger_id in sub_ledger_ids],
+    )
+
+
+async def get_import_overlap(pool: asyncpg.Pool, *, import_id: UUID) -> dict:
+    """ab-297: of the rows an upload's review lists (its own, plus statement
+    rows on the account in its period - see get_import_rows), how many it
+    added and how many an earlier upload had already recorded, and the
+    earlier upload holding most of them. Callers check ownership first."""
+    row = await pool.fetchrow(
+        """
+        WITH si AS (SELECT * FROM statement_imports WHERE id = $1),
+        rows AS (
+            SELECT t.import_id
+            FROM transactions t, si
+            WHERE t.import_id = $1
+               OR (
+                    t.account_id = si.account_id
+                AND t.source = 'statement'
+                AND si.period_start IS NOT NULL AND si.period_end IS NOT NULL
+                AND t.txn_date BETWEEN si.period_start AND si.period_end
+                AND (
+                    NOT EXISTS (SELECT 1 FROM statement_import_sub_ledgers s WHERE s.import_id = $1)
+                    OR t.sub_ledger_id IN (SELECT s.sub_ledger_id FROM statement_import_sub_ledgers s WHERE s.import_id = $1)
+                )
+               )
+        ),
+        earlier AS (
+            SELECT import_id FROM rows
+            WHERE import_id IS NOT NULL AND import_id <> $1
+            GROUP BY import_id
+            ORDER BY COUNT(*) DESC, import_id
+            LIMIT 1
+        )
+        SELECT
+            (SELECT COUNT(*) FROM rows WHERE import_id = $1) AS added_count,
+            (SELECT COUNT(*) FROM rows WHERE import_id IS DISTINCT FROM $1) AS already_count,
+            e.id AS earlier_id, e.file_name AS earlier_file_name, e.created_at AS earlier_uploaded_at
+        FROM (SELECT 1) one
+        LEFT JOIN earlier ON true
+        LEFT JOIN statement_imports e ON e.id = earlier.import_id
+        """,
+        import_id,
+    )
+    earlier = None
+    if row["earlier_id"] is not None:
+        earlier = {"import_id": row["earlier_id"], "file_name": row["earlier_file_name"],
+                   "uploaded_at": row["earlier_uploaded_at"]}
+    return {"added_count": row["added_count"], "already_count": row["already_count"], "earlier": earlier}
+
+
+async def delete_import_without_rows(pool: asyncpg.Pool, *, import_id: UUID) -> str | None:
+    """ab-297: removes an upload that added no transactions (a re-upload of
+    a statement already recorded). Returns its stored file's key, or None
+    when it has rows of its own and was kept. Callers check ownership."""
+    return await pool.fetchval(
+        """
+        DELETE FROM statement_imports si
+        WHERE si.id = $1 AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.import_id = si.id)
+        RETURNING si.storage_key
+        """,
+        import_id,
     )
 
 
