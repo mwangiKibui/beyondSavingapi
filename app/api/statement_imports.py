@@ -572,7 +572,7 @@ async def review_groups_endpoint(
 
     items, total = select_groups(
         [g for g in all_groups if in_tab(g, tab)],
-        **params.model_dump(), handled_as=handled_as, status_first=tab in ("all", "approved"),
+        **params.model_dump(), handled_as=handled_as,
     )
     return {
         "items": items,

@@ -220,26 +220,28 @@ def _all_statuses_rows(apply_id):
     ]
 
 
-def test_review_groups_all_lists_every_status_pending_first(client, fake_user, fake_pool, review):
+def test_review_groups_all_lists_every_status(client, fake_user, fake_pool, review):
     review(_all_statuses_rows(uuid4()))
 
     body = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=all").json()
 
-    assert [g["status"] for g in body["items"]] == ["decide", "handled", "handled", "decided", "sorted"]
+    assert sorted(g["status"] for g in body["items"]) == ["decide", "decided", "handled", "handled", "sorted"]
     assert body["total"] == 5
     assert body["row_counts"]["decide"] == 2
     # Pending groups keep their suggestions on All.
-    assert body["items"][0]["row_count"] == 2
+    assert next(g for g in body["items"] if g["status"] == "decide")["row_count"] == 2
 
 
-def test_review_groups_all_still_sorts_within_a_status(client, fake_user, fake_pool, review):
+def test_review_groups_all_sorts_only_by_the_chosen_sort(client, fake_user, fake_pool, review):
+    # 2026-11-18: a row the user files stays where it is on All - status
+    # never reorders the list (Pending is the filter for that).
     review(_all_statuses_rows(uuid4()))
 
     items = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=all&sort=amount&order=desc").json()["items"]
 
-    handled = [g for g in items if g["status"] == "handled"]
-    assert [g["handled_as"] for g in handled] == ["charge", "loan"]  # 10 before 0
-    assert items[0]["status"] == "decide"
+    totals = [g["total"] for g in items]
+    assert totals == sorted(totals, reverse=True)
+    assert [g["status"] for g in items][0] != "decide" or totals[0] == max(totals)
 
 
 def test_review_groups_each_tab_reports_its_status(client, fake_user, fake_pool, review):
