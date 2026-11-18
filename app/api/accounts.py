@@ -1,3 +1,4 @@
+import re
 import logging
 from datetime import date, datetime
 from typing import Literal
@@ -128,7 +129,23 @@ def _validate_provider(account_type: str, provider: str) -> None:
         )
 
 
+# ab-288: money market fund member numbers can carry letters (e.g. Etica).
+MEMBER_NUMBER_PATTERN = re.compile(r"^[A-Za-z0-9/-]+$")
+
+
 def _validate_account_number(account_type: str, account_number: str) -> None:
+    if account_type == "money_market":
+        if not MEMBER_NUMBER_PATTERN.match(account_number):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Member number can use letters, digits, - and / only",
+            )
+        if len(account_number) > MAX_ACCOUNT_NUMBER_LENGTH:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Member number must be at most {MAX_ACCOUNT_NUMBER_LENGTH} characters",
+            )
+        return
     if not account_number.isdigit():
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

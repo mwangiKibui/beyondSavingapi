@@ -142,6 +142,31 @@ def test_create_account_accepts_a_money_market_fund(client, fake_user, fake_pool
     assert response.json()["account_type"] == "money_market"
 
 
+@pytest.mark.parametrize("number", ["ETF-00123", "AB12345", "MMF/2026/7"])
+def test_create_account_accepts_letters_in_a_money_market_member_number(
+    client, fake_user, fake_pool, monkeypatch, number
+):
+    payload = {"nickname": "Etica", "account_type": "money_market", "provider": "Etica Money Market Fund",
+               "account_number": number, "currency": "KES"}
+    created = {**payload, "id": str(uuid4()), "is_active": True,
+               "created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-01-01T00:00:00+00:00"}
+    monkeypatch.setattr("app.api.accounts.create_account", AsyncMock(return_value=created))
+    assert client.post("/accounts", json=payload).status_code == 201
+
+
+@pytest.mark.parametrize("number", ["AB 123", "AB_123", "A" * 21])
+def test_create_account_rejects_a_bad_money_market_member_number(client, fake_user, fake_pool, number):
+    response = client.post("/accounts", json={
+        "nickname": "Etica", "account_type": "money_market", "provider": "Etica Money Market Fund",
+        "account_number": number, "currency": "KES",
+    })
+    assert response.status_code == 422
+
+
+def test_create_account_still_rejects_letters_in_a_bank_account_number(client, fake_user, fake_pool):
+    assert client.post("/accounts", json={**VALID_PAYLOAD, "account_number": "AB12345"}).status_code == 422
+
+
 def test_create_account_rejects_a_bank_as_a_money_market_provider(client, fake_user, fake_pool):
     response = client.post(
         "/accounts",
