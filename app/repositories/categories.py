@@ -54,6 +54,10 @@ DEFAULT_CATEGORIES: list[tuple[str, str]] = [
     ("SACCO savings", "expense"),
     ("Investments & money market", "expense"),
     ("SACCO dividends & interest", "income"),
+    # ab-288: when nothing else fits; the row's note says what it was.
+    # Existing users get these via beyondSavingdb migration 000031.
+    ("Other", "expense"),
+    ("Other", "income"),
 ]
 
 # Defaults that refine "expense" (categories.entry_type, ab-259); every

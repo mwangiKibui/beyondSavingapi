@@ -25,6 +25,7 @@ from app.repositories.row_handling import (
     get_import_to_handle,
     get_or_create_transfer_reason,
     get_owned_providers,
+    get_rehandle_rows,
     get_hand_filed_legs,
     get_hand_pair_candidates,
     get_hand_paired,
@@ -137,13 +138,28 @@ async def handle_import(conn: asyncpg.Connection, *, statement_import: dict, sec
     planned = [(row, _sacco_move(row, h, savings_side_of, spending_side_of)) for row, h in planned]
 
     result = HandleResult(counts=Counter(h.kind for _, h in planned))
+    await _apply_handling(conn, user_id=user_id, planned=planned, savings_side_of=savings_side_of)
+    for spending, savings in sacco_pairs:
+        await set_transfer_group(conn, group_id=uuid4(), ids=[spending["id"], savings["id"]])
+
+    result.paired = await pair_transfers(conn, user_id=user_id, secret=secret, owned=owned)
+    result.paired += await pair_hand_filed_transfers(conn, user_id=user_id)
+    await mark_import_handled(conn, import_id=statement_import["id"])
+    return result
+
+
+async def _apply_handling(
+    conn: asyncpg.Connection, *, user_id: UUID, planned: list[tuple[dict, Handling]], savings_side_of: dict
+) -> None:
+    """Marks each planned row handled and gives it its allocation."""
+    counts = Counter(h.kind for _, h in planned)
     if planned:
         names = sorted({h.category for _, h in planned if h.category})
         categories = await create_categories(conn, user_id=user_id, categories=[(n, "expense") for n in names])
         category_ids = {c["name"].lower(): c["id"] for c in categories}
         reason_id = (
             await get_or_create_transfer_reason(conn, user_id=user_id, name=BETWEEN_MY_ACCOUNTS)
-            if result.counts["transfer"]
+            if counts["transfer"]
             else None
         )
         await set_handled(
@@ -174,13 +190,31 @@ async def handle_import(conn: asyncpg.Connection, *, statement_import: dict, sec
                     "currency": row["currency"],
                 })
         await insert_handled_allocations(conn, allocations=allocations)
-        for spending, savings in sacco_pairs:
-            await set_transfer_group(conn, group_id=uuid4(), ids=[spending["id"], savings["id"]])
 
-    result.paired = await pair_transfers(conn, user_id=user_id, secret=secret, owned=owned)
-    result.paired += await pair_hand_filed_transfers(conn, user_id=user_id)
-    await mark_import_handled(conn, import_id=statement_import["id"])
-    return result
+
+async def rehandle_sub_ledger(conn: asyncpg.Connection, *, user_id: UUID, sub_ledger_id: UUID, secret: str) -> int:
+    """ab-288: after a sub-ledger's role (Holds) changes, its rows nobody
+    has touched are handled again under the new role - e.g. deposits on a
+    sub-ledger fixed to Locked deposits become saving. Rows the user filed,
+    edited or marked "Not ...", and paired transfers, are left alone.
+    Returns how many rows changed."""
+    rows = await get_rehandle_rows(conn, user_id=user_id, sub_ledger_id=sub_ledger_id)
+    if not rows:
+        return 0
+    owned = frozenset(await get_owned_providers(conn, user_id=user_id))
+    changed, planned = [], []
+    for row in rows:
+        handling = _classify(row, provider=row["provider"], owned=owned, secret=secret)
+        if (handling.kind if handling else None) == row["handled_as"]:
+            continue
+        changed.append(row["id"])
+        if handling:
+            planned.append((row, handling))
+    if changed:
+        await delete_allocations(conn, transaction_ids=changed)
+        await set_handled(conn, transaction_ids=changed, kinds=[None] * len(changed), reasons=[None] * len(changed))
+        await _apply_handling(conn, user_id=user_id, planned=planned, savings_side_of={})
+    return len(changed)
 
 
 async def pair_transfers(

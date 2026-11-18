@@ -1,3 +1,4 @@
+import re
 import logging
 from datetime import date, datetime
 from typing import Literal
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
 
-AccountType = Literal["bank", "mobile_money", "sacco"]
+AccountType = Literal["bank", "mobile_money", "sacco", "money_market"]
 Currency = Literal["KES", "USD", "EUR", "GBP", "UGX", "TZS"]
 
 # MVP1 supports a fixed set of institutions per account type - keep in
@@ -34,9 +35,16 @@ PROVIDERS_BY_TYPE: dict[str, list[str]] = {
     "bank": ["Equity Bank", "NCBA Bank"],
     "mobile_money": ["M-Pesa", "Airtel Money"],
     "sacco": ["Mentor Sacco", "Biashara Sacco"],
+    # ab-288: money market funds - no statement parser yet; tracked as the
+    # other side of Funds transfers.
+    "money_market": [
+        "CIC Money Market Fund",
+        "Sanlam Money Market Fund",
+        "Etica Money Market Fund",
+        "Old Mutual Money Market Fund",
+    ],
 }
 
-MOBILE_NUMBER_LENGTH = 9
 MAX_ACCOUNT_NUMBER_LENGTH = 20
 
 
@@ -120,24 +128,55 @@ def _validate_provider(account_type: str, provider: str) -> None:
         )
 
 
-def _validate_account_number(account_type: str, account_number: str) -> None:
+# ab-288: money market fund member numbers can carry letters (e.g. Etica).
+MEMBER_NUMBER_PATTERN = re.compile(r"^[A-Za-z0-9/-]+$")
+# 2026-11-18: a Kenyan mobile number as people type it - 0712345678,
+# 254712345678, +254712345678 or 712345678 (spaces and dashes ignored).
+# Saved as its 9 digits; Safaricom and Airtel numbers start 7 or 1.
+KENYAN_MOBILE_PATTERN = re.compile(r"^(?:\+?254|0)?([17]\d{8})$")
+
+
+def normalize_mobile_number(raw: str) -> str | None:
+    """The 9 digits of a Kenyan mobile number, or None when it isn't one."""
+    match = KENYAN_MOBILE_PATTERN.match(re.sub(r"[\s-]", "", raw))
+    return match.group(1) if match else None
+
+
+def _validate_account_number(account_type: str, account_number: str) -> str:
+    """Checks the number for the account type and returns it as saved (a
+    mobile number becomes its 9 digits)."""
+    if account_type == "mobile_money":
+        normalized = normalize_mobile_number(account_number)
+        if normalized is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Enter a Kenyan mobile number, e.g. 0712345678 or +254712345678",
+            )
+        return normalized
+    if account_type == "money_market":
+        if not MEMBER_NUMBER_PATTERN.match(account_number):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Member number can use letters, digits, - and / only",
+            )
+        if len(account_number) > MAX_ACCOUNT_NUMBER_LENGTH:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Member number must be at most {MAX_ACCOUNT_NUMBER_LENGTH} characters",
+            )
+        return account_number
     if not account_number.isdigit():
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Account number must contain only digits",
         )
 
-    if account_type == "mobile_money":
-        if len(account_number) != MOBILE_NUMBER_LENGTH:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Mobile number must be exactly {MOBILE_NUMBER_LENGTH} digits",
-            )
-    elif len(account_number) > MAX_ACCOUNT_NUMBER_LENGTH:
+    if len(account_number) > MAX_ACCOUNT_NUMBER_LENGTH:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Account number must be at most {MAX_ACCOUNT_NUMBER_LENGTH} digits",
         )
+    return account_number
 
 
 @router.post("", response_model=AccountResponse, status_code=status.HTTP_201_CREATED)
@@ -154,7 +193,7 @@ async def create_account_endpoint(
 
     try:
         _validate_provider(payload.account_type, payload.provider)
-        _validate_account_number(payload.account_type, payload.account_number)
+        account_number = _validate_account_number(payload.account_type, payload.account_number)
 
         account = await create_account(
             pool,
@@ -162,7 +201,7 @@ async def create_account_endpoint(
             nickname=payload.nickname,
             account_type=payload.account_type,
             provider=payload.provider,
-            account_number=payload.account_number,
+            account_number=account_number,
             currency=payload.currency,
         )
     except HTTPException:
@@ -297,8 +336,9 @@ async def update_account_endpoint(
         if payload.provider is not None:
             _validate_provider(effective_type, payload.provider)
 
-        if payload.account_number is not None:
-            _validate_account_number(effective_type, payload.account_number)
+        account_number = payload.account_number
+        if account_number is not None:
+            account_number = _validate_account_number(effective_type, account_number)
 
         account = await update_account(
             pool,
@@ -307,7 +347,7 @@ async def update_account_endpoint(
             nickname=payload.nickname,
             account_type=payload.account_type,
             provider=payload.provider,
-            account_number=payload.account_number,
+            account_number=account_number,
         )
         if account is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")

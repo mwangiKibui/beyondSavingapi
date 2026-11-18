@@ -4,7 +4,14 @@ from uuid import UUID
 
 import asyncpg
 
-from app.services.row_kind import COUNTED_ALLOCATION_SQL, SAVED_ALLOCATION_SQL
+from app.services.row_kind import (
+    ALLOCATION_KIND_SQL,
+    COUNTED_ALLOCATION_SQL,
+    SAVED_ALLOCATION_SQL,
+    category_spend_sql,
+    income_amount_sql,
+    spending_amount_sql,
+)
 from app.services.budget_state import DEFAULT_NEAR_THRESHOLD, derive_budget_state
 
 # MVP1 is single-currency (developer decision, 2026-09-30) - every plan is
@@ -174,9 +181,9 @@ async def plan_totals(
     row = await pool.fetchrow(
         """
         SELECT
-            COALESCE(SUM(a.amount) FILTER (WHERE t.direction = 'in' AND {COUNTED_ALLOCATION}), 0) AS total_income,
-            COALESCE(SUM(a.amount) FILTER (WHERE t.direction = 'out' AND {COUNTED_ALLOCATION}), 0)
-                AS total_expenditure,
+            COALESCE(SUM({INCOME_AMOUNT}), 0) AS total_income,
+            -- ab-286: refunds come off spending.
+            COALESCE(SUM({SPENDING_AMOUNT}), 0) AS total_expenditure,
             COALESCE(SUM({SAVED_ALLOCATION_SQL}), 0) AS total_saving
         FROM allocations a
         JOIN transactions t ON t.id = a.transaction_id
@@ -187,7 +194,8 @@ async def plan_totals(
           AND a.currency = $2
           AND t.txn_date >= $3::date
           AND t.txn_date <= $4::date
-        """.replace("{COUNTED_ALLOCATION}", COUNTED_ALLOCATION).replace("{SAVED_ALLOCATION_SQL}", SAVED_ALLOCATION_SQL),
+        """.replace("{INCOME_AMOUNT}", income_amount_sql()).replace("{SPENDING_AMOUNT}", spending_amount_sql())
+        .replace("{SAVED_ALLOCATION_SQL}", SAVED_ALLOCATION_SQL),
         user_id,
         currency,
         starts_at,
@@ -223,7 +231,7 @@ async def list_plan_money_flows(
                 t.counterparty,
                 t.description,
                 c.name AS category_name,
-                a.amount,
+                {AMOUNT} AS amount,
                 a.currency
             FROM allocations a
             JOIN transactions t ON t.id = a.transaction_id
@@ -231,15 +239,17 @@ async def list_plan_money_flows(
             LEFT JOIN categories c ON c.id = a.category_id
             WHERE acc.user_id = $1
               AND a.currency = $2
-              AND t.direction = $3
-              AND {COUNTED_ALLOCATION}
+              AND {ALLOCATION_KIND_SQL} = ANY($3::text[])
               AND t.txn_date >= $4::date
               AND t.txn_date <= $5::date
             ORDER BY t.txn_date DESC
-            """.replace("{COUNTED_ALLOCATION}", COUNTED_ALLOCATION),
+            """.replace("{ALLOCATION_KIND_SQL}", ALLOCATION_KIND_SQL).replace(
+                "{AMOUNT}", income_amount_sql() if direction == "in" else spending_amount_sql()
+            ),
             user_id,
             plan["currency"],
-            direction,
+            # ab-286: refunds are listed under Money Out, negative.
+            ["income"] if direction == "in" else ["spending", "loan_repayment", "refund"],
             plan["starts_at"],
             plan["ends_at"],
         )
@@ -297,10 +307,11 @@ async def list_budget_plans(
                 c.type AS category_type,
                 b.limit_amount,
                 COALESCE((
-                    SELECT SUM(a.amount)
+                    SELECT SUM({CATEGORY_SPEND})
                     FROM allocations a
                     JOIN transactions t ON t.id = a.transaction_id
                     JOIN accounts acc ON acc.id = t.account_id
+                    JOIN categories ac ON ac.id = a.category_id
                     WHERE a.category_id = b.category_id
                       AND acc.user_id = $5
                       AND a.currency = $2
@@ -311,7 +322,7 @@ async def list_budget_plans(
             JOIN categories c ON c.id = b.category_id
             WHERE b.plan_id = $1
             ORDER BY c.name ASC
-            """,
+            """.replace("{CATEGORY_SPEND}", category_spend_sql(c="ac")),
             plan["id"],
             plan["currency"],
             plan["starts_at"],

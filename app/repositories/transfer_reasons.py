@@ -25,6 +25,9 @@ DEFAULT_TRANSFER_REASONS: list[tuple[str, str | None]] = [
     ("From my savings", "in"),
     ("From an investment / MMF", "in"),
     ("From family", "in"),
+    # ab-288: when no reason fits; the row's note says what it was.
+    # Existing users get it via beyondSavingdb migration 000031.
+    ("Other", None),
 ]
 # What an approved transfer suggestion files under when it names no other
 # reason; also what import handling uses (row_handling.BETWEEN_MY_ACCOUNTS).

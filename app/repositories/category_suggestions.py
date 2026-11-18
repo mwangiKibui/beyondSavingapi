@@ -63,6 +63,7 @@ async def get_import_rows(
                pair.account_nickname AS paired_account_nickname,
                COALESCE(alloc.total, 0) AS allocated,
                alloc.category_id, alloc.transfer_reason_id, alloc.transfer_reason_name,
+               alloc.source_account_name, alloc.source_description, alloc.note,
                COALESCE(alloc.category_count, 0) AS category_count,
                COALESCE(alloc.has_uncategorised, false) AS has_uncategorised
         FROM transactions t
@@ -82,10 +83,16 @@ async def get_import_rows(
                    -- import's review (its "Decided" tab).
                    CASE WHEN COUNT(*) = COUNT(al.apply_id) AND COUNT(DISTINCT al.apply_id) = 1
                         THEN MIN(al.apply_id::text)::uuid END AS apply_id,
-                   bool_or(ca.import_id = $1 AND ca.undone_at IS NULL) AS applied_here
+                   bool_or(ca.import_id = $1 AND ca.undone_at IS NULL) AS applied_here,
+                   -- ab-288: a transfer's other side, for "Funds transfer -> X".
+                   MIN(sa.nickname) AS source_account_name,
+                   MIN(al.source_description) AS source_description,
+                   -- ab-288: the user's own words for the row.
+                   MIN(al.note) FILTER (WHERE al.note <> '') AS note
             FROM allocations al
             LEFT JOIN category_applies ca ON ca.id = al.apply_id
             LEFT JOIN transfer_reasons tr ON tr.id = al.transfer_reason_id
+            LEFT JOIN accounts sa ON sa.id = al.source_account_id
             WHERE al.transaction_id = t.id
         ) alloc ON true
         JOIN accounts acct ON acct.id = t.account_id
@@ -174,7 +181,7 @@ async def get_owner(pool: asyncpg.Pool, *, user_id: UUID) -> dict:
 
 
 async def get_user_categories(pool: asyncpg.Pool, *, user_id: UUID) -> list[dict]:
-    rows = await pool.fetch("SELECT id, name, type FROM categories WHERE user_id = $1", user_id)
+    rows = await pool.fetch("SELECT id, name, type, entry_type FROM categories WHERE user_id = $1", user_id)
     return [dict(row) for row in rows]
 
 

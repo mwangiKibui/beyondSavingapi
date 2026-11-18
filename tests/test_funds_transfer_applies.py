@@ -145,6 +145,16 @@ async def test_someone_else_keeps_the_private_name_on_the_rows_only(db):
     assert "Mum" not in str(prefs)
 
 
+async def test_a_note_is_saved_on_the_rows_and_never_learned(db):
+    # ab-288: "Other" + the user's own words, for the reports.
+    a = row(SENDER, direction="in")
+    await run(db, [a], [ApplyGroup(transaction_ids=[a["id"]], transfer_reason_id=FAMILY_IN["id"],
+                                   note="School trip refund from the class", remember=True)])
+    assert db["insert_applied_allocations"].await_args.kwargs["note"] == "School trip refund from the class"
+    prefs = db["set_preferred_rules"].await_args.kwargs["preferences"]
+    assert "School trip" not in str(prefs)
+
+
 async def test_only_one_other_side(db):
     a = row(SENDER, direction="in")
     with pytest.raises(AllocationRejected) as exc:

@@ -6,6 +6,7 @@ A kind is derived, never stored: it comes from
 
   direction            transactions.direction (in / out)
   handled at import    transactions.handled_as (charge, loan, transfer, saving)
+  category type        categories.type (income / expense)
   category meaning     categories.entry_type (general, saving, loan_repayment)
   category present     allocations.category_id
   transfer             allocations.transfer_reason_id
@@ -15,15 +16,17 @@ Kinds, by precedence (allocation_kind):
   transfer         the allocation has a transfer reason
   saving           the row was handled as saving at import (ab-259)
   borrowed         a loan row handled at import with no category (ab-281)
+  refund           money in filed under an EXPENSE category (ab-286) - it
+                   lowers that category's spending; never income
   saving           money out filed under a saving category
   loan_repayment   money out filed under a loan-repayment category
   spending         any other money out
   income           any other money in
-  refund           reserved for ab-286; nothing produces it yet
 
 Where each kind counts (BUCKET): spending and loan_repayment are money
-out, income is money in, saving is the Saving bucket (never income or
-spending), borrowed and transfer count nowhere.
+out, a refund is money out taken back (SIGN -1), income is money in,
+saving is the Saving bucket (never income or spending), borrowed and
+transfer count nowhere.
 
 Reports that total whole transactions (GET /reports, the dashboard) use
 transaction_kind: a transaction with ANY transfer allocation is netted out
@@ -46,8 +49,10 @@ BUCKET: dict[str, str | None] = {
     "saving": "saving",
     "borrowed": None,
     "transfer": None,
-    "refund": None,  # ab-286 decides; reserved
+    "refund": "out",  # ab-286: counted as negative spending (SIGN)
 }
+# A refund takes spending back.
+SIGN: dict[str, int] = {k: (-1 if k == "refund" else 1) for k in BUCKET}
 # Kinds counted as income / spending in totals.
 COUNTED_KINDS = frozenset(k for k, b in BUCKET.items() if b in ("in", "out"))
 
@@ -61,6 +66,7 @@ def allocation_kind(
     has_category: bool,
     entry_type: str | None,
     has_transfer_reason: bool,
+    category_type: str | None = None,
 ) -> RowKind:
     if has_transfer_reason:
         return "transfer"
@@ -68,6 +74,8 @@ def allocation_kind(
         return "saving"
     if handled_as == "loan" and not has_category:
         return "borrowed"
+    if direction == "in" and category_type == "expense":
+        return "refund"
     if direction == "out":
         if entry_type == "saving":
             return "saving"
@@ -79,14 +87,30 @@ def allocation_kind(
 
 def kind_of_row(row: dict) -> RowKind:
     """allocation_kind for a joined (transaction, allocation, category) row
-    with keys direction, handled_as, category_id, category_entry_type,
-    transfer_reason_id."""
+    with keys direction, handled_as, category_id, category_type,
+    category_entry_type, transfer_reason_id."""
     return allocation_kind(
         direction=row["direction"],
         handled_as=row.get("handled_as"),
         has_category=row.get("category_id") is not None,
         entry_type=row.get("category_entry_type"),
         has_transfer_reason=row.get("transfer_reason_id") is not None,
+        category_type=row.get("category_type"),
+    )
+
+
+def counted_amount(kind: str, amount: Decimal) -> Decimal:
+    """An allocation's amount as it counts in its bucket: a refund
+    negative (ab-286)."""
+    return amount * SIGN[kind]
+
+
+def transaction_refund(alloc_rows: list[dict]) -> Decimal:
+    """The part of a money-in transaction filed as a refund (ab-286): it
+    comes off money out instead of counting as money in."""
+    return sum(
+        (r["alloc_amount"] for r in alloc_rows if r["allocation_id"] is not None and kind_of_row(r) == "refund"),
+        ZERO,
     )
 
 
@@ -163,6 +187,7 @@ def allocation_kind_sql(*, t: str = "t", a: str = "a", c: str = "c") -> str:
         f"(CASE WHEN {a}.transfer_reason_id IS NOT NULL THEN 'transfer'"
         f" WHEN {t}.handled_as = 'saving' THEN 'saving'"
         f" WHEN {t}.handled_as = 'loan' AND {a}.category_id IS NULL THEN 'borrowed'"
+        f" WHEN {t}.direction = 'in' AND {c}.type = 'expense' THEN 'refund'"
         f" WHEN {t}.direction = 'out' AND {c}.entry_type = 'saving' THEN 'saving'"
         f" WHEN {t}.direction = 'out' AND {c}.entry_type = 'loan_repayment' THEN 'loan_repayment'"
         f" WHEN {t}.direction = 'out' THEN 'spending'"
@@ -171,10 +196,31 @@ def allocation_kind_sql(*, t: str = "t", a: str = "a", c: str = "c") -> str:
 
 
 ALLOCATION_KIND_SQL = allocation_kind_sql()
-# Allocations counted as income / spending.
+# Allocations counted as income / spending (refunds included).
 COUNTED_ALLOCATION_SQL = (
     f"{ALLOCATION_KIND_SQL} IN ({', '.join(repr(k) for k in sorted(COUNTED_KINDS))})"
 )
+
+
+def income_amount_sql(*, t: str = "t", a: str = "a", c: str = "c") -> str:
+    """What an allocation adds to income (0 when it isn't income)."""
+    return f"(CASE WHEN {allocation_kind_sql(t=t, a=a, c=c)} = 'income' THEN {a}.amount ELSE 0 END)"
+
+
+def spending_amount_sql(*, t: str = "t", a: str = "a", c: str = "c") -> str:
+    """What an allocation adds to spending: a refund takes it back
+    (ab-286); 0 for anything that isn't spending."""
+    kind = allocation_kind_sql(t=t, a=a, c=c)
+    return (
+        f"(CASE WHEN {kind} IN ('spending', 'loan_repayment') THEN {a}.amount"
+        f" WHEN {kind} = 'refund' THEN -{a}.amount ELSE 0 END)"
+    )
+
+
+def category_spend_sql(*, t: str = "t", a: str = "a", c: str = "c") -> str:
+    """A category's spend for budgets and alerts: its allocations, refunds
+    taken off (ab-286)."""
+    return f"(CASE WHEN {allocation_kind_sql(t=t, a=a, c=c)} = 'refund' THEN -{a}.amount ELSE {a}.amount END)"
 # What an allocation adds to savings (t, a, c, sl): a handled-saving row
 # counts the whole transaction, signed; a saving category its amount.
 SAVED_ALLOCATION_SQL = (
@@ -196,6 +242,13 @@ TRANSACTION_KIND_SQL = (
     " WHERE al.transaction_id = t.id AND al.category_id IS NOT NULL) THEN 'borrowed'"
     " WHEN t.handled_as = 'saving' THEN 'saving'"
     " ELSE 'counted' END)"
+)
+# transaction_refund over transactions t: money in filed under expense
+# categories (ab-286).
+TRANSACTION_REFUND_SQL = (
+    "(CASE WHEN t.direction = 'in' AND t.handled_as IS DISTINCT FROM 'saving'"
+    " THEN COALESCE((SELECT SUM(al.amount) FROM allocations al JOIN categories c ON c.id = al.category_id"
+    " WHERE al.transaction_id = t.id AND c.type = 'expense'), 0) ELSE 0 END)"
 )
 # transaction_saving over transactions t + sub-ledger sl.
 TRANSACTION_SAVING_SQL = (

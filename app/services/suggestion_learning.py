@@ -47,6 +47,10 @@ def _one_vote(counter: Counter) -> str:
     return counter.most_common(1)[0][0]
 
 
+# ab-288: the default category for when nothing else fits.
+OTHER_CATEGORY = "other"
+
+
 def plan_learning(rows: list[ConfirmedRow], directory: Directory) -> Learning:
     rules: dict[tuple, dict] = {}
     labels: dict[tuple, dict] = {}
@@ -77,6 +81,10 @@ def plan_learning(rows: list[ConfirmedRow], directory: Directory) -> Learning:
             entry["label"] = r.label or entry["label"]
             entry["user_entered_paybill"] = r.user_entered_paybill or entry["user_entered_paybill"]
 
+        # ab-288: "Other" says nothing about the payee - the user's own
+        # choice is kept (rules above), but it's never a shared vote.
+        if (r.category_name or "").strip().lower() == OTHER_CATEGORY:
+            continue
         name_key, number_key = vote_keys(key, r.direction, directory)
         if name_key:
             merchant.setdefault((key.name, r.direction), Counter())[r.category_name] += 1

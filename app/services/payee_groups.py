@@ -11,6 +11,7 @@ statement text, and only ever to the user who imported them (ab-269).
 from collections import Counter
 from uuid import UUID
 
+from app.services.row_kind import allocation_kind
 from app.services.category_suggestions import _display_name, _is_open, group_key
 from app.services.merchant_keys import RowKey, extract_key
 
@@ -18,9 +19,6 @@ ALLOWED_PAGE_SIZES = (5, 10, 20, 30)
 DEFAULT_PAGE_SIZE = 30
 SORTS = ("rows", "amount", "payee")
 REVIEW_TABS = ("decide", "decided", "sorted", "handled")
-# The review's All view (ab-289): Pending first, then Auto-suggested
-# (handled at import), then Approved (decided here or sorted earlier).
-STATUS_RANK = {"decide": 0, "handled": 1, "decided": 2, "sorted": 2}
 
 
 def extract_row_keys(rows: list[dict], *, secret: str) -> dict[UUID, RowKey]:
@@ -44,12 +42,48 @@ def review_tab(row: dict) -> str:
     decided  categorised by an apply from this import's review
     sorted   categorised (or reconciled) some other way, e.g. on an
              earlier, overlapping statement
-    handled  handled at import (ab-281)"""
-    if row.get("handled_as"):
+    handled  handled at import (ab-281) - not Saving / Borrowed the user
+             filed in the review (ab-288), which carry an apply"""
+    if _handled_at_import(row):
         return "handled"
     if _is_open(row):
         return "decide"
     return "decided" if row.get("applied_here") else "sorted"
+
+
+def _handled_at_import(row: dict) -> bool:
+    return bool(row.get("handled_as")) and row.get("apply_id") is None
+
+
+# ab-288: the review's names for row kinds (app.services.row_kind).
+TYPE_FOR_KIND = {"spending": "expense"}
+
+
+def row_type(row: dict, *, category_types: dict, category_entry_types: dict) -> str | None:
+    """What a filed row is, as the review's Allocation column names it:
+    expense, income, refund, transfer, saving, borrowed, loan_repayment.
+    None while the row is still open."""
+    filed = row.get("handled_as") or row.get("category_id") or row.get("transfer_reason_id") or row.get("apply_id")
+    if not filed:
+        return None
+    category_id = row.get("category_id")
+    kind = allocation_kind(
+        direction=row["direction"],
+        handled_as=row.get("handled_as"),
+        has_category=category_id is not None,
+        entry_type=category_entry_types.get(category_id),
+        has_transfer_reason=row.get("transfer_reason_id") is not None,
+        category_type=category_types.get(category_id),
+    )
+    return TYPE_FOR_KIND.get(kind, kind)
+
+
+def other_side(row: dict) -> str | None:
+    """Where a transfer's money went / came from: the paired row's account,
+    else the account or name the user gave."""
+    if row.get("transfer_reason_id") is None and not row.get("paired_account_nickname"):
+        return None
+    return row.get("paired_account_nickname") or row.get("source_account_name") or row.get("source_description")
 
 
 def _suggestion_id(s: dict) -> tuple:
@@ -81,6 +115,8 @@ def build_groups(
     preview: dict[UUID, dict] | None = None,
     category_names: dict[UUID, str] | None = None,
     with_status: bool = False,
+    category_types: dict[UUID, str] | None = None,
+    category_entry_types: dict[UUID, str] | None = None,
 ) -> list[dict]:
     """rows: each with id, txn_date, amount, currency, direction,
     description, import_id, file_name, account_nickname and, where known,
@@ -92,10 +128,20 @@ def build_groups(
     a payee's pending and approved lines share one group."""
     preview = preview or {}
     category_names = category_names or {}
+    category_types = category_types or {}
+    category_entry_types = category_entry_types or {}
+
+    def type_of(r: dict) -> str | None:
+        return row_type(r, category_types=category_types, category_entry_types=category_entry_types)
+
+    def is_refund(r: dict) -> bool:
+        # ab-286: money in under an expense category.
+        return r["direction"] == "in" and category_types.get(r.get("category_id")) == "expense"
+
     by_key: dict[str, list[dict]] = {}
     for r in rows:
         k = payee_group_key(keys[r["id"]], r["direction"], r["id"])
-        if r.get("handled_as"):
+        if _handled_at_import(r):
             k = f"{r['handled_as']}:{k}"
         by_key.setdefault(k, []).append(r)
 
@@ -135,6 +181,12 @@ def build_groups(
             "suggestion": group_suggestion([preview.get(r["id"], {}).get("suggestion") for r in members]),
             "category_id": category_id,
             "category_name": category_names.get(category_id) if category_id else None,
+            "is_refund": bool(category_id) and is_refund(latest),
+            "kind": _same([type_of(r) for r in members]),
+            "sub_ledger_id": _same([r.get("sub_ledger_id") for r in members]),
+            "sub_ledger_name": _same([r.get("sub_ledger_name") for r in members]),
+            "sub_ledger_role": _same([r.get("sub_ledger_role") for r in members]),
+            "other_side": _same([other_side(r) for r in members]),
             # ab-285: every row filed as a Funds transfer under one reason.
             "transfer_reason_id": _same([r.get("transfer_reason_id") for r in members]),
             "transfer_reason_name": _same([r.get("transfer_reason_name") for r in members]),
@@ -155,6 +207,17 @@ def build_groups(
                     "category_name": category_names.get(r.get("category_id")) if r.get("category_id") else None,
                     "transfer_reason_id": r.get("transfer_reason_id"),
                     "transfer_reason_name": r.get("transfer_reason_name"),
+                    "is_refund": is_refund(r),
+                    "kind": type_of(r),
+                    # ab-288: which sub-ledger the row is on (Saving on money
+                    # in, "Set to Locked deposits"), and a transfer's other
+                    # side - only ever shown to the importer.
+                    "account_id": r.get("account_id"),
+                    "sub_ledger_id": r.get("sub_ledger_id"),
+                    "sub_ledger_name": r.get("sub_ledger_name"),
+                    "sub_ledger_role": r.get("sub_ledger_role"),
+                    "other_side": other_side(r),
+                    "note": r.get("note"),
                     "apply_id": r.get("apply_id"),
                     "suggestion": preview.get(r["id"], {}).get("suggestion"),
                 }
@@ -197,12 +260,12 @@ def select_groups(
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     handled_as: str | None = None,
-    status_first: bool = False,
 ) -> tuple[list[dict], int]:
     """Filter (money in/out; people/businesses; how it was handled;
-    search), sort, then one page. status_first keeps each group's review
-    status together (STATUS_RANK) ahead of the chosen sort. Returns (page
-    of groups, total groups after filtering)."""
+    search), sort, then one page. A group's status never moves it
+    (2026-11-18): a payee the user files stays where it is, and the
+    Pending filter is how to see only what's left. Returns (page of
+    groups, total groups after filtering)."""
     needle = (q or "").strip().lower()
     out = [
         g for g in groups
@@ -219,7 +282,5 @@ def select_groups(
         sort_key = lambda g: (g["row_count"], g["total"])  # noqa: E731
     out.sort(key=lambda g: g["group_key"])  # stable tie-break
     out.sort(key=sort_key, reverse=order == "desc")
-    if status_first:
-        out.sort(key=lambda g: STATUS_RANK[g["status"]])
     start = (page - 1) * page_size
     return out[start:start + page_size], len(out)

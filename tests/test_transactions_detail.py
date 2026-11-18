@@ -31,6 +31,7 @@ TRANSACTION_ROW = {
 # split - transfer-shaped fields (ab-134) are all None for one of those,
 # and get_allocations' real query now always returns these keys.
 NO_TRANSFER_FIELDS = {
+    "is_refund": False,
     "transfer_reason_id": None,
     "transfer_reason_name": None,
     "source_account_id": None,
@@ -216,6 +217,7 @@ def test_get_transaction_with_a_transfer_shaped_allocation(client, fake_user, fa
         "id": str(uuid4()),
         "category_id": None,
         "category_name": None,
+        "is_refund": False,
         "transfer_reason_id": str(uuid4()),
         "transfer_reason_name": "Loan Repayment",
         "source_account_id": None,

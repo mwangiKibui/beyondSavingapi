@@ -887,3 +887,17 @@ def test_account_summary_shows_saving_apart():
     assert (item["money_in"], item["money_out"], item["saving"]) == (
         Decimal("0.00"), Decimal("200.00"), Decimal("3700.00")
     )
+
+
+def test_build_transaction_statement_shows_the_users_note_after_the_category():
+    """ab-288: "Other" + a note narrates the row on the statement."""
+    rows = [
+        _statement_row(txn_amount=Decimal("100.00"), allocated_total=Decimal("100.00"), category_names=["Other"],
+                       notes=["School trip"]),
+        _statement_row(txn_amount=Decimal("100.00"), allocated_total=Decimal("100.00"), category_names=["Rent"]),
+    ]
+
+    statement = build_transaction_statement(rows, from_date=None, to_date=None, status_filter=None)
+
+    assert statement["rows"][0]["reconciled_category"] == "Other · School trip"
+    assert statement["rows"][1]["reconciled_category"] == "Rent"

@@ -488,3 +488,52 @@ def test_create_allocations_rejects_a_money_in_reason_on_money_out(client, fake_
 
     assert response.status_code == 422
     assert response.json()["detail"] == "That transfer reason is for money going the other way"
+
+
+# --- ab-286: refunds ------------------------------------------------------------
+
+MONEY_IN_ROW = {**TRANSACTION_ROW, "direction": "in"}
+GROCERIES_EXPENSE = [{"id": EXPENSE_CATEGORY_ID, "name": "Groceries", "type": "expense"}]
+
+
+def _refund_mocks(monkeypatch, row=MONEY_IN_ROW):
+    monkeypatch.setattr("app.api.transactions.get_transaction", AsyncMock(return_value=row))
+    monkeypatch.setattr("app.api.transactions.get_allocations", AsyncMock(return_value=[]))
+    monkeypatch.setattr("app.api.transactions.get_categories_by_ids", AsyncMock(return_value=GROCERIES_EXPENSE))
+    insert = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.api.transactions.insert_allocations", insert)
+    alerts = AsyncMock()
+    monkeypatch.setattr("app.api.transactions.generate_budget_alerts", alerts)
+    return insert, alerts
+
+
+def refund_split(**extra):
+    return {"category_id": str(EXPENSE_CATEGORY_ID), "amount": 1000.0, "note": None, "refund": True, **extra}
+
+
+def test_a_refund_split_takes_an_expense_category_on_money_in(client, fake_user, fake_pool, monkeypatch):
+    insert, alerts = _refund_mocks(monkeypatch)
+    response = client.post(f"/transactions/{TRANSACTION_ID}/allocations",
+                           json=request_body(allocations=[refund_split()]))
+    assert response.status_code == 201
+    assert insert.await_args.kwargs["category_ids"] == [EXPENSE_CATEGORY_ID]
+    alerts.assert_not_awaited()  # a refund only lowers spending
+
+
+def test_an_expense_category_on_money_in_without_refund_is_still_rejected(client, fake_user, fake_pool, monkeypatch):
+    _refund_mocks(monkeypatch)
+    response = client.post(f"/transactions/{TRANSACTION_ID}/allocations",
+                           json=request_body(allocations=[refund_split(refund=False)]))
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("row, body, detail", [
+    (TRANSACTION_ROW, request_body(allocations=[refund_split()]), "Split 1: Only money in can be a refund"),
+    (MONEY_IN_ROW, request_body(allocations=[refund_split(category_id=None)]),
+     "Split 1: A refund needs the expense category it comes off"),
+    (MONEY_IN_ROW, request_body(allocations=[refund_split()], update_rule=True), "Refunds aren't remembered"),
+])
+def test_bad_refund_splits_are_rejected(client, fake_user, fake_pool, monkeypatch, row, body, detail):
+    _refund_mocks(monkeypatch, row)
+    response = client.post(f"/transactions/{TRANSACTION_ID}/allocations", json=body)
+    assert response.status_code == 422 and response.json()["detail"] == detail

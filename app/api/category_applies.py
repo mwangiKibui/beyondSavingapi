@@ -3,6 +3,7 @@ import's review or from Transactions -> Uncategorised; undo one apply; and
 file a remembered payee's rows still waiting from earlier statements."""
 
 import logging
+from typing import Literal
 from uuid import UUID
 
 import asyncpg
@@ -30,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/category-applies", tags=["category-applies"])
 
+NOTE_MAX = 200
+
 
 class NewAccountRequest(BaseModel):
     """ab-285: an account added from the transfer drawer - the same checks
@@ -56,19 +59,29 @@ class ApplyGroupRequest(BaseModel):
     use_suggestion: bool = False
     # ab-285: file as a Funds transfer under this reason.
     transfer_reason_id: UUID | None = None
+    # ab-288: what the money is. Saving and Borrowed take no category or
+    # reason; a transfer with no reason files under "Between my accounts".
+    kind: Literal["expense", "income", "refund", "transfer", "saving", "borrowed", "loan_repayment"] | None = None
     # ab-285, transfers only - where the money came from (money in) or went
     # to (money out); at most one. someone_else_name is private to the user.
     other_account_id: UUID | None = None
     new_account: NewAccountRequest | None = None
     someone_else_name: str | None = None
+    # ab-286: money in filed as a refund of an expense category (with
+    # category_id or new_category_name). Refunds are never remembered.
+    refund: bool = False
     # "From now on": the payee's top saved choice, plus a shared vote for
     # business payees. Off learns nothing.
     remember: bool = False
     # ab-292: one line of a payee filed on its own - remember learns softly
     # (one more use, never forced to the top) and casts no shared vote.
     per_line: bool = False
+    # ab-288: what the rows were, in the user's words - mainly for "Other".
+    # Saved on each allocation (shown on the Transaction statement and
+    # Funds transfers reports); private, never learned or shared.
+    note: str | None = None
 
-    @field_validator("new_category_name", "someone_else_name", mode="before")
+    @field_validator("new_category_name", "someone_else_name", "note", mode="before")
     @classmethod
     def _strip(cls, value):
         if isinstance(value, str):
@@ -90,6 +103,13 @@ class ApplyGroupRequest(BaseModel):
             raise ValueError("Name must be 60 characters or fewer")
         return value
 
+    @field_validator("note")
+    @classmethod
+    def _note_length(cls, value):
+        if value is not None and len(value) > NOTE_MAX:
+            raise ValueError(f"Note must be {NOTE_MAX} characters or fewer")
+        return value
+
 
 class ApplyRequest(BaseModel):
     # Set when applying from that import's review (its "Decided" tab).
@@ -106,6 +126,8 @@ class AppliedGroup(BaseModel):
     transfer_reason_id: UUID | None = None
     transfer_reason_name: str | None = None
     other_account_id: UUID | None = None
+    is_refund: bool = False
+    kind: str | None = None
     remember: bool
     allocated: list[UUID]
     # Zero-amount rows: nothing to allocate.
@@ -182,7 +204,11 @@ async def apply_categories_endpoint(
     for group in body.groups:
         chosen = sum([group.category_id is not None, group.new_category_name is not None, group.use_suggestion,
                       group.transfer_reason_id is not None])
-        if chosen != 1:
+        # ab-288: these kinds need no target (or have a default one).
+        targetless = group.kind in ("saving", "borrowed") or (group.kind == "transfer" and chosen == 0)
+        if group.kind == "refund":
+            group.refund = True
+        if chosen != 1 and not targetless:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=(
@@ -190,10 +216,19 @@ async def apply_categories_endpoint(
                     "or transfer_reason_id"
                 ),
             )
+        if group.refund and (group.category_id is None and group.new_category_name is None):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="A refund needs the expense category it comes off",
+            )
+        if group.refund and group.remember:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Refunds aren't remembered")
         if group.new_account is not None:
             _validate_provider(group.new_account.account_type, group.new_account.provider)
             if group.new_account.account_number:
-                _validate_account_number(group.new_account.account_type, group.new_account.account_number)
+                group.new_account.account_number = _validate_account_number(
+                    group.new_account.account_type, group.new_account.account_number
+                )
     _require_pool(pool)
 
     try:

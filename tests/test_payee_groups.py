@@ -217,3 +217,11 @@ def test_pages():
     items, total = select_groups(sample_groups(), page=2, page_size=2)
     assert [g["group_key"] for g in items] == ["b"] and total == 3
     assert select_groups(sample_groups(), page=5, page_size=2) == ([], 3)
+
+
+def test_status_never_reorders_the_list():
+    # 2026-11-18: a payee the user files stays in place on All / Approved;
+    # only the chosen sort decides the order.
+    groups = [dict(g, status=s) for g, s in zip(sample_groups(), ["sorted", "decide", "handled"])]
+    items, _ = select_groups(groups, sort="amount", order="desc")
+    assert [g["group_key"] for g in items] == ["b", "a", "c"]

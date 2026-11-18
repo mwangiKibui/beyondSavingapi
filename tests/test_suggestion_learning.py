@@ -166,3 +166,11 @@ def test_person_rows_from_real_statement_text_never_vote_or_carry_the_text():
     dumped = repr(learning)
     for word in ("JOHN", "JANE", "254700", "254711", "0711", "MPS", "Customer Transfer"):
         assert word not in dumped
+
+
+def test_other_keeps_the_users_rule_but_casts_no_shared_vote():
+    # ab-288: "Other" says nothing about the payee for anyone else.
+    OTHER = uuid4()
+    learning = plan_learning([row(business_till(), category_id=OTHER, category_name="Other")], directory())
+    assert [r["category_id"] for r in learning.rules] == [OTHER]
+    assert (learning.merchant_votes, learning.number_votes) == ([], [])

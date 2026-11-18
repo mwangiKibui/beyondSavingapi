@@ -11,6 +11,8 @@ from app.core.db import get_pool
 from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.security import get_current_user_id
 from app.repositories.accounts import get_account
+from app.core.config import get_settings
+from app.services.import_handling import rehandle_sub_ledger
 from app.services.sub_ledger_roles import infer_role
 from app.repositories.sub_ledgers import (
     DuplicateSubLedger,
@@ -50,6 +52,8 @@ class SubLedgerResponse(BaseModel):
     role: SubLedgerRole = "spending"
     created_at: datetime
     updated_at: datetime
+    # ab-288, PATCH only: rows handled again because the role changed.
+    rehandled: int = 0
 
 
 class SubLedgerListResponse(BaseModel):
@@ -161,6 +165,15 @@ async def update_sub_ledger_endpoint(
         )
         if sub_ledger is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sub-ledger not found")
+        if payload.role is not None:
+            # ab-288: rows nobody touched follow the new role.
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    rehandled = await rehandle_sub_ledger(
+                        conn, user_id=user_id, sub_ledger_id=sub_ledger_id,
+                        secret=get_settings().suggestion_key_secret,
+                    )
+            sub_ledger = {**sub_ledger, "rehandled": rehandled}
     except HTTPException:
         raise
     except DuplicateSubLedger as exc:

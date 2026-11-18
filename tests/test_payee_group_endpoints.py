@@ -220,26 +220,28 @@ def _all_statuses_rows(apply_id):
     ]
 
 
-def test_review_groups_all_lists_every_status_pending_first(client, fake_user, fake_pool, review):
+def test_review_groups_all_lists_every_status(client, fake_user, fake_pool, review):
     review(_all_statuses_rows(uuid4()))
 
     body = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=all").json()
 
-    assert [g["status"] for g in body["items"]] == ["decide", "handled", "handled", "decided", "sorted"]
+    assert sorted(g["status"] for g in body["items"]) == ["decide", "decided", "handled", "handled", "sorted"]
     assert body["total"] == 5
     assert body["row_counts"]["decide"] == 2
     # Pending groups keep their suggestions on All.
-    assert body["items"][0]["row_count"] == 2
+    assert next(g for g in body["items"] if g["status"] == "decide")["row_count"] == 2
 
 
-def test_review_groups_all_still_sorts_within_a_status(client, fake_user, fake_pool, review):
+def test_review_groups_all_sorts_only_by_the_chosen_sort(client, fake_user, fake_pool, review):
+    # 2026-11-18: a row the user files stays where it is on All - status
+    # never reorders the list (Pending is the filter for that).
     review(_all_statuses_rows(uuid4()))
 
     items = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=all&sort=amount&order=desc").json()["items"]
 
-    handled = [g for g in items if g["status"] == "handled"]
-    assert [g["handled_as"] for g in handled] == ["charge", "loan"]  # 10 before 0
-    assert items[0]["status"] == "decide"
+    totals = [g["total"] for g in items]
+    assert totals == sorted(totals, reverse=True)
+    assert [g["status"] for g in items][0] != "decide" or totals[0] == max(totals)
 
 
 def test_review_groups_each_tab_reports_its_status(client, fake_user, fake_pool, review):
@@ -543,6 +545,7 @@ def test_apply_passes_a_transfer_and_its_other_side_through(client, fake_user, f
     body(transfer_reason_id=str(uuid4()), category_id=str(uuid4())),             # two choices
     body(transfer_reason_id=str(uuid4()), use_suggestion=True),
     body(transfer_reason_id=str(uuid4()), someone_else_name="x" * 61),
+    body(transfer_reason_id=str(uuid4()), note="x" * 201),                       # ab-288
     body(transfer_reason_id=str(uuid4()), new_account={**NEW_ACCOUNT, "provider": "Some Bank"}),
     body(transfer_reason_id=str(uuid4()), new_account={**NEW_ACCOUNT, "account_number": "12AB"}),
     body(transfer_reason_id=str(uuid4()), new_account={**NEW_ACCOUNT, "account_type": "mobile_money",
@@ -552,3 +555,42 @@ def test_apply_passes_a_transfer_and_its_other_side_through(client, fake_user, f
 def test_apply_rejects_bad_transfer_bodies(client, fake_user, fake_pool, applies, payload):
     assert client.post("/category-applies", json=payload).status_code == 422
     applies["apply_groups"].assert_not_awaited()
+
+
+
+# --- ab-286: refunds ------------------------------------------------------------
+
+
+def test_apply_passes_a_refund_through(client, fake_user, fake_pool, applies):
+    client.post("/category-applies", json=body(category_id=str(uuid4()), refund=True))
+    assert applies["apply_groups"].await_args.kwargs["groups"][0].refund is True
+
+
+@pytest.mark.parametrize("payload, detail", [
+    (body(refund=True, use_suggestion=True), "A refund needs the expense category it comes off"),
+    (body(refund=True, category_id=str(uuid4()), remember=True), "Refunds aren't remembered"),
+])
+def test_apply_rejects_bad_refunds(client, fake_user, fake_pool, applies, payload, detail):
+    response = client.post("/category-applies", json=payload)
+    assert response.status_code == 422 and response.json()["detail"] == detail
+    applies["apply_groups"].assert_not_awaited()
+
+
+def test_review_lines_carry_account_sub_ledger_kind_and_other_side(client, fake_user, fake_pool, review):
+    """ab-288, through the real response: what the Allocation drawer needs."""
+    account, ledger, reason = uuid4(), uuid4(), uuid4()
+    review([
+        txn("Deposit", direction="in", account_id=account, sub_ledger_id=ledger, sub_ledger_name="Deposits",
+            sub_ledger_role="spending"),
+        txn("Customer Transfer to 0700000000", allocated=100, apply_id=uuid4(), applied_here=True,
+            transfer_reason_id=reason, transfer_reason_name="Between my accounts",
+            source_account_name="Equity Savings", account_id=account),
+    ])
+    body = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=decide").json()
+    [line] = body["items"][0]["rows"]
+    assert (line["account_id"], line["sub_ledger_id"], line["sub_ledger_name"], line["sub_ledger_role"]) == (
+        str(account), str(ledger), "Deposits", "spending")
+    assert body["items"][0]["sub_ledger_id"] == str(ledger)
+
+    [filed] = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=decided").json()["items"][0]["rows"]
+    assert (filed["kind"], filed["other_side"], filed["account_id"]) == ("transfer", "Equity Savings", str(account))

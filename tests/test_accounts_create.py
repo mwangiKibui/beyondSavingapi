@@ -119,6 +119,62 @@ def test_create_account_accepts_exactly_9_digit_mobile_number(client, fake_user,
     assert response.status_code == 201
 
 
+def test_create_account_accepts_a_money_market_fund(client, fake_user, fake_pool, monkeypatch):
+    # ab-288: MMFs are an account type of their own.
+    payload = {
+        "nickname": "My MMF",
+        "account_type": "money_market",
+        "provider": "CIC Money Market Fund",
+        "account_number": "100200300",
+        "currency": "KES",
+    }
+    created = {
+        **payload,
+        "id": str(uuid4()),
+        "is_active": True,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    monkeypatch.setattr("app.api.accounts.create_account", AsyncMock(return_value=created))
+
+    response = client.post("/accounts", json=payload)
+    assert response.status_code == 201
+    assert response.json()["account_type"] == "money_market"
+
+
+@pytest.mark.parametrize("number", ["ETF-00123", "AB12345", "MMF/2026/7"])
+def test_create_account_accepts_letters_in_a_money_market_member_number(
+    client, fake_user, fake_pool, monkeypatch, number
+):
+    payload = {"nickname": "Etica", "account_type": "money_market", "provider": "Etica Money Market Fund",
+               "account_number": number, "currency": "KES"}
+    created = {**payload, "id": str(uuid4()), "is_active": True,
+               "created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-01-01T00:00:00+00:00"}
+    monkeypatch.setattr("app.api.accounts.create_account", AsyncMock(return_value=created))
+    assert client.post("/accounts", json=payload).status_code == 201
+
+
+@pytest.mark.parametrize("number", ["AB 123", "AB_123", "A" * 21])
+def test_create_account_rejects_a_bad_money_market_member_number(client, fake_user, fake_pool, number):
+    response = client.post("/accounts", json={
+        "nickname": "Etica", "account_type": "money_market", "provider": "Etica Money Market Fund",
+        "account_number": number, "currency": "KES",
+    })
+    assert response.status_code == 422
+
+
+def test_create_account_still_rejects_letters_in_a_bank_account_number(client, fake_user, fake_pool):
+    assert client.post("/accounts", json={**VALID_PAYLOAD, "account_number": "AB12345"}).status_code == 422
+
+
+def test_create_account_rejects_a_bank_as_a_money_market_provider(client, fake_user, fake_pool):
+    response = client.post(
+        "/accounts",
+        json={**VALID_PAYLOAD, "account_type": "money_market", "provider": "Equity Bank"},
+    )
+    assert response.status_code == 422
+
+
 def test_create_account_rejects_account_number_over_20_digits(client, fake_user, fake_pool):
     response = client.post(
         "/accounts", json={**VALID_PAYLOAD, "account_number": "1" * 21}
@@ -195,3 +251,30 @@ def test_create_account_logs_and_returns_generic_500_on_unexpected_error(
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(error_records) == 1
     assert error_records[0].exc_info is not None
+
+
+# 2026-11-18: a Kenyan mobile number the way people type it - 07..., 01...,
+# 254..., +254... - is saved as its 9 digits (shown as +254 712...).
+@pytest.mark.parametrize("typed", ["0722746084", "722746084", "254722746084", "+254722746084", "+254 722 746 084"])
+def test_create_account_saves_a_mobile_number_as_its_nine_digits(client, fake_user, fake_pool, monkeypatch, typed):
+    create = AsyncMock(return_value={
+        "id": str(uuid4()), "nickname": "M-Pesa", "account_type": "mobile_money", "provider": "M-Pesa",
+        "account_number": "722746084", "currency": "KES", "is_active": True,
+        "created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    monkeypatch.setattr("app.api.accounts.create_account", create)
+    response = client.post("/accounts", json={
+        "nickname": "M-Pesa", "account_type": "mobile_money", "provider": "M-Pesa",
+        "account_number": typed, "currency": "KES",
+    })
+    assert response.status_code == 201
+    assert create.await_args.kwargs["account_number"] == "722746084"
+
+
+@pytest.mark.parametrize("typed", ["072274608", "07227460845", "0822746084", "25472274608", "+25507227460", "0722-abc"])
+def test_create_account_rejects_a_mobile_number_that_isnt_kenyan(client, fake_user, fake_pool, typed):
+    response = client.post("/accounts", json={
+        "nickname": "M-Pesa", "account_type": "mobile_money", "provider": "M-Pesa",
+        "account_number": typed, "currency": "KES",
+    })
+    assert response.status_code == 422
