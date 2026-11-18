@@ -36,6 +36,7 @@ class GroupRow(BaseModel):
     # ab-288: expense, income, refund, transfer, saving, borrowed or
     # loan_repayment once filed; None while open (or mixed, for a group).
     kind: str | None = None
+    account_id: UUID | None = None
     sub_ledger_id: UUID | None = None
     sub_ledger_name: str | None = None
     sub_ledger_role: str | None = None
@@ -92,7 +93,6 @@ class PayeeGroup(BaseModel):
     # ab-288: expense, income, refund, transfer, saving, borrowed or
     # loan_repayment once filed; None while open (or mixed, for a group).
     kind: str | None = None
-    account_id: UUID | None = None
     sub_ledger_id: UUID | None = None
     sub_ledger_name: str | None = None
     sub_ledger_role: str | None = None

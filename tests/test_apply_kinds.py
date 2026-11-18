@@ -167,3 +167,12 @@ def test_saving_filed_in_the_review_is_approved_not_handled():
 def test_other_side(fields, expected):
     from app.services.payee_groups import other_side
     assert other_side(fields) == expected
+
+
+def test_a_review_line_carries_its_account_and_sub_ledger():
+    from app.api.payee_group_models import GroupRow
+
+    fields = {"account_id": uuid4(), "sub_ledger_id": uuid4(), "sub_ledger_name": "Deposits",
+              "sub_ledger_role": "spending", "other_side": None}
+    line = GroupRow.model_fields
+    assert set(fields) <= set(line)
