@@ -4,7 +4,7 @@ from uuid import UUID
 
 import asyncpg
 
-from app.services.saving import HANDLED_SAVING_SQL
+from app.services.row_kind import COUNTED_ALLOCATION_SQL, SAVED_ALLOCATION_SQL
 from app.services.budget_state import DEFAULT_NEAR_THRESHOLD, derive_budget_state
 
 # MVP1 is single-currency (developer decision, 2026-09-30) - every plan is
@@ -160,10 +160,8 @@ async def update_budget(
 # import with no category) and not saving (ab-259 - a row handled as saving,
 # or filed under a saving category), the same rule as reports and the
 # dashboard. Expects allocations a, transactions t, categories c.
-COUNTED_ALLOCATION = (
-    "a.transfer_reason_id IS NULL AND NOT (t.handled_as = 'loan' AND a.category_id IS NULL)"
-    " AND t.handled_as IS DISTINCT FROM 'saving' AND c.entry_type IS DISTINCT FROM 'saving'"
-)
+# Allocations counted as income / spending (ab-287: app.services.row_kind).
+COUNTED_ALLOCATION = COUNTED_ALLOCATION_SQL
 
 
 async def plan_totals(
@@ -172,19 +170,14 @@ async def plan_totals(
     """(total_income, total_expenditure, total_saving) for one plan's
     currency and window - the user's own allocations only. allocations has
     no user_id, so ownership comes from the transaction's account.
-    total_saving (ab-259) is net money into savings (app.services.saving)."""
+    total_saving (ab-259) is net money into savings (app.services.row_kind)."""
     row = await pool.fetchrow(
         """
         SELECT
             COALESCE(SUM(a.amount) FILTER (WHERE t.direction = 'in' AND {COUNTED_ALLOCATION}), 0) AS total_income,
             COALESCE(SUM(a.amount) FILTER (WHERE t.direction = 'out' AND {COUNTED_ALLOCATION}), 0)
                 AS total_expenditure,
-            COALESCE(SUM(
-                CASE
-                    WHEN t.handled_as = 'saving' THEN {HANDLED_SAVING_SQL}
-                    WHEN t.direction = 'out' AND c.entry_type = 'saving' THEN a.amount
-                END
-            ), 0) AS total_saving
+            COALESCE(SUM({SAVED_ALLOCATION_SQL}), 0) AS total_saving
         FROM allocations a
         JOIN transactions t ON t.id = a.transaction_id
         JOIN accounts acc ON acc.id = t.account_id
@@ -194,7 +187,7 @@ async def plan_totals(
           AND a.currency = $2
           AND t.txn_date >= $3::date
           AND t.txn_date <= $4::date
-        """.replace("{COUNTED_ALLOCATION}", COUNTED_ALLOCATION).replace("{HANDLED_SAVING_SQL}", HANDLED_SAVING_SQL),
+        """.replace("{COUNTED_ALLOCATION}", COUNTED_ALLOCATION).replace("{SAVED_ALLOCATION_SQL}", SAVED_ALLOCATION_SQL),
         user_id,
         currency,
         starts_at,

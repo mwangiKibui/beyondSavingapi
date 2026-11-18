@@ -5,6 +5,7 @@ from uuid import UUID
 
 import asyncpg
 
+from app.services.row_kind import ALLOCATION_KIND_SQL
 from app.services.budget_state import DEFAULT_NEAR_THRESHOLD, derive_budget_state
 
 logger = logging.getLogger(__name__)
@@ -101,12 +102,13 @@ async def generate_budget_alerts(
             SELECT COALESCE(SUM(a.amount), 0)
             FROM allocations a
             JOIN transactions t ON t.id = a.transaction_id
+            LEFT JOIN categories c ON c.id = a.category_id
             WHERE a.category_id = $1
               AND a.currency = $2
-              AND a.transfer_reason_id IS NULL
+              AND {ALLOCATION_KIND_SQL} <> 'transfer'
               AND t.txn_date >= $3::date
               AND t.txn_date <= $4::date
-            """,
+            """.replace("{ALLOCATION_KIND_SQL}", ALLOCATION_KIND_SQL),
             category_id,
             currency,
             budget["starts_at"],
