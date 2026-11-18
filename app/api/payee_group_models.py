@@ -36,6 +36,11 @@ class GroupRow(BaseModel):
     # ab-288: expense, income, refund, transfer, saving, borrowed or
     # loan_repayment once filed; None while open (or mixed, for a group).
     kind: str | None = None
+    sub_ledger_id: UUID | None = None
+    sub_ledger_name: str | None = None
+    sub_ledger_role: str | None = None
+    # A transfer's other side (account nickname or the name the user gave).
+    other_side: str | None = None
     apply_id: UUID | None = None
     suggestion: "GroupSuggestion | None" = None
 
@@ -87,6 +92,12 @@ class PayeeGroup(BaseModel):
     # ab-288: expense, income, refund, transfer, saving, borrowed or
     # loan_repayment once filed; None while open (or mixed, for a group).
     kind: str | None = None
+    account_id: UUID | None = None
+    sub_ledger_id: UUID | None = None
+    sub_ledger_name: str | None = None
+    sub_ledger_role: str | None = None
+    # A transfer's other side (account nickname or the name the user gave).
+    other_side: str | None = None
     apply_id: UUID | None = None
     # Handled tab only (ab-281).
     handled_as: Literal["charge", "loan", "transfer", "saving"] | None = None

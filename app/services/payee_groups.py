@@ -81,6 +81,14 @@ def row_type(row: dict, *, category_types: dict, category_entry_types: dict) -> 
     return TYPE_FOR_KIND.get(kind, kind)
 
 
+def other_side(row: dict) -> str | None:
+    """Where a transfer's money went / came from: the paired row's account,
+    else the account or name the user gave."""
+    if row.get("transfer_reason_id") is None and not row.get("paired_account_nickname"):
+        return None
+    return row.get("paired_account_nickname") or row.get("source_account_name") or row.get("source_description")
+
+
 def _suggestion_id(s: dict) -> tuple:
     # A Funds transfer (ab-285) never merges with a category of the same name.
     return (s.get("kind", "category"), s["category_id"], s["category_name"].strip().lower())
@@ -178,6 +186,10 @@ def build_groups(
             "category_name": category_names.get(category_id) if category_id else None,
             "is_refund": bool(category_id) and is_refund(latest),
             "kind": _same([type_of(r) for r in members]),
+            "sub_ledger_id": _same([r.get("sub_ledger_id") for r in members]),
+            "sub_ledger_name": _same([r.get("sub_ledger_name") for r in members]),
+            "sub_ledger_role": _same([r.get("sub_ledger_role") for r in members]),
+            "other_side": _same([other_side(r) for r in members]),
             # ab-285: every row filed as a Funds transfer under one reason.
             "transfer_reason_id": _same([r.get("transfer_reason_id") for r in members]),
             "transfer_reason_name": _same([r.get("transfer_reason_name") for r in members]),
@@ -200,6 +212,14 @@ def build_groups(
                     "transfer_reason_name": r.get("transfer_reason_name"),
                     "is_refund": is_refund(r),
                     "kind": type_of(r),
+                    # ab-288: which sub-ledger the row is on (Saving on money
+                    # in, "Set to Locked deposits"), and a transfer's other
+                    # side - only ever shown to the importer.
+                    "account_id": r.get("account_id"),
+                    "sub_ledger_id": r.get("sub_ledger_id"),
+                    "sub_ledger_name": r.get("sub_ledger_name"),
+                    "sub_ledger_role": r.get("sub_ledger_role"),
+                    "other_side": other_side(r),
                     "apply_id": r.get("apply_id"),
                     "suggestion": preview.get(r["id"], {}).get("suggestion"),
                 }

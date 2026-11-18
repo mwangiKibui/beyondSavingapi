@@ -155,3 +155,15 @@ def test_saving_filed_in_the_review_is_approved_not_handled():
              "is_transfer": False}
     assert review_tab(filed) == "decided"
     assert review_tab({**filed, "apply_id": None}) == "handled"
+
+
+@pytest.mark.parametrize("fields, expected", [
+    ({}, None),
+    ({"transfer_reason_id": uuid4(), "source_account_name": "Equity Savings"}, "Equity Savings"),
+    ({"transfer_reason_id": uuid4(), "source_description": "Sam Example"}, "Sam Example"),
+    ({"transfer_reason_id": uuid4(), "paired_account_nickname": "M-Pesa", "source_account_name": "x"}, "M-Pesa"),
+    ({"transfer_reason_id": uuid4()}, None),
+])
+def test_other_side(fields, expected):
+    from app.services.payee_groups import other_side
+    assert other_side(fields) == expected
