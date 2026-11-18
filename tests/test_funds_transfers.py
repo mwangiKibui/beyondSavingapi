@@ -110,3 +110,11 @@ def test_totals_add_up_sent_and_received_per_account():
         ("M-Pesa", Decimal("5200.00"), Decimal("0")),
         ("NCBA", Decimal("0"), Decimal("5000.00")),
     ]
+
+
+def test_the_users_note_follows_the_reason():
+    # ab-288: "Other" + a note narrates the transfer.
+    r = row(reason="Other")
+    r["note"] = "Chama contribution"
+    assert build_funds_transfers([r])[0]["reason"] == "Other · Chama contribution"
+    assert build_funds_transfers([row(reason="From family")])[0]["reason"] == "From family"

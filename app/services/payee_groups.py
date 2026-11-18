@@ -220,6 +220,7 @@ def build_groups(
                     "sub_ledger_name": r.get("sub_ledger_name"),
                     "sub_ledger_role": r.get("sub_ledger_role"),
                     "other_side": other_side(r),
+                    "note": r.get("note"),
                     "apply_id": r.get("apply_id"),
                     "suggestion": preview.get(r["id"], {}).get("suggestion"),
                 }

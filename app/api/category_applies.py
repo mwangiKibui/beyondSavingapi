@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/category-applies", tags=["category-applies"])
 
+NOTE_MAX = 200
+
 
 class NewAccountRequest(BaseModel):
     """ab-285: an account added from the transfer drawer - the same checks
@@ -74,8 +76,12 @@ class ApplyGroupRequest(BaseModel):
     # ab-292: one line of a payee filed on its own - remember learns softly
     # (one more use, never forced to the top) and casts no shared vote.
     per_line: bool = False
+    # ab-288: what the rows were, in the user's words - mainly for "Other".
+    # Saved on each allocation (shown on the Transaction statement and
+    # Funds transfers reports); private, never learned or shared.
+    note: str | None = None
 
-    @field_validator("new_category_name", "someone_else_name", mode="before")
+    @field_validator("new_category_name", "someone_else_name", "note", mode="before")
     @classmethod
     def _strip(cls, value):
         if isinstance(value, str):
@@ -95,6 +101,13 @@ class ApplyGroupRequest(BaseModel):
     def _someone_length(cls, value):
         if value is not None and len(value) > 60:
             raise ValueError("Name must be 60 characters or fewer")
+        return value
+
+    @field_validator("note")
+    @classmethod
+    def _note_length(cls, value):
+        if value is not None and len(value) > NOTE_MAX:
+            raise ValueError(f"Note must be {NOTE_MAX} characters or fewer")
         return value
 
 

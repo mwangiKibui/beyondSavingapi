@@ -109,6 +109,9 @@ class ApplyGroup:
     # ab-288: what the money is - expense, income, refund, transfer, saving,
     # borrowed, loan_repayment. None: worked out from the fields above.
     kind: str | None = None
+    # ab-288: the user's own words for the rows (mainly for "Other"), saved
+    # on each allocation. Private: never learned, voted or sent anywhere.
+    note: str | None = None
     # Internal: the suggestion use_suggestion resolved to for these rows.
     suggestion: dict | None = None
 
@@ -388,6 +391,7 @@ async def apply_groups(
                 conn, apply_id=apply_id, transaction_ids=[r["id"] for r in allocatable], category_id=category_id,
                 amounts=amounts, currencies=[r["currency"] for r in allocatable], transfer_reason_id=reason_id,
                 source_account_id=other["account_id"], source_description=other["description"],
+                note=g.note,
             )
             for r, amount in zip(allocatable, amounts):
                 # Only spending can cross a budget: no alerts for the rest.

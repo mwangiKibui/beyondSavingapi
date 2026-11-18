@@ -125,16 +125,18 @@ async def insert_applied_allocations(
     transfer_reason_id: UUID | None = None,
     source_account_id: UUID | None = None,
     source_description: str | None = None,
+    note: str | None = None,
 ) -> None:
     """One allocation per row for its whole remaining amount, tagged with
     the apply so undo removes exactly these. A transfer (ab-285) carries
-    its reason and where the money came from / went to."""
+    its reason and where the money came from / went to; note (ab-288) is
+    the user's own words for the rows."""
     await conn.execute(
         """
         INSERT INTO allocations
             (transaction_id, category_id, transfer_reason_id, source_account_id, source_description,
-             original_amount, original_currency, amount, currency, apply_id)
-        SELECT transaction_id, $2, $6, $7, $8, amount, currency, amount, currency, $1
+             original_amount, original_currency, amount, currency, apply_id, note)
+        SELECT transaction_id, $2, $6, $7, $8, amount, currency, amount, currency, $1, $9
         FROM UNNEST($3::uuid[], $4::numeric[], $5::text[]) AS t(transaction_id, amount, currency)
         """,
         apply_id,
@@ -145,6 +147,7 @@ async def insert_applied_allocations(
         transfer_reason_id,
         source_account_id,
         source_description,
+        note,
     )
 
 

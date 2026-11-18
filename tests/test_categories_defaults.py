@@ -16,6 +16,8 @@ NEW_IN_AB_258 = [
 ]
 
 # ab-259: saving is neither income nor spending; dividends are income.
+# ab-288: when nothing else fits; the note says what it was.
+NEW_IN_AB_288 = [("Other", "expense"), ("Other", "income")]
 NEW_IN_AB_259 = [
     ("SACCO savings", "expense"),
     ("Investments & money market", "expense"),
@@ -23,8 +25,8 @@ NEW_IN_AB_259 = [
 ]
 
 
-def test_default_categories_has_29_entries():
-    assert len(DEFAULT_CATEGORIES) == 29
+def test_default_categories_has_31_entries():
+    assert len(DEFAULT_CATEGORIES) == 31
 
 
 def test_default_categories_include_ab_258_additions():
@@ -36,7 +38,7 @@ def test_default_categories_keep_the_original_20():
     # The ab-33 set stays first and unchanged; the new ones are appended.
     assert DEFAULT_CATEGORIES[:20][0] == ("Rent", "expense")
     assert DEFAULT_CATEGORIES[:20][-1] == ("Gifts Received", "income")
-    assert DEFAULT_CATEGORIES[20:] == NEW_IN_AB_258 + NEW_IN_AB_259
+    assert DEFAULT_CATEGORIES[20:] == NEW_IN_AB_258 + NEW_IN_AB_259 + NEW_IN_AB_288
 
 
 def test_default_categories_have_no_case_insensitive_duplicates():
@@ -48,7 +50,7 @@ def test_default_categories_types_are_valid():
     assert {category_type for _, category_type in DEFAULT_CATEGORIES} == {"expense", "income"}
 
 
-async def test_seed_default_categories_inserts_all_29_for_the_user():
+async def test_seed_default_categories_inserts_all_31_for_the_user():
     conn = AsyncMock()
     user_id = uuid4()
 
@@ -58,7 +60,7 @@ async def test_seed_default_categories_inserts_all_29_for_the_user():
     sql, rows = conn.executemany.await_args.args
     assert "INSERT INTO categories" in sql
     assert "entry_type" in sql
-    assert len(rows) == 29
+    assert len(rows) == 31
     assert all(row[0] == user_id for row in rows)
     assert (user_id, "Winnings", "income", "general") in rows
     assert (user_id, "Bank & mobile charges", "expense", "general") in rows

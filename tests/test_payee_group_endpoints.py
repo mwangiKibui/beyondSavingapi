@@ -543,6 +543,7 @@ def test_apply_passes_a_transfer_and_its_other_side_through(client, fake_user, f
     body(transfer_reason_id=str(uuid4()), category_id=str(uuid4())),             # two choices
     body(transfer_reason_id=str(uuid4()), use_suggestion=True),
     body(transfer_reason_id=str(uuid4()), someone_else_name="x" * 61),
+    body(transfer_reason_id=str(uuid4()), note="x" * 201),                       # ab-288
     body(transfer_reason_id=str(uuid4()), new_account={**NEW_ACCOUNT, "provider": "Some Bank"}),
     body(transfer_reason_id=str(uuid4()), new_account={**NEW_ACCOUNT, "account_number": "12AB"}),
     body(transfer_reason_id=str(uuid4()), new_account={**NEW_ACCOUNT, "account_type": "mobile_money",

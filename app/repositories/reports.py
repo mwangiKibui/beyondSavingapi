@@ -509,8 +509,9 @@ def build_funds_transfers(rows: list[dict], *, account_id: UUID | None = None) -
             "from_account_id": from_id,
             "to_label": to_label,
             "to_account_id": to_id,
-            # The detail ("Moved to your Ordinary Deposit"), else the reason.
-            "reason": r["handled_reason"] or r["transfer_reason_name"],
+            # The detail ("Moved to your Ordinary Deposit"), else the reason;
+            # ab-288: the user's note after it ("Other · School trip").
+            "reason": _with_note(r["handled_reason"] or r["transfer_reason_name"], r.get("note")),
             "amount": r["amount"],
             "currency": r["currency"],
         })
@@ -558,7 +559,7 @@ async def get_transfers(
             ssl.account_id AS source_sub_ledger_account_id,
             ssl_acc.nickname AS source_sub_ledger_account_nickname,
             al.source_description,
-            tr.name AS transfer_reason_name,
+            tr.name AS transfer_reason_name, al.note,
             t.id AS transaction_id, t.direction, t.txn_date AS date, t.handled_reason,
             t.account_id, acc.nickname AS account_name, sl.name AS sub_ledger_name,
             o.id AS other_id, o.direction AS other_direction, o.account_id AS other_account_id,
@@ -644,7 +645,8 @@ async def fetch_transaction_statement_rows(pool: asyncpg.Pool, *, user_id: UUID,
             COALESCE(alloc.total, 0) AS allocated_total,
             COALESCE(cat.names, ARRAY[]::text[]) AS category_names,
             COALESCE(cat.ids, ARRAY[]::uuid[]) AS category_ids,
-            COALESCE(xfer.names, ARRAY[]::text[]) AS transfer_names
+            COALESCE(xfer.names, ARRAY[]::text[]) AS transfer_names,
+            COALESCE(notes.items, ARRAY[]::text[]) AS notes
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         LEFT JOIN LATERAL (
@@ -664,6 +666,12 @@ async def fetch_transaction_statement_rows(pool: asyncpg.Pool, *, user_id: UUID,
             JOIN transfer_reasons tr ON tr.id = al.transfer_reason_id
             WHERE al.transaction_id = t.id AND {IS_TRANSFER}
         ) xfer ON true
+        -- ab-288: the user's own words for the row ("Other" + a note).
+        LEFT JOIN LATERAL (
+            SELECT array_agg(DISTINCT al.note ORDER BY al.note) AS items
+            FROM allocations al
+            WHERE al.transaction_id = t.id AND al.note IS NOT NULL AND al.note <> ''
+        ) notes ON true
         WHERE a.user_id = $1 AND t.account_id = $2
         ORDER BY t.txn_date ASC, t.created_at ASC
         """.replace("{IS_TRANSFER}", is_transfer_allocation_sql("al")),
@@ -688,7 +696,17 @@ def _reconciled_category(row: dict) -> str | None:
     if row["status"] != "reconciled":
         return None
     labels = [*row["category_names"], *row["transfer_names"]]
-    return ", ".join(labels) if labels else "No category"
+    # ab-288: the user's notes follow ("Other · School trip").
+    return _with_note(", ".join(labels) if labels else "No category", "; ".join(row.get("notes") or []))
+
+
+def _with_note(label: str | None, note: str | None) -> str | None:
+    """A category / reason followed by the user's note, when there is one
+    (ab-288: "Other · School trip")."""
+    note = (note or "").strip()
+    if not note:
+        return label
+    return f"{label} · {note}" if label else note
 
 
 def build_transaction_statement(
