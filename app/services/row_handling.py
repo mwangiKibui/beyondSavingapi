@@ -131,10 +131,16 @@ def plan_hand_pairs(legs: list[dict], candidates: list[dict]) -> list[tuple[dict
     user's accounts with the row on THAT account going the other way: same
     amount, within PAIR_WINDOW_DAYS, not on a loan or locked-savings
     ledger. Closest date wins, then a waiting leg over an open row; each
-    row pairs at most once."""
+    row pairs at most once.
+
+    ab-293: a leg filed to a deposits / shares sub-ledger
+    (source_sub_ledger_id; source_account_id is that sub-ledger's account)
+    pairs only with a row handled as saving on that sub-ledger, so the
+    move into savings is counted once."""
     used: set = set()
     pairs = []
     for leg in sorted(legs, key=lambda r: (r["txn_date"], str(r["id"]))):
+        ledger = leg.get("source_sub_ledger_id")
         options = []
         for c in candidates:
             if c["id"] in used or c["account_id"] != leg["source_account_id"]:
@@ -142,7 +148,12 @@ def plan_hand_pairs(legs: list[dict], candidates: list[dict]) -> list[tuple[dict
             if c["direction"] == leg["direction"] or float(c["amount"]) != float(leg["amount"]):
                 continue
             gap = abs((c["txn_date"] - leg["txn_date"]).days)
-            if gap > PAIR_WINDOW_DAYS or c.get("sub_ledger_role") not in (None, "spending"):
+            if gap > PAIR_WINDOW_DAYS:
+                continue
+            if ledger is not None:
+                if c.get("sub_ledger_id") != ledger or c.get("handled_as") != "saving":
+                    continue
+            elif c.get("sub_ledger_role") not in (None, "spending"):
                 continue
             options.append((gap, 0 if c.get("handled_as") == "transfer" else 1, str(c["id"]), c))
         if not options:

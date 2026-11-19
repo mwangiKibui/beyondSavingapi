@@ -28,6 +28,12 @@ out, a refund is money out taken back (SIGN -1), income is money in,
 saving is the Saving bucket (never income or spending), borrowed and
 transfer count nowhere.
 
+A Funds transfer is never income or spending, but one into or out of a
+savings place - a money_market account or a locked_saving / shares
+sub-ledger - also moves the Saving bucket (ab-293, transfer_saving):
+counted once, on the savings side; the other side counts only while it
+isn't paired with it (transfer_group_id).
+
 Reports that total whole transactions (GET /reports, the dashboard) use
 transaction_kind: a transaction with ANY transfer allocation is netted out
 whole (ab-79), as is a handled loan with no category anywhere."""
@@ -139,6 +145,51 @@ def handled_saving(*, direction: str, sub_ledger_role: str | None, amount: Decim
     return amount if (direction == "in") == on_saving_ledger else -amount
 
 
+def is_saving_place(account_type: str | None, sub_ledger_role: str | None) -> bool:
+    """A money market account or a SACCO deposits / shares sub-ledger."""
+    return account_type == "money_market" or sub_ledger_role in SAVING_ROLES
+
+
+def transfer_saving(
+    *,
+    direction: str,
+    amount: Decimal,
+    account_type: str | None,
+    sub_ledger_role: str | None,
+    source_account_type: str | None,
+    source_sub_ledger_role: str | None,
+    paired: bool,
+) -> Decimal:
+    """What one Funds-transfer allocation adds to savings (ab-293).
+
+    The savings side (this row is in a savings place, the other side
+    isn't) always counts - money in is saved, money out comes off - even
+    with no other account picked. The other side (this row isn't in a
+    savings place, the other side is) counts only while unpaired, so a
+    move with both legs uploaded is counted once. Savings to savings and
+    spending to spending are neutral."""
+    own = is_saving_place(account_type, sub_ledger_role)
+    other = is_saving_place(source_account_type, source_sub_ledger_role)
+    if own == other or (other and paired):
+        return ZERO
+    return amount if (direction == "in") == own else -amount
+
+
+def allocation_transfer_saving(row: dict) -> Decimal:
+    """transfer_saving for a joined (transaction, allocation) row with keys
+    direction, alloc_amount, account_type, sub_ledger_role,
+    source_account_type, source_sub_ledger_role, transfer_group_id."""
+    return transfer_saving(
+        direction=row["direction"],
+        amount=row["alloc_amount"],
+        account_type=row.get("account_type"),
+        sub_ledger_role=row.get("sub_ledger_role"),
+        source_account_type=row.get("source_account_type"),
+        source_sub_ledger_role=row.get("source_sub_ledger_role"),
+        paired=row.get("transfer_group_id") is not None,
+    )
+
+
 def saved_amount(*, handled_as: str | None, direction: str, sub_ledger_role: str | None, amount: Decimal) -> Decimal:
     """What a saving-kind amount adds to savings: signed for a row handled
     as saving, as-is for money out under a saving category."""
@@ -148,10 +199,16 @@ def saved_amount(*, handled_as: str | None, direction: str, sub_ledger_role: str
 
 
 def transaction_saving(alloc_rows: list[dict]) -> Decimal:
-    """What one transaction adds to savings: the whole row when handled as
-    saving, else the part of money out filed under a saving category.
-    alloc_rows carry txn_amount, direction, handled_as, sub_ledger_role and
-    per allocation allocation_id, alloc_amount, category_entry_type."""
+    """What one transaction adds to savings: for a transfer, what its
+    transfer allocations move into or out of savings (ab-293); the whole
+    row when handled as saving; else the part of money out filed under a
+    saving category. alloc_rows carry txn_amount, direction, handled_as,
+    sub_ledger_role, account_type, transfer_group_id and per allocation
+    allocation_id, alloc_amount, category_entry_type, transfer_reason_id,
+    source_account_type, source_sub_ledger_role."""
+    transfers = [r for r in alloc_rows if r.get("allocation_id") is not None and r.get("transfer_reason_id") is not None]
+    if transfers:
+        return sum((allocation_transfer_saving(r) for r in transfers), ZERO)
     first = alloc_rows[0]
     if first.get("handled_as") == "saving":
         return handled_saving(
@@ -178,6 +235,32 @@ HANDLED_SAVING_SQL = (
     "CASE WHEN (t.direction = 'in') = COALESCE(sl.role IN ('locked_saving', 'shares'), false)"
     " THEN t.amount ELSE -t.amount END"
 )
+
+
+_SAVING_ROLES_SQL = "('locked_saving', 'shares')"
+# The transaction t (with its sub-ledger sl) is in a savings place.
+_OWN_SAVING_PLACE_SQL = (
+    f"(COALESCE(sl.role IN {_SAVING_ROLES_SQL}, false)"
+    " OR EXISTS (SELECT 1 FROM accounts own_acc WHERE own_acc.id = t.account_id"
+    " AND own_acc.account_type = 'money_market'))"
+)
+
+
+def transfer_allocation_saving_sql(a: str = "a") -> str:
+    """transfer_saving for a transfer allocation {a} of transactions t
+    (with its sub-ledger sl). Self-contained lookups, so it works whatever
+    the caller calls its accounts."""
+    other = (
+        f"(EXISTS (SELECT 1 FROM accounts src_acc WHERE src_acc.id = {a}.source_account_id"
+        " AND src_acc.account_type = 'money_market')"
+        f" OR EXISTS (SELECT 1 FROM sub_ledgers src_sl WHERE src_sl.id = {a}.source_sub_ledger_id"
+        f" AND src_sl.role IN {_SAVING_ROLES_SQL}))"
+    )
+    own = _OWN_SAVING_PLACE_SQL
+    return (
+        f"(CASE WHEN {own} = {other} OR ({other} AND t.transfer_group_id IS NOT NULL) THEN 0"
+        f" WHEN (t.direction = 'in') = {own} THEN {a}.amount ELSE -{a}.amount END)"
+    )
 
 
 def allocation_kind_sql(*, t: str = "t", a: str = "a", c: str = "c") -> str:
@@ -223,8 +306,10 @@ def category_spend_sql(*, t: str = "t", a: str = "a", c: str = "c") -> str:
     return f"(CASE WHEN {allocation_kind_sql(t=t, a=a, c=c)} = 'refund' THEN -{a}.amount ELSE {a}.amount END)"
 # What an allocation adds to savings (t, a, c, sl): a handled-saving row
 # counts the whole transaction, signed; a saving category its amount.
+# A transfer allocation what it moves into or out of savings (ab-293).
 SAVED_ALLOCATION_SQL = (
-    f"CASE WHEN t.handled_as = 'saving' THEN {HANDLED_SAVING_SQL}"
+    f"CASE WHEN a.transfer_reason_id IS NOT NULL THEN {transfer_allocation_saving_sql('a')}"
+    f" WHEN t.handled_as = 'saving' THEN {HANDLED_SAVING_SQL}"
     f" WHEN {ALLOCATION_KIND_SQL} = 'saving' THEN a.amount END"
 )
 
@@ -252,7 +337,11 @@ TRANSACTION_REFUND_SQL = (
 )
 # transaction_saving over transactions t + sub-ledger sl.
 TRANSACTION_SAVING_SQL = (
-    f"(CASE WHEN t.handled_as = 'saving' THEN {HANDLED_SAVING_SQL}"
+    "(CASE WHEN EXISTS (SELECT 1 FROM allocations al WHERE al.transaction_id = t.id"
+    " AND al.transfer_reason_id IS NOT NULL)"
+    f" THEN (SELECT COALESCE(SUM({transfer_allocation_saving_sql('al')}), 0) FROM allocations al"
+    " WHERE al.transaction_id = t.id AND al.transfer_reason_id IS NOT NULL)"
+    f" WHEN t.handled_as = 'saving' THEN {HANDLED_SAVING_SQL}"
     " WHEN t.direction = 'out' THEN COALESCE((SELECT SUM(al.amount) FROM allocations al"
     " JOIN categories c ON c.id = al.category_id"
     " WHERE al.transaction_id = t.id AND c.entry_type = 'saving'), 0)"
