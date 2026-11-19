@@ -18,6 +18,7 @@ from app.api import (
     money_plans,
     notifications,
     reports,
+    search,
     statement_imports,
     sub_ledgers,
     transactions,
@@ -80,6 +81,7 @@ app.include_router(dashboard.router)
 app.include_router(money_plans.router)
 app.include_router(notifications.router)
 app.include_router(reports.router)
+app.include_router(search.router)
 app.include_router(statement_imports.router)
 app.include_router(sub_ledgers.router)
 app.include_router(transactions.router)
