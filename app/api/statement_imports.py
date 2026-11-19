@@ -33,6 +33,8 @@ from app.repositories.import_progress import delete_progress, get_progress, upse
 from app.repositories.statement_imports import (
     add_import_sub_ledgers,
     create_statement_import,
+    delete_import_without_rows,
+    get_import_overlap,
     list_statement_imports,
     set_import_allocated,
 )
@@ -109,6 +111,8 @@ class StatementImportListItem(BaseModel):
     reviewed_at: datetime | None = None
     # ab-296: set while the user is on the Review step (moved on from Allocation).
     allocated_at: datetime | None = None
+    # ab-297: rows this upload created (null until parsed); 0 = already uploaded.
+    added_count: int | None = None
     # ab-265: an unfinished review's saved progress; null when none.
     progress: ListProgress | None = None
 
@@ -809,6 +813,18 @@ class ProgressResponse(BaseModel):
     updated_at: datetime | None = None
     # Why the parse failed, for the wizard's Processing step (ab-266).
     error_detail: str | None = None
+    # ab-297, once parsed: rows this upload added, rows an earlier upload
+    # had already recorded, and that earlier upload. added_count 0 = the
+    # statement was already uploaded.
+    added_count: int | None = None
+    already_count: int | None = None
+    already_recorded_by: "RecordedBy | None" = None
+
+
+class RecordedBy(BaseModel):
+    import_id: UUID
+    file_name: str | None = None
+    uploaded_at: datetime | None = None
 
 
 class SaveProgressRequest(BaseModel):
@@ -845,6 +861,9 @@ async def get_import_progress_endpoint(
     try:
         statement_import = await _owned_import(pool, import_id=import_id, user_id=user_id)
         saved = await get_progress(pool, import_id=import_id)
+        overlap = (
+            await get_import_overlap(pool, import_id=import_id) if statement_import["status"] == "parsed" else None
+        )
     except HTTPException:
         raise
     except Exception:
@@ -852,15 +871,21 @@ async def get_import_progress_endpoint(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
         ) from None
+    counts = {
+        "added_count": overlap["added_count"] if overlap else None,
+        "already_count": overlap["already_count"] if overlap else None,
+        "already_recorded_by": overlap["earlier"] if overlap else None,
+    }
     if saved is not None:
         # The import says which step it's on (ab-296); an old draft only adds counts.
-        return {**saved, "step": _derived_step(statement_import), "error_detail": None}
+        return {**saved, **counts, "step": _derived_step(statement_import), "error_detail": None}
     return {
         "step": _derived_step(statement_import),
         "draft": Draft(),
         "reviewed_count": 0,
         "total_count": 0,
         "error_detail": statement_import.get("error_detail") if statement_import["status"] == "failed" else None,
+        **counts,
     }
 
 
@@ -980,3 +1005,43 @@ async def set_import_step_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
         ) from None
     return {"step": body.step}
+
+
+# --- ab-297: removing an upload that was already uploaded ------------------------
+
+
+@router.delete("/{import_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_statement_import_endpoint(
+    import_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> Response:
+    """Removes an upload that added no transactions - a statement already
+    recorded by an earlier upload - and its stored file. An upload with
+    rows of its own is never removed here (409), so no data is lost."""
+    _require_pool(pool)
+    try:
+        statement_import = await _owned_import(pool, import_id=import_id, user_id=user_id)
+        if statement_import["status"] == "pending":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="This statement hasn't finished processing yet"
+            )
+        storage_key = await delete_import_without_rows(pool, import_id=import_id)
+        if storage_key is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This upload added transactions, so it can't be removed",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error removing import %s, user %s", import_id, user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
+        ) from None
+    # The record is gone; a stored file left behind is only logged.
+    try:
+        get_storage_client().delete_object(Bucket=get_settings().storage_bucket, Key=storage_key)
+    except Exception:
+        logger.error("Removed import %s but not its stored file %s", import_id, storage_key, exc_info=True)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

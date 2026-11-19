@@ -63,7 +63,10 @@ DONE = txn("Merchant Payment to 5555557 - JAVA HOUSE", allocated=1000.0)
 ROWS = [NAIVAS, SHELL, PAYOUT, DONE]
 
 
-def patch_repo(monkeypatch, *, imp=None, progress=None, rows=ROWS, categories=(GROCERIES,)):
+NO_OVERLAP = {"added_count": 3, "already_count": 0, "earlier": None}
+
+
+def patch_repo(monkeypatch, *, imp=None, progress=None, rows=ROWS, categories=(GROCERIES,), overlap=NO_OVERLAP):
     saved = {"step": "review", "draft": {}, "reviewed_count": 0, "total_count": 0, "updated_at": UPDATED}
 
     async def upsert(pool, *, import_id, step, draft, reviewed_count, total_count):
@@ -77,6 +80,7 @@ def patch_repo(monkeypatch, *, imp=None, progress=None, rows=ROWS, categories=(G
         "get_user_categories": AsyncMock(return_value=list(categories)),
         "upsert_progress": AsyncMock(side_effect=upsert),
         "delete_progress": AsyncMock(return_value=True),
+        "get_import_overlap": AsyncMock(return_value=overlap),
     }
     for name, mock in mocks.items():
         monkeypatch.setattr(f"{API}.{name}", mock)
@@ -123,8 +127,11 @@ def test_without_saved_progress_the_step_comes_from_the_import(client, fake_user
                                                                status, reviewed_at, allocated_at, step):
     patch_repo(monkeypatch, imp=import_row(status, reviewed_at, allocated_at=allocated_at))
     body = client.get(url()).json()
+    parsed = status == "parsed"
     assert body == {"step": step, "draft": {"rows": {}, "labels": {}, "paybills": {}},
-                    "reviewed_count": 0, "total_count": 0, "updated_at": None, "error_detail": None}
+                    "reviewed_count": 0, "total_count": 0, "updated_at": None, "error_detail": None,
+                    "added_count": 3 if parsed else None, "already_count": 0 if parsed else None,
+                    "already_recorded_by": None}
 
 
 def test_a_failed_parse_says_why(client, fake_user, fake_pool, monkeypatch):
@@ -304,4 +311,91 @@ def test_step_failure_is_a_generic_500(client, fake_user, fake_pool, monkeypatch
     patch_repo(monkeypatch, imp=import_row())
     monkeypatch.setattr(f"{API}.set_import_allocated", AsyncMock(side_effect=RuntimeError("db down")))
     response = client.put(step_url(), json={"step": "review"})
+    assert response.status_code == 500 and "db down" not in response.text
+
+
+# --- ab-297: a statement that was already uploaded ------------------------------
+
+
+def test_progress_says_which_upload_already_has_the_rows(client, fake_user, fake_pool, monkeypatch):
+    earlier = uuid4()
+    mocks = patch_repo(monkeypatch, imp=import_row(), overlap={
+        "added_count": 0, "already_count": 3,
+        "earlier": {"import_id": earlier, "file_name": "september.pdf", "uploaded_at": UPDATED},
+    })
+    body = client.get(url()).json()
+    assert (body["added_count"], body["already_count"]) == (0, 3)
+    assert body["already_recorded_by"] == {"import_id": str(earlier), "file_name": "september.pdf",
+                                           "uploaded_at": "2026-11-11T12:00:00Z"}
+    assert mocks["get_import_overlap"].await_args.kwargs == {"import_id": IMPORT_ID}
+
+
+def test_overlap_is_only_worked_out_once_parsed(client, fake_user, fake_pool, monkeypatch):
+    mocks = patch_repo(monkeypatch, imp=import_row("pending"))
+    assert client.get(url()).json()["added_count"] is None
+    mocks["get_import_overlap"].assert_not_awaited()
+
+
+def delete_url():
+    return f"/statement-imports/{IMPORT_ID}"
+
+
+def patch_delete(monkeypatch, *, imp, deleted="statements/x/statement.pdf"):
+    patch_repo(monkeypatch, imp=imp)
+    remove = AsyncMock(return_value=deleted)
+    monkeypatch.setattr(f"{API}.delete_import_without_rows", remove)
+    storage = type("S", (), {"delete_object": lambda self, **kw: storage_calls.append(kw)})()
+    storage_calls: list[dict] = []
+    monkeypatch.setattr(f"{API}.get_storage_client", lambda: storage)
+    return remove, storage_calls
+
+
+def test_delete_requires_auth(client):
+    assert client.delete(delete_url()).status_code == 401
+
+
+def test_an_upload_that_added_nothing_can_be_removed(client, fake_user, fake_pool, monkeypatch):
+    remove, storage_calls = patch_delete(monkeypatch, imp=import_row())
+    assert client.delete(delete_url()).status_code == 204
+    assert remove.await_args.kwargs == {"import_id": IMPORT_ID}
+    assert storage_calls and storage_calls[0]["Key"] == "statements/x/statement.pdf"
+
+
+def test_an_upload_with_its_own_rows_is_kept(client, fake_user, fake_pool, monkeypatch):
+    _, storage_calls = patch_delete(monkeypatch, imp=import_row(), deleted=None)
+    response = client.delete(delete_url())
+    assert response.status_code == 409
+    assert "added transactions" in response.json()["detail"]
+    assert storage_calls == []
+
+
+def test_an_upload_still_processing_is_kept(client, fake_user, fake_pool, monkeypatch):
+    remove, _ = patch_delete(monkeypatch, imp=import_row("pending"))
+    assert client.delete(delete_url()).status_code == 409
+    remove.assert_not_awaited()
+
+
+def test_someone_elses_upload_is_not_found(client, fake_user, fake_pool, monkeypatch):
+    remove, _ = patch_delete(monkeypatch, imp=None)
+    assert client.delete(delete_url()).status_code == 404
+    remove.assert_not_awaited()
+
+
+def test_a_storage_failure_after_removing_still_succeeds(client, fake_user, fake_pool, monkeypatch, caplog):
+    patch_repo(monkeypatch, imp=import_row())
+    monkeypatch.setattr(f"{API}.delete_import_without_rows", AsyncMock(return_value="statements/x/s.pdf"))
+
+    class Broken:
+        def delete_object(self, **kw):
+            raise RuntimeError("storage down")
+
+    monkeypatch.setattr(f"{API}.get_storage_client", lambda: Broken())
+    assert client.delete(delete_url()).status_code == 204
+    assert any("storage down" in str(r.exc_info) for r in caplog.records if r.exc_info)
+
+
+def test_delete_failure_is_a_generic_500(client, fake_user, fake_pool, monkeypatch):
+    patch_repo(monkeypatch, imp=import_row())
+    monkeypatch.setattr(f"{API}.delete_import_without_rows", AsyncMock(side_effect=RuntimeError("db down")))
+    response = client.delete(delete_url())
     assert response.status_code == 500 and "db down" not in response.text
