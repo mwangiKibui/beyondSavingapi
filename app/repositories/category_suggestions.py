@@ -148,7 +148,7 @@ async def get_user_rules(pool: asyncpg.Pool, *, user_id: UUID, pairs: list[tuple
     return [dict(row) for row in rows]
 
 
-async def get_approved_directory(pool: asyncpg.Pool) -> list[dict]:
+async def get_approved_directory(pool: asyncpg.Pool | asyncpg.Connection) -> list[dict]:
     """Every approved shared-list merchant, one row per key. A few hundred
     merchants, so matching happens in Python rather than per row in SQL."""
     rows = await pool.fetch(
@@ -163,7 +163,26 @@ async def get_approved_directory(pool: asyncpg.Pool) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-async def get_blocked_numbers(pool: asyncpg.Pool) -> list[dict]:
+async def get_directory_version(pool: asyncpg.Pool | asyncpg.Connection) -> tuple:
+    """A cheap fingerprint of everything Directory.from_rows is built from
+    (ab-300): counts catch deletes and status flips, the newest timestamps
+    catch inserts, key replaces and edits. One row, no table data."""
+    row = await pool.fetchrow(
+        """
+        SELECT (SELECT count(*) FILTER (WHERE status = 'approved') FROM merchant_directory) AS approved,
+               (SELECT count(*) FROM merchant_directory) AS merchants,
+               (SELECT max(GREATEST(created_at, updated_at, COALESCE(approved_at, created_at)))
+                FROM merchant_directory) AS merchants_changed,
+               (SELECT count(*) FROM merchant_directory_keys) AS keys,
+               (SELECT max(created_at) FROM merchant_directory_keys) AS keys_changed,
+               (SELECT count(*) FROM blocked_numbers) AS blocked,
+               (SELECT max(created_at) FROM blocked_numbers) AS blocked_changed
+        """
+    )
+    return tuple(row.values())
+
+
+async def get_blocked_numbers(pool: asyncpg.Pool | asyncpg.Connection) -> list[dict]:
     rows = await pool.fetch("SELECT number_kind, number FROM blocked_numbers")
     return [dict(row) for row in rows]
 

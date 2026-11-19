@@ -15,6 +15,7 @@ from app.main import app
 from app.services.allocations import AllocationPlan, AllocationRejected
 from app.services.category_applies import ApplyResult
 from app.services.description_keywords import KeywordContext
+from app.services.category_suggestions import Directory
 
 IMPORT_ID = uuid4()
 GROCERIES = {"id": uuid4(), "name": "Groceries", "type": "expense"}
@@ -145,8 +146,7 @@ def review(monkeypatch):
             "get_import_for_preview": AsyncMock(return_value=import_row()),
             "get_import_rows": AsyncMock(return_value=rows),
             "get_user_rules": AsyncMock(return_value=list(rules)),
-            "get_approved_directory": AsyncMock(return_value=[]),
-            "get_blocked_numbers": AsyncMock(return_value=[]),
+            "get_directory": AsyncMock(return_value=Directory.from_rows([], blocked=[])),
             "get_user_categories": AsyncMock(return_value=[GROCERIES]),
             "get_shared_votes": AsyncMock(return_value={}),
             "get_user_transfer_reasons": AsyncMock(return_value=[]),
@@ -197,6 +197,29 @@ def test_review_groups_split_rows_into_tabs(client, fake_user, fake_pool, review
 
     handled = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=handled").json()["items"][0]
     assert handled["handled_as"] == "charge" and handled["handled_reason"] == "M-Pesa charge"
+
+
+def test_review_groups_reuse_the_built_directory(client, fake_user, fake_pool, review, monkeypatch):
+    """ab-300: a second groups request reuses the payee Directory built by
+    the first, so the shared list's rows are read (and its name patterns
+    compiled) once while the version is unchanged."""
+    import app.services.directory_cache as directory_cache
+
+    review([txn(GROCER)])
+    monkeypatch.setattr(f"{SI}.get_directory", directory_cache.get_directory)
+    reads = {
+        "get_directory_version": AsyncMock(return_value=(1, 1, None, 1, None, 0, None)),
+        "get_approved_directory": AsyncMock(return_value=[]),
+        "get_blocked_numbers": AsyncMock(return_value=[]),
+    }
+    for name, mock in reads.items():
+        monkeypatch.setattr(f"app.services.directory_cache.{name}", mock)
+
+    assert client.get(f"/statement-imports/{IMPORT_ID}/groups").status_code == 200
+    assert client.get(f"/statement-imports/{IMPORT_ID}/groups").status_code == 200
+    assert reads["get_directory_version"].await_count == 2
+    assert reads["get_approved_directory"].await_count == 1
+    assert reads["get_blocked_numbers"].await_count == 1
 
 
 def test_review_groups_search_keeps_tab_counts(client, fake_user, fake_pool, review):

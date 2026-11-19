@@ -56,6 +56,26 @@ def test_same_key_twice_in_one_request_keeps_the_last_choice():
     assert [p["category_id"] for p in plan] == [RENT]
 
 
+async def test_remember_preferred_uses_the_shared_directory_for_blocked_numbers(monkeypatch):
+    """ab-300: remember_preferred reads the cached Directory, so a blocked
+    number still keys the preference by name."""
+    from app.services import rule_updates
+
+    r = row("Pay Bill Online to 222222 - ECITIZEN Acc. ABC123")
+    blocked = Directory.from_rows([], blocked=[{"number_kind": "paybill", "number": "222222"}])
+    get_directory = AsyncMock(return_value=blocked)
+    save = AsyncMock()
+    monkeypatch.setattr(rule_updates, "get_directory", get_directory)
+    monkeypatch.setattr(rule_updates, "get_rows_for_rule_update", AsyncMock(return_value=[r]))
+    monkeypatch.setattr(rule_updates, "set_preferred_rules", save)
+
+    assert await rule_updates.remember_preferred(object(), user_id=uuid4(), category_by_transaction={r["id"]: RENT},
+                                                 secret=SECRET) == 1
+    get_directory.assert_awaited_once()
+    plan = save.call_args.kwargs["preferences"][0]
+    assert (plan["key_kind"], plan["key_value"]) == ("name", "ECITIZEN")
+
+
 # --- endpoints --------------------------------------------------------------
 
 TRANSACTION_ID = uuid4()

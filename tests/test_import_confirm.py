@@ -8,6 +8,7 @@ import pytest
 
 from app.services.allocations import AllocationRejected
 from app.services.import_confirm import ConfirmItem, confirm_import
+from app.services.category_suggestions import Directory
 
 SVC = "app.services.import_confirm"
 SECRET = "test-secret"
@@ -31,8 +32,7 @@ def repo(monkeypatch):
     mocks = {
         "lock_transactions": AsyncMock(),
         "get_import_rows": AsyncMock(return_value=[]),
-        "get_approved_directory": AsyncMock(return_value=[]),
-        "get_blocked_numbers": AsyncMock(return_value=[]),
+        "get_directory": AsyncMock(return_value=Directory.from_rows([], blocked=[])),
         "get_user_categories": AsyncMock(return_value=[GROCERIES, SALARY]),
         "create_categories": AsyncMock(side_effect=created),
         "insert_bulk_allocations": AsyncMock(),
@@ -190,7 +190,7 @@ async def test_learned_name_votes_like_a_printed_one(repo):
 async def test_three_users_seeing_a_listed_name_grow_the_list(repo):
     row = txn("Merchant Payment to 5551234 - NAIVAS WESTLANDS")
     repo["get_import_rows"].return_value = [row]
-    repo["get_approved_directory"].return_value = NAIVAS_DIR
+    repo["get_directory"].return_value = Directory.from_rows(NAIVAS_DIR, blocked=[])
     repo["get_learned_names"].return_value = {("till", "5551234", "out"): [
         {"name": "NAIVAS WESTLANDS", "users": 3, "last_seen": SEEN}]}
     await confirm([ConfirmItem(transaction_id=row["id"], category_id=GROCERIES["id"])])
@@ -202,7 +202,7 @@ async def test_three_users_seeing_a_listed_name_grow_the_list(repo):
 async def test_no_growth_below_three_users(repo):
     row = txn("Merchant Payment to 5551234 - NAIVAS WESTLANDS")
     repo["get_import_rows"].return_value = [row]
-    repo["get_approved_directory"].return_value = NAIVAS_DIR
+    repo["get_directory"].return_value = Directory.from_rows(NAIVAS_DIR, blocked=[])
     repo["get_learned_names"].return_value = {("till", "5551234", "out"): [
         {"name": "NAIVAS WESTLANDS", "users": 2, "last_seen": SEEN}]}
     await confirm([ConfirmItem(transaction_id=row["id"], category_id=GROCERIES["id"])])

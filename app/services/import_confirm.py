@@ -15,8 +15,6 @@ import asyncpg
 from app.repositories.category_suggestions import (
     add_users_number_keys,
     create_categories,
-    get_approved_directory,
-    get_blocked_numbers,
     get_import_rows,
     get_learned_names,
     get_user_categories,
@@ -37,13 +35,13 @@ from app.services.allocations import (
     plan_bulk_allocation,
 )
 from app.services.category_suggestions import (
-    Directory,
     apply_learned_names,
     extract_keys,
     learned_name_lookups,
     name_sightings,
     plan_key_growth,
 )
+from app.services.directory_cache import get_directory
 from app.services.suggestion_learning import ConfirmedRow, plan_learning
 
 
@@ -95,7 +93,7 @@ async def confirm_import(
     if item_by_id.keys() - rows_by_id.keys():
         raise AllocationRejected(422, "One or more rows aren't part of this statement")
 
-    directory = Directory.from_rows(await get_approved_directory(conn), blocked=await get_blocked_numbers(conn))
+    directory = await get_directory(conn)
     printed = extract_keys(rows, provider=statement_import["provider"], secret=secret)
     for transaction_id, item in item_by_id.items():
         if item.user_entered_paybill and printed[transaction_id].kind != "reference":

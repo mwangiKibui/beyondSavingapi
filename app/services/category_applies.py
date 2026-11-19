@@ -20,8 +20,6 @@ import asyncpg
 
 from app.repositories.category_suggestions import (
     create_categories,
-    get_approved_directory,
-    get_blocked_numbers,
     get_import_rows,
     get_learned_names,
     get_owner,
@@ -74,6 +72,7 @@ from app.services.category_suggestions import (
     shared_vote_lookups,
     vote_keys,
 )
+from app.services.directory_cache import get_directory
 from app.services.merchant_keys import RowKey
 from app.services.payee_groups import (
     _suggestion_id,
@@ -186,7 +185,7 @@ async def load_suggestions(
     rows: learned names, the user's rules, others' picks, the shared list.
     Returns (keys with learned names, preview row by id, categories,
     directory)."""
-    directory = Directory.from_rows(await get_approved_directory(conn), blocked=await get_blocked_numbers(conn))
+    directory = await get_directory(conn)
     learned = await get_learned_names(conn, numbers=learned_name_lookups(rows, keys, directory))
     keys = apply_learned_names(rows, keys, learned, directory)
     rules = await get_user_rules(conn, user_id=user_id, pairs=rule_lookup_pairs(keys.values(), directory))

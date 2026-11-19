@@ -19,8 +19,6 @@ from app.core.security import get_current_user_id
 from app.core.storage import get_storage_client
 from app.repositories.accounts import get_account
 from app.repositories.category_suggestions import (
-    get_approved_directory,
-    get_blocked_numbers,
     get_import_for_preview,
     get_import_rows,
     get_learned_names,
@@ -44,7 +42,6 @@ from app.services.allocations import AllocationRejected, alert_groups
 from app.repositories.transfer_reasons import get_user_transfer_reasons
 from app.services.description_keywords import load_keyword_context
 from app.services.category_suggestions import (
-    Directory,
     apply_learned_names,
     build_handled_rows,
     build_preview_rows,
@@ -54,6 +51,7 @@ from app.services.category_suggestions import (
     rule_lookup_pairs,
     shared_vote_lookups,
 )
+from app.services.directory_cache import get_directory
 from app.services.import_confirm import ConfirmItem, confirm_import
 from app.services.import_handling import handle_import_by_id
 from app.services.import_progress import Draft, payee_keys, progress_counts
@@ -434,9 +432,7 @@ async def _load_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id: UUID) -
         keys = extract_keys(
             rows, provider=statement_import["provider"], secret=get_settings().suggestion_key_secret
         )
-        directory = Directory.from_rows(
-            await get_approved_directory(pool), blocked=await get_blocked_numbers(pool)
-        )
+        directory = await get_directory(pool)
         # Rows showing only a Till/Paybill borrow the name other users' M-Pesa
         # statements printed for it (ab-253 PR 4).
         learned = await get_learned_names(pool, numbers=learned_name_lookups(rows, keys, directory))

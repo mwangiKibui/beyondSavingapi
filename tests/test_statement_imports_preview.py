@@ -12,6 +12,7 @@ from app.core.db import get_pool
 from app.core.security import get_current_user_id
 from app.main import app
 from app.services.description_keywords import KeywordContext
+from app.services.category_suggestions import Directory
 
 API = "app.api.statement_imports"
 IMPORT_ID = uuid4()
@@ -62,8 +63,7 @@ def patch_reads(monkeypatch, *, imp=None, rows=(), rules=(), directory=(), categ
         "get_import_for_preview": AsyncMock(return_value=imp),
         "get_import_rows": AsyncMock(return_value=list(rows)),
         "get_user_rules": AsyncMock(return_value=list(rules)),
-        "get_approved_directory": AsyncMock(return_value=list(directory)),
-        "get_blocked_numbers": AsyncMock(return_value=[]),
+        "get_directory": AsyncMock(return_value=Directory.from_rows(list(directory), blocked=[])),
         "get_user_categories": AsyncMock(return_value=list(categories)),
         "get_shared_votes": AsyncMock(return_value=dict(shared_votes or {})),
         "get_user_transfer_reasons": AsyncMock(return_value=[]),

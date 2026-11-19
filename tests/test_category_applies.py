@@ -11,6 +11,7 @@ import app.services.category_applies as svc
 from app.services.allocations import AllocationRejected
 from app.services.description_keywords import KeywordContext, KeywordList
 from app.services.category_applies import ApplyGroup, apply_earlier, apply_groups, reopen_lines, undo_apply
+from app.services.category_suggestions import Directory
 
 SECRET = "test-secret"
 USER = uuid4()
@@ -34,8 +35,7 @@ def db(monkeypatch):
     mocks = {
         "lock_rows_for_apply": AsyncMock(return_value=[]),
         "get_import_rows": AsyncMock(return_value=[]),
-        "get_approved_directory": AsyncMock(return_value=[]),
-        "get_blocked_numbers": AsyncMock(return_value=[]),
+        "get_directory": AsyncMock(return_value=Directory.from_rows([], blocked=[])),
         "get_learned_names": AsyncMock(return_value={}),
         "get_user_rules": AsyncMock(return_value=[]),
         "get_user_categories": AsyncMock(return_value=[GROCERIES, SALARY]),

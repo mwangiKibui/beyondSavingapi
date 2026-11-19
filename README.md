@@ -96,6 +96,18 @@ App settings (env vars on `app` and `worker`): `STORAGE_ENDPOINT`,
   parsed. Remove it with `docker volume rm beyondsavingapi_minio_data`
   when you're ready.
 
+## Shared payee list cache
+
+Each process builds the shared payee list (`merchant_directory`,
+`merchant_directory_keys`, `blocked_numbers`) once and reuses it
+(`app/services/directory_cache.py`, ab-300). Every use reads a one-row
+version of those tables (counts plus newest timestamps) and rebuilds when
+it changes, so admin edits and new keys show up on the next request in
+every process. A change made by hand in SQL that leaves the timestamps
+alone (e.g. an `UPDATE` on `merchant_directory_keys` or `blocked_numbers`)
+shows up within 10 minutes; bump `merchant_directory.updated_at` to make
+it show at once.
+
 ## Structure
 
 ```

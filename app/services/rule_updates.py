@@ -10,8 +10,9 @@ from uuid import UUID
 
 import asyncpg
 
-from app.repositories.category_suggestions import get_blocked_numbers, get_rows_for_rule_update, set_preferred_rules
+from app.repositories.category_suggestions import get_rows_for_rule_update, set_preferred_rules
 from app.services.category_suggestions import Directory, rule_key
+from app.services.directory_cache import get_directory
 from app.services.merchant_keys import extract_key
 
 
@@ -45,7 +46,7 @@ async def remember_preferred(
     if not category_by_transaction:
         return 0
     rows = await get_rows_for_rule_update(pool, transaction_ids=list(category_by_transaction), user_id=user_id)
-    directory = Directory.from_rows([], blocked=await get_blocked_numbers(pool))
+    directory = await get_directory(pool)
     plans = plan_preferred(rows, category_by_transaction, secret=secret, directory=directory)
     await set_preferred_rules(pool, user_id=user_id, preferences=plans)
     return len(plans)
