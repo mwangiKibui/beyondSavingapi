@@ -84,6 +84,10 @@ class Merchant:
 
 
 class Directory:
+    """The shared payee list, matched in memory. One instance is cached per
+    process and shared by every request (services.directory_cache, ab-300):
+    read-only after from_rows - never mutate it or its Merchants."""
+
     def __init__(self, merchants: dict[UUID, Merchant], numbers: dict, blocked: set[tuple[str, str]]):
         self._merchants = merchants
         self._numbers = numbers  # (kind, value, direction) -> (merchant_id, requires_text)
