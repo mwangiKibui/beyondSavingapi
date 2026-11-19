@@ -1014,7 +1014,9 @@ async def delete_statement_import_endpoint(
 ) -> Response:
     """Removes an upload that added no transactions - a statement already
     recorded by an earlier upload - and its stored file. An upload with
-    rows of its own is never removed here (409), so no data is lost."""
+    rows of its own is never removed here (409), so no data is lost.
+    Its allocation batches move to the earlier upload first (ab-301), so
+    their Undo stays in that upload's review."""
     _require_pool(pool)
     try:
         statement_import = await _owned_import(pool, import_id=import_id, user_id=user_id)

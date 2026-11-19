@@ -111,15 +111,13 @@ async def add_import_sub_ledgers(pool: asyncpg.Pool, *, import_id: UUID, sub_led
     )
 
 
-async def get_import_overlap(pool: asyncpg.Pool, *, import_id: UUID) -> dict:
-    """ab-297: of the rows an upload's review lists (its own, plus statement
-    rows on the account in its period - see get_import_rows), how many it
-    added and how many an earlier upload had already recorded, and the
-    earlier upload holding most of them. Callers check ownership first."""
-    row = await pool.fetchrow(
-        """
-        WITH si AS (SELECT * FROM statement_imports WHERE id = $1),
-        rows AS (
+# ab-297/ab-301: the rows an upload's review lists (its own, plus statement
+# rows on the account in its period - see get_import_rows) and the earlier
+# upload holding most of them. Shared by the progress endpoint's
+# already_recorded_by and by removing a duplicate, so the two never drift.
+_OVERLAP_CTES = """
+        si AS (SELECT * FROM statement_imports WHERE id = $1),
+        covered AS (
             SELECT t.import_id
             FROM transactions t, si
             WHERE t.import_id = $1
@@ -135,15 +133,24 @@ async def get_import_overlap(pool: asyncpg.Pool, *, import_id: UUID) -> dict:
                )
         ),
         earlier AS (
-            SELECT import_id FROM rows
+            SELECT import_id FROM covered
             WHERE import_id IS NOT NULL AND import_id <> $1
             GROUP BY import_id
             ORDER BY COUNT(*) DESC, import_id
             LIMIT 1
-        )
+        )"""
+
+
+async def get_import_overlap(pool: asyncpg.Pool, *, import_id: UUID) -> dict:
+    """ab-297: of the rows an upload's review lists, how many it added and
+    how many an earlier upload had already recorded, and the earlier upload
+    holding most of them. Callers check ownership first."""
+    row = await pool.fetchrow(
+        f"""
+        WITH {_OVERLAP_CTES}
         SELECT
-            (SELECT COUNT(*) FROM rows WHERE import_id = $1) AS added_count,
-            (SELECT COUNT(*) FROM rows WHERE import_id IS DISTINCT FROM $1) AS already_count,
+            (SELECT COUNT(*) FROM covered WHERE import_id = $1) AS added_count,
+            (SELECT COUNT(*) FROM covered WHERE import_id IS DISTINCT FROM $1) AS already_count,
             e.id AS earlier_id, e.file_name AS earlier_file_name, e.created_at AS earlier_uploaded_at
         FROM (SELECT 1) one
         LEFT JOIN earlier ON true
@@ -158,18 +165,67 @@ async def get_import_overlap(pool: asyncpg.Pool, *, import_id: UUID) -> dict:
     return {"added_count": row["added_count"], "already_count": row["already_count"], "earlier": earlier}
 
 
-async def delete_import_without_rows(pool: asyncpg.Pool, *, import_id: UUID) -> str | None:
-    """ab-297: removes an upload that added no transactions (a re-upload of
-    a statement already recorded). Returns its stored file's key, or None
-    when it has rows of its own and was kept. Callers check ownership."""
-    return await pool.fetchval(
-        """
-        DELETE FROM statement_imports si
-        WHERE si.id = $1 AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.import_id = si.id)
-        RETURNING si.storage_key
+async def move_applies_to_earlier(conn: asyncpg.Connection, *, import_id: UUID) -> int:
+    """ab-301: points a duplicate upload's allocation batches at the earlier
+    upload, so their batch Undo shows in that upload's review. Each batch
+    goes to the upload holding most of the rows it filed (same account,
+    oldest upload on a tie); a batch with no rows left goes to the upload
+    already_recorded_by names. With no earlier upload a batch is left
+    alone, and the delete's ON DELETE SET NULL applies as before. Undone
+    batches move too, keeping the history together. Returns how many moved."""
+    status = await conn.execute(
+        f"""
+        WITH {_OVERLAP_CTES},
+        by_rows AS (
+            SELECT DISTINCT ON (al.apply_id) al.apply_id, t.import_id
+            FROM category_applies ca
+            JOIN allocations al ON al.apply_id = ca.id
+            JOIN transactions t ON t.id = al.transaction_id
+            JOIN statement_imports e ON e.id = t.import_id
+            JOIN si ON e.account_id = si.account_id
+            WHERE ca.import_id = $1 AND t.import_id <> $1
+            GROUP BY al.apply_id, t.import_id, e.created_at
+            ORDER BY al.apply_id, COUNT(*) DESC, e.created_at, t.import_id
+        ),
+        targets AS (
+            SELECT ca.id, COALESCE(b.import_id, (SELECT import_id FROM earlier)) AS import_id
+            FROM category_applies ca
+            LEFT JOIN by_rows b ON b.apply_id = ca.id
+            WHERE ca.import_id = $1
+        )
+        UPDATE category_applies ca
+        SET import_id = tg.import_id
+        FROM targets tg
+        WHERE ca.id = tg.id AND tg.import_id IS NOT NULL
         """,
         import_id,
     )
+    return int(status.split()[-1])
+
+
+async def delete_import_without_rows(pool: asyncpg.Pool, *, import_id: UUID) -> str | None:
+    """ab-297: removes an upload that added no transactions (a re-upload of
+    a statement already recorded). Returns its stored file's key, or None
+    when it has rows of its own and was kept. Callers check ownership.
+
+    ab-301: in the same transaction, its allocation batches first move to
+    the earlier upload (see move_applies_to_earlier)."""
+    async with pool.acquire() as conn, conn.transaction():
+        removable = await conn.fetchval(
+            """
+            SELECT si.id FROM statement_imports si
+            WHERE si.id = $1 AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.import_id = si.id)
+            FOR UPDATE
+            """,
+            import_id,
+        )
+        if removable is None:
+            return None
+        await move_applies_to_earlier(conn, import_id=import_id)
+        return await conn.fetchval(
+            "DELETE FROM statement_imports WHERE id = $1 RETURNING storage_key",
+            import_id,
+        )
 
 
 async def set_import_allocated(pool: asyncpg.Pool, *, import_id: UUID, allocated: bool):
