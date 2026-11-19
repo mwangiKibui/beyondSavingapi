@@ -92,9 +92,14 @@ class ApplyGroup:
     new_category_name: str | None = None
     use_suggestion: bool = False
     remember: bool = False
-    # ab-292: a choice for one line of a payee - remember learns softly
-    # (learn_rules) and casts no shared vote.
+    # ab-292: a choice for one line of a payee - casts no shared vote and
+    # teaches no keyword. ab-298: remembered, it still becomes the payee's
+    # suggestion (the latest choice wins).
     per_line: bool = False
+    # Set only when "use suggestion" splits a payee's lines across
+    # categories by amount: the minority ones count one more use
+    # (learn_rules) instead of becoming the default.
+    learn_softly: bool = False
     # ab-285: file the rows as a Funds transfer under this reason instead.
     transfer_reason_id: UUID | None = None
     # ab-285, transfers only - the other side, at most one of: one of the
@@ -406,10 +411,12 @@ async def apply_groups(
         if g.remember and allocatable:
             if is_transfer:
                 await _remember_transfer(conn, user_id=user_id, rows=allocatable, keys=keys, directory=directory,
-                                         reason_id=reason_id, per_line=g.per_line)
+                                         reason_id=reason_id, per_line=g.per_line,
+                                         learn_softly=g.learn_softly)
             else:
                 await _remember(conn, user_id=user_id, rows=allocatable, keys=keys, directory=directory,
-                                category=category, per_line=g.per_line, preview=preview)
+                                category=category, per_line=g.per_line, preview=preview,
+                                learn_softly=g.learn_softly)
             remembered.append(len(results))
         results.append({
             "apply_id": apply_id,
@@ -522,8 +529,9 @@ def _split_by_suggestion(groups: list[ApplyGroup], group_keys: list[str], previe
         for sid, (s, ids) in split.items():
             # Only the group's main category becomes the payee's default;
             # the others learn as line choices (no forced top, no vote).
-            soft = g.per_line or (len(split) > 1 and sid != main)
-            out_groups.append(replace(g, transaction_ids=ids, suggestion=s, per_line=soft))
+            minority = len(split) > 1 and sid != main
+            out_groups.append(replace(g, transaction_ids=ids, suggestion=s, per_line=g.per_line or minority,
+                                      learn_softly=minority))
             out_keys.append(gk)
     return out_groups, out_keys
 
@@ -578,7 +586,8 @@ async def _snapshot(conn, *, user_id: UUID, rows: list[dict], keys: dict, direct
 
 
 async def _remember(conn, *, user_id: UUID, rows: list[dict], keys: dict, directory: Directory,
-                    category: dict, per_line: bool = False, preview: dict | None = None) -> None:
+                    category: dict, per_line: bool = False, preview: dict | None = None,
+                    learn_softly: bool = False) -> None:
     """Top saved choice per payee key (one per account reference), plus
     the shared votes a confirm would cast for business payees, plus the
     user's choice for any description keyword the rows matched (ab-290)."""
@@ -599,10 +608,14 @@ async def _remember(conn, *, user_id: UUID, rows: list[dict], keys: dict, direct
         amounts.setdefault(k, []).append(float(r["amount"]))
     for k, p in preferences.items():
         p["amount"] = sum(amounts[k]) / len(amounts[k])
+    # ab-298: the user's latest choice becomes the payee's suggestion - for
+    # the whole group or one line. Only the app's own amount split learns
+    # softly. The amount rule in pick_rule still separates a merchant used
+    # for clearly different amounts.
+    save = learn_rules if learn_softly else set_preferred_rules
+    await save(conn, user_id=user_id, preferences=list(preferences.values()))
     if per_line:
-        await learn_rules(conn, user_id=user_id, preferences=list(preferences.values()))
         return
-    await set_preferred_rules(conn, user_id=user_id, preferences=list(preferences.values()))
 
     learning = plan_learning(
         [
@@ -617,7 +630,7 @@ async def _remember(conn, *, user_id: UUID, rows: list[dict], keys: dict, direct
 
 
 async def _remember_transfer(conn, *, user_id: UUID, rows: list[dict], keys: dict, directory: Directory,
-                             reason_id: UUID, per_line: bool = False) -> None:
+                             reason_id: UUID, per_line: bool = False, learn_softly: bool = False) -> None:
     """ab-285: a remembered transfer is a private saved choice only - no
     shared merchant/number vote and no keyword learning, for any payee."""
     preferences: dict[tuple, dict] = {}
@@ -635,7 +648,7 @@ async def _remember_transfer(conn, *, user_id: UUID, rows: list[dict], keys: dic
         amounts.setdefault(k, []).append(float(r["amount"]))
     for k, p in preferences.items():
         p["amount"] = sum(amounts[k]) / len(amounts[k])
-    save = learn_rules if per_line else set_preferred_rules
+    save = learn_rules if learn_softly else set_preferred_rules
     await save(conn, user_id=user_id, preferences=list(preferences.values()))
 
 

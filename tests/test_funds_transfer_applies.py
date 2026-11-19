@@ -198,12 +198,13 @@ async def test_remember_on_a_business_transfer_still_casts_no_vote(db):
     db["upsert_number_votes"].assert_not_awaited()
 
 
-async def test_a_line_transfer_learns_softly(db):
+async def test_a_remembered_line_transfer_becomes_the_payees_suggestion(db):
+    """ab-298: latest choice wins for a line too (only when remembered)."""
     a = row(SENDER, direction="in")
     await run(db, [a], [ApplyGroup(transaction_ids=[a["id"]], transfer_reason_id=FAMILY_IN["id"],
                                    remember=True, per_line=True)])
-    db["learn_rules"].assert_awaited_once()
-    db["set_preferred_rules"].assert_not_awaited()
+    db["set_preferred_rules"].assert_awaited_once()
+    db["learn_rules"].assert_not_awaited()
 
 
 # --- approving a suggested transfer -------------------------------------------------
