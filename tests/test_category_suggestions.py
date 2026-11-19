@@ -546,3 +546,24 @@ def test_labelled_person_row_keeps_the_label_separate_from_the_statement_text():
     out = preview(rows, rules=[rule])
     assert out[0]["label"] == "Mechanic"
     assert out[0]["display_name"] == "Customer Transfer to - 254700***000 JOHN DOE"
+
+
+
+# --- ab-298: latest choice wins, the amount rule still splits a merchant ------------
+
+
+def test_the_latest_choice_is_on_top_so_it_is_suggested():
+    """set_preferred_rules puts the newest choice one above the rest; that's
+    what pick_rule suggests when the amount rule has nothing to say."""
+    a, b = uuid4(), uuid4()
+    rules = [rule(a, times_used=3, avg_amount=1000), rule(b, times_used=4, avg_amount=1100)]
+    assert pick_rule(rules, account_hash=None, amount=1000)["category_id"] == b
+
+
+def test_the_amount_rule_still_wins_for_a_split_merchant():
+    """Naivas: Groceries ~5,000 (x2), Household ~300 (x2). Household was
+    chosen last (on top), but a big basket still suggests Groceries."""
+    groceries, household = uuid4(), uuid4()
+    rules = [rule(groceries, times_used=2, avg_amount=5000), rule(household, times_used=3, avg_amount=300)]
+    assert pick_rule(rules, account_hash=None, amount=4800)["category_id"] == groceries
+    assert pick_rule(rules, account_hash=None, amount=250)["category_id"] == household

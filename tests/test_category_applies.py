@@ -230,16 +230,18 @@ async def test_use_suggestion_gives_lines_without_one_the_groups(db):
     assert result.groups[0]["allocated"] == [a["id"], b["id"]]
 
 
-async def test_a_per_line_choice_learns_softly_and_casts_no_vote(db):
+async def test_a_per_line_choice_becomes_the_payees_suggestion_and_casts_no_vote(db):
+    """ab-298: the user's latest choice for a payee wins, made for one line
+    or the whole group. Still no shared vote for one line (ab-292)."""
     a = row(GROCER, amount=350)
     db["get_user_categories"].return_value = [GROCERIES, VEG, SALARY]
 
     await run(db, [a], [ApplyGroup(transaction_ids=[a["id"]], category_id=VEG["id"], remember=True,
                                    per_line=True)])
 
-    learned = db["learn_rules"].await_args.kwargs["preferences"]
-    assert [(p["key_value"], p["category_id"], p["amount"]) for p in learned] == [("5555555", VEG["id"], 350.0)]
-    db["set_preferred_rules"].assert_not_awaited()
+    preferred = db["set_preferred_rules"].await_args.kwargs["preferences"]
+    assert [(p["key_value"], p["category_id"], p["amount"]) for p in preferred] == [("5555555", VEG["id"], 350.0)]
+    db["learn_rules"].assert_not_awaited()
     db["upsert_merchant_votes"].assert_not_awaited()
     db["upsert_number_votes"].assert_not_awaited()
     # Still undoable: the saved choices are snapshotted first.
