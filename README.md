@@ -108,6 +108,29 @@ alone (e.g. an `UPDATE` on `merchant_directory_keys` or `blocked_numbers`)
 shows up within 10 minutes; bump `merchant_directory.updated_at` to make
 it show at once.
 
+## Search
+
+`GET /search?q=&limit=5` (ab-274) powers the navbar search: the signed-in
+user's transactions (description, counterparty, or exact amount with or
+without separators), payees, money plans and accounts, each group capped
+at `limit` with its `total`. `type=…&page=&page_size=` returns one group,
+paged, for the full results page. `loans` is always empty until there is a
+loans table. Pages and actions are matched in the UI.
+
+- Words match in order with anything between them (`java house` finds
+  `JAVA  HOUSE`), as a plain `ILIKE`.
+- Transactions are narrowed to the user's account ids first
+  (`t.account_id = ANY(ARRAY(SELECT id FROM accounts WHERE user_id = $1))`)
+  so Postgres uses `idx_txn_account_date`. Joining `accounts` instead
+  made it scan every user's rows.
+- Payees key the newest 500 matching statement rows in Python, like the
+  payee groups (no shared payee list is read), so a very broad query can
+  report fewer payees than exist.
+- No text index or migration was added. Measured locally (one user with
+  5,000 rows in a 255k-row table): each SQL query 3–7 ms, payee keying
+  ≤7 ms. If users reach ~50k rows each, consider `pg_trgm` + a GIN index
+  on `transactions.description`.
+
 ## Structure
 
 ```
