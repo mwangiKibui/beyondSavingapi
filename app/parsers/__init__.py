@@ -8,4 +8,12 @@ PARSERS["M-Pesa"] = parse_mpesa_statement
 PARSERS["Equity Bank"] = parse_equity_bank_statement
 PARSERS["NCBA Bank"] = parse_ncba_bank_statement
 
-__all__ = ["PARSERS"]
+# Mentor Sacco member statements are read by their own path in the worker
+# (sub-ledgers), not through PARSERS.
+MENTOR_SACCO = "Mentor Sacco"
+
+# Every provider the app can read statements for - institutions may only be
+# marked statements_uploadable when they are in here (ab-197).
+STATEMENT_PROVIDERS = frozenset(PARSERS) | {MENTOR_SACCO}
+
+__all__ = ["MENTOR_SACCO", "PARSERS", "STATEMENT_PROVIDERS"]
