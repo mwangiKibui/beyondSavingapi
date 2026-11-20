@@ -31,7 +31,7 @@ from app.repositories.merchant_admin import (
     list_unknown_numbers,
     update_merchant,
 )
-from app.services.category_suggestions import SHARED_MIN_VOTERS
+from app.services.category_suggestions import SHARED_MIN_VOTERS, Merchant, pick_payee_category
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,12 @@ class VoteCount(BaseModel):
     users: int
 
 
+class KeySuggestion(BaseModel):
+    key_kind: str  # 'name' | 'paybill' | 'till'
+    key_value: str
+    category_name: str
+
+
 class MerchantOut(BaseModel):
     id: UUID
     display_name: str
@@ -112,6 +118,14 @@ class MerchantOut(BaseModel):
     # Distinct users per category from votes on this merchant's numbers and
     # plain names - counts only.
     votes: list[VoteCount]
+    # What users actually get suggested (ab-304), by the suggestion path's
+    # own rule: "users" when a key's voters clearly agree (numbers first,
+    # then names - the first one wins), else "list" for an approved
+    # merchant, else nothing.
+    suggested_category: str | None = None
+    suggested_from: Literal["users", "list"] | None = None
+    # Every key where users' choice takes over, so disagreeing keys show.
+    suggested_by_key: list[KeySuggestion] = []
     created_at: datetime
     updated_at: datetime
 
@@ -175,6 +189,9 @@ class VoteGroup(BaseModel):
     on_list: bool | None = None
     # Unknown numbers: the name users' M-Pesa statements printed for it.
     learned_name: str | None = None
+    # From users: a blocked (shared/misattributed) number can't be added
+    # to a merchant (ab-304).
+    is_blocked: bool = False
 
 
 class VoteGroupListResponse(BaseModel):
@@ -226,6 +243,28 @@ async def _check_keys(conn, *, display_name: str, direction: str, keys: list[dic
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="; ".join(problems))
 
 
+def _with_suggestion(item: dict) -> dict:
+    """Adds suggested_category/_from/_by_key from the per-key votes the
+    repository attached (key_votes), using the suggestion path's rule."""
+    key_votes = sorted(
+        item.pop("key_votes", None) or [],
+        key=lambda k: (k["key_kind"] == "name", -k["users"], k["key_value"]),
+    )
+    by_key = []
+    for k in key_votes:
+        picked = pick_payee_category([k["votes"]], lambda: None)
+        if picked:
+            by_key.append({"key_kind": k["key_kind"], "key_value": k["key_value"], "category_name": picked[0]})
+    listed = (
+        Merchant(item["id"], item["display_name"], item["category_name"], item["direction"])
+        if item["status"] == "approved" else None
+    )
+    picked = pick_payee_category([k["votes"] for k in key_votes], lambda: listed)
+    item["suggested_category"], item["suggested_from"] = (picked[0], picked[1]) if picked else (None, None)
+    item["suggested_by_key"] = by_key
+    return item
+
+
 # --- merchants ------------------------------------------------------------
 
 
@@ -248,6 +287,7 @@ async def list_merchants_endpoint(
         )
     except Exception:
         raise _server_error("listing merchants", admin_id) from None
+    items = [_with_suggestion(i) for i in items]
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
@@ -284,7 +324,7 @@ async def get_merchant_endpoint(
         raise _server_error("reading merchant", admin_id) from None
     if merchant is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Merchant not found")
-    return merchant
+    return _with_suggestion(merchant)
 
 
 @router.post("/merchants", response_model=MerchantOut, status_code=status.HTTP_201_CREATED)
@@ -313,7 +353,7 @@ async def create_merchant_endpoint(
         ) from None
     except Exception:
         raise _server_error("creating merchant", admin_id) from None
-    return merchant
+    return _with_suggestion(merchant)
 
 
 @router.patch("/merchants/{merchant_id}", response_model=MerchantOut)
@@ -348,7 +388,7 @@ async def update_merchant_endpoint(
         ) from None
     except Exception:
         raise _server_error("updating merchant", admin_id) from None
-    return merchant
+    return _with_suggestion(merchant)
 
 
 @router.delete("/merchants/{merchant_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
