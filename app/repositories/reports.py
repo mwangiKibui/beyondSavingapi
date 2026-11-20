@@ -8,6 +8,7 @@ import asyncpg
 from app.repositories.budget_plans import plan_totals
 from app.services.row_kind import (
     BUCKET,
+    allocation_transfer_saving,
     counted_amount,
     is_transfer_allocation_sql,
     kind_of_row,
@@ -81,7 +82,9 @@ async def fetch_report_rows(pool: asyncpg.Pool, filters: ReportFilters) -> list[
             t.counterparty,
             t.description,
             t.handled_as,
+            t.transfer_group_id,
             sl.role AS sub_ledger_role,
+            acc.account_type,
             acc.nickname AS account_nickname,
             a.id AS allocation_id,
             a.category_id,
@@ -89,6 +92,8 @@ async def fetch_report_rows(pool: asyncpg.Pool, filters: ReportFilters) -> list[
             c.type AS category_type,
             c.entry_type AS category_entry_type,
             a.transfer_reason_id,
+            src_acc.account_type AS source_account_type,
+            src_sl.role AS source_sub_ledger_role,
             a.amount AS alloc_amount,
             a.currency AS alloc_currency
         FROM transactions t
@@ -96,6 +101,8 @@ async def fetch_report_rows(pool: asyncpg.Pool, filters: ReportFilters) -> list[
         LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
         LEFT JOIN allocations a ON a.transaction_id = t.id
         LEFT JOIN categories c ON c.id = a.category_id
+        LEFT JOIN accounts src_acc ON src_acc.id = a.source_account_id
+        LEFT JOIN sub_ledgers src_sl ON src_sl.id = a.source_sub_ledger_id
         WHERE acc.user_id = $1
           AND t.currency = $2
           AND ($3::uuid IS NULL OR t.account_id = $3)
@@ -140,7 +147,8 @@ def build_report(rows: list[dict], *, currency: str) -> dict:
       portion not covered by the transfer allocation). Saving (ab-259) is
       neither: a row handled as saving is left out, and the part of a
       payment filed under a saving category comes off total_out.
-    - total_saving: net money into savings (transaction_saving above);
+    - total_saving: net money into savings (transaction_saving above),
+      Funds transfers into / out of savings places included (ab-293);
       net = total_in - total_out - total_saving.
     - by_category: sum of allocation amounts grouped by category_id,
       for allocations with a real category_id and no transfer_reason_id.
@@ -171,9 +179,10 @@ def build_report(rows: list[dict], *, currency: str) -> dict:
             ZERO,
         )
 
-        # A transfer or borrowed money is netted out whole, its saving part
-        # too - the same as the dashboard (ab-287).
-        saving = transaction_saving(alloc_rows) if kind in ("counted", "saving") else ZERO
+        # Borrowed money is netted out whole, its saving part too - the
+        # same as the dashboard (ab-287). A transfer is too, but one into
+        # or out of savings moves the Saving bucket (ab-293).
+        saving = transaction_saving(alloc_rows) if kind in ("counted", "saving", "transfer") else ZERO
         total_saving += saving
         if kind == "counted":
             if direction == "in":
@@ -314,12 +323,18 @@ async def fetch_account_summary_rows(pool: asyncpg.Pool, *, user_id: UUID, accou
             c.type AS category_type,
             c.entry_type AS category_entry_type,
             t.handled_as,
-            sl.role AS sub_ledger_role
+            t.transfer_group_id,
+            sl.role AS sub_ledger_role,
+            a.account_type,
+            src_acc.account_type AS source_account_type,
+            src_sl.role AS source_sub_ledger_role
         FROM accounts a
         LEFT JOIN transactions t ON t.account_id = a.id
         LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
         LEFT JOIN allocations al ON al.transaction_id = t.id
         LEFT JOIN categories c ON c.id = al.category_id
+        LEFT JOIN accounts src_acc ON src_acc.id = al.source_account_id
+        LEFT JOIN sub_ledgers src_sl ON src_sl.id = al.source_sub_ledger_id
         WHERE a.user_id = $1
           AND ($2::uuid IS NULL OR a.id = $2)
         ORDER BY a.nickname
@@ -361,7 +376,11 @@ def build_account_summary(rows: list[dict]) -> list[dict]:
         # income nor spending (ab-259).
         kind = kind_of_row(row)
         bucket_name = BUCKET[kind]
-        if bucket_name == "saving":
+        if kind == "transfer":
+            # ab-293: neither income nor spending, but a move into or out
+            # of savings counts there.
+            bucket["saving"] += allocation_transfer_saving(row)
+        elif bucket_name == "saving":
             bucket["saving"] += saved_amount(
                 handled_as=row.get("handled_as"), direction=row["direction"],
                 sub_ledger_role=row.get("sub_ledger_role"), amount=row["alloc_amount"],

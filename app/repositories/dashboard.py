@@ -100,13 +100,15 @@ def build_dashboard(rows: list[dict], *, total_budget: Decimal, currency: str) -
                 "saving": ZERO,
             },
         )
-        if row["transaction_id"] is None or row["kind"] in ("transfer", "borrowed"):
+        if row["transaction_id"] is None or row["kind"] == "borrowed":
             continue
         saving = row.get("saving") or ZERO
         bucket["saving"] += saving
         total_saving += saving
-        if row["kind"] == "saving":
-            continue  # ab-259: neither income nor spending
+        if row["kind"] in ("saving", "transfer"):
+            # ab-259: neither income nor spending; ab-293: a transfer only
+            # counts as what it moves into or out of savings.
+            continue
         if row["direction"] == "in":
             # ab-286: the part filed as a refund comes off money out.
             refund = row.get("refund") or ZERO

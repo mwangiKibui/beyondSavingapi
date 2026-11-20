@@ -120,6 +120,7 @@ async def get_pair_candidates(
           AND (
                 t.handled_as = 'transfer'
              OR (t.handled_as IS NULL AND NOT EXISTS (SELECT 1 FROM allocations al WHERE al.transaction_id = t.id))
+             OR (t.handled_as = 'saving' AND sl.role IN ('locked_saving', 'shares'))
           )
         ORDER BY t.id
         FOR UPDATE OF t
@@ -222,21 +223,28 @@ async def get_import_to_handle(conn: asyncpg.Connection, *, import_id: UUID) -> 
 async def get_hand_filed_legs(conn: asyncpg.Connection, *, user_id: UUID) -> list[dict]:
     """Rows the user filed by hand as a Funds transfer from/to one of their
     own accounts (every allocation a transfer with that one account), not
-    yet paired with the row on that account."""
+    yet paired with the row on that account. ab-293: or with one deposits /
+    shares sub-ledger - then source_sub_ledger_id is set and
+    source_account_id is that sub-ledger's account."""
     rows = await conn.fetch(
         """
         SELECT t.id, t.account_id, a.nickname, t.direction, t.amount, t.currency, t.txn_date,
-               src.source_account_id
+               src.source_account_id, src.source_sub_ledger_id
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         JOIN LATERAL (
-            SELECT MIN(al.source_account_id::text)::uuid AS source_account_id
+            SELECT COALESCE(MIN(al.source_account_id::text), MIN(ssl.account_id::text))::uuid AS source_account_id,
+                   MIN(ssl.id::text)::uuid AS source_sub_ledger_id
             FROM allocations al
+            LEFT JOIN sub_ledgers ssl
+                ON ssl.id = al.source_sub_ledger_id AND ssl.role IN ('locked_saving', 'shares')
             WHERE al.transaction_id = t.id
             HAVING COUNT(*) > 0
                AND COUNT(*) = COUNT(al.transfer_reason_id)
-               AND COUNT(*) = COUNT(al.source_account_id)
-               AND COUNT(DISTINCT al.source_account_id) = 1
+               AND (
+                    (COUNT(*) = COUNT(al.source_account_id) AND COUNT(DISTINCT al.source_account_id) = 1)
+                 OR (COUNT(*) = COUNT(ssl.id) AND COUNT(DISTINCT ssl.id) = 1)
+               )
         ) src ON true
         JOIN accounts sa ON sa.id = src.source_account_id AND sa.user_id = $1
         WHERE a.user_id = $1 AND t.handled_as IS NULL AND t.transfer_group_id IS NULL
@@ -252,12 +260,13 @@ async def get_hand_pair_candidates(
     from_date: date, to_date: date,
 ) -> list[dict]:
     """Rows on the named accounts that could be the other side: unpaired,
-    never dismissed, and either a waiting transfer leg or still open.
+    never dismissed, and either a waiting transfer leg or still open - or
+    (ab-293) a row handled as saving on a deposits / shares sub-ledger.
     Locked, so a concurrent pairing can't claim the same row."""
     rows = await conn.fetch(
         """
         SELECT t.id, t.account_id, a.nickname, t.direction, t.amount, t.currency, t.txn_date, t.handled_as,
-               sl.role AS sub_ledger_role
+               t.sub_ledger_id, sl.role AS sub_ledger_role
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
@@ -270,6 +279,7 @@ async def get_hand_pair_candidates(
           AND (
                 t.handled_as = 'transfer'
              OR (t.handled_as IS NULL AND NOT EXISTS (SELECT 1 FROM allocations al WHERE al.transaction_id = t.id))
+             OR (t.handled_as = 'saving' AND sl.role IN ('locked_saving', 'shares'))
           )
         ORDER BY t.id
         FOR UPDATE OF t

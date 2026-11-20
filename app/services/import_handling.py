@@ -338,7 +338,9 @@ async def pair_hand_filed_transfers(conn: asyncpg.Connection, *, user_id: UUID) 
     """ab-285: rows the user filed by hand as a Funds transfer from/to one
     of their accounts pair with the matching row on that account, in
     either upload order, so the move is never counted twice. The user's
-    own reason stays; the other side becomes a handled transfer."""
+    own reason stays; the other side becomes a handled transfer - unless
+    it's handled as saving on a deposits / shares sub-ledger (ab-293),
+    which keeps its handling and is only linked."""
     legs = await get_hand_filed_legs(conn, user_id=user_id)
     if not legs:
         return 0
@@ -353,8 +355,14 @@ async def pair_hand_filed_transfers(conn: asyncpg.Connection, *, user_id: UUID) 
     pairs = plan_hand_pairs(legs, candidates)
     if not pairs:
         return 0
-    reason_id = await get_or_create_transfer_reason(conn, user_id=user_id, name=BETWEEN_MY_ACCOUNTS)
+    reason_id = None
     for leg, other in pairs:
+        if other.get("handled_as") == "saving":
+            # ab-293: the savings side keeps its handling (it's what counts).
+            await set_transfer_group(conn, group_id=uuid4(), ids=[leg["id"], other["id"]])
+            continue
+        if reason_id is None:
+            reason_id = await get_or_create_transfer_reason(conn, user_id=user_id, name=BETWEEN_MY_ACCOUNTS)
         moved = "Moved to" if other["direction"] == "out" else "Moved from"
         await link_hand_pair(conn, group_id=uuid4(), leg_id=leg["id"], other_id=other["id"],
                              other_reason=f"{moved} your {leg['nickname']} account")

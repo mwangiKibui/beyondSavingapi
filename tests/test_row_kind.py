@@ -236,3 +236,133 @@ def test_the_export_labels_a_refund():
                  txn_currency="KES", counterparty=None, description=None)
     [csv_row] = build_csv_rows(rows)
     assert csv_row["categories"] == "Refund · Groceries"
+
+
+# --- ab-293: Funds transfers into / out of savings ------------------------------
+
+from app.services.row_kind import transaction_saving, transfer_saving  # noqa: E402
+
+MMF_ACC = uuid4()
+
+
+def xfer(direction, amount, *, own="mobile_money", own_role=None, other=None, other_role=None, group=None,
+         account=ACC, extra=None):
+    """A Funds transfer row: own account type/sub-ledger role, the other side
+    (source account type / source sub-ledger role) and its transfer group."""
+    rows = txn(direction, amount, [(None, uuid4(), amount), *(extra or [])])
+    for r in rows:
+        r.update(account_type=own, sub_ledger_role=own_role, source_account_type=other,
+                 source_sub_ledger_role=other_role, transfer_group_id=group, account_id=account)
+    return rows
+
+
+def dash_rows(rows):
+    by_txn: dict = {}
+    for row in rows:
+        by_txn.setdefault(row["transaction_id"], []).append(row)
+    return [{
+        "account_id": rs[0]["account_id"], "account_nickname": "x", "transaction_id": tid,
+        "txn_amount": rs[0]["txn_amount"], "direction": rs[0]["direction"],
+        "kind": transaction_kind(rs), "saving": transaction_saving(rs),
+    } for tid, rs in by_txn.items()]
+
+
+def totals(rows):
+    report = build_report(rows, currency="KES")
+    dash = build_dashboard(dash_rows(rows), total_budget=D("0"), currency="KES")
+    accounts = build_account_summary(rows)
+    got = (report["total_in"], report["total_out"], report["total_saving"])
+    assert got == (dash["total_in"], dash["total_out"], dash["total_saving"])
+    assert sum((a["saving"] for a in accounts), D("0")) == report["total_saving"]
+    return got
+
+
+def ts(direction, *, own="mobile_money", own_role=None, other=None, other_role=None, paired=False):
+    return transfer_saving(direction=direction, amount=D("100"), account_type=own, sub_ledger_role=own_role,
+                           source_account_type=other, source_sub_ledger_role=other_role, paired=paired)
+
+
+@pytest.mark.parametrize("kw, saved", [
+    # spending side, other side a savings place, unpaired: counts
+    ({"direction": "out", "other": "money_market"}, D("100")),
+    ({"direction": "in", "other": "money_market"}, D("-100")),
+    ({"direction": "out", "other": "sacco", "other_role": "locked_saving"}, D("100")),
+    ({"direction": "out", "other": None, "other_role": "shares"}, D("100")),
+    # paired: the savings side counts instead
+    ({"direction": "out", "other": "money_market", "paired": True}, D("0")),
+    # savings side: always counts, paired or not, tracked source or not
+    ({"direction": "in", "own": "money_market", "other": "mobile_money"}, D("100")),
+    ({"direction": "out", "own": "money_market", "other": "mobile_money", "paired": True}, D("-100")),
+    ({"direction": "in", "own": "money_market"}, D("100")),
+    ({"direction": "in", "own": "sacco", "own_role": "locked_saving", "other": "mobile_money"}, D("100")),
+    ({"direction": "out", "own": "sacco", "own_role": "shares"}, D("-100")),
+    # neutral: spending <-> spending, savings <-> savings, untracked spending side
+    ({"direction": "out", "other": "bank"}, D("0")),
+    ({"direction": "out"}, D("0")),
+    ({"direction": "out", "own": "money_market", "other": "sacco", "other_role": "locked_saving"}, D("0")),
+    # ab-259 withdrawable leg: other side is its own SACCO account
+    ({"direction": "out", "own": "sacco", "own_role": "spending", "other": "sacco"}, D("0")),
+])
+def test_transfer_saving(kw, saved):
+    direction = kw.pop("direction")
+    assert ts(direction, **kw) == saved
+
+
+def test_mpesa_to_mmf_is_saving_with_income_and_spending_unchanged():
+    assert totals(xfer("out", 5000, other="money_market")) == (D("0"), D("0"), D("5000"))
+    report = build_report(xfer("out", 5000, other="money_market"), currency="KES")
+    assert report["net"] == D("-5000")
+
+
+def test_mmf_to_mpesa_comes_off_saving():
+    assert totals(xfer("in", 2000, other="money_market")) == (D("0"), D("0"), D("-2000"))
+
+
+def test_both_legs_tracked_and_paired_count_once_on_the_savings_side():
+    group = uuid4()
+    rows = [*xfer("out", 5000, other="money_market", group=group),
+            *xfer("in", 5000, own="money_market", other="mobile_money", group=group, account=MMF_ACC)]
+    assert totals(rows) == (D("0"), D("0"), D("5000"))
+    by_acc = {a["account_id"]: a["saving"] for a in build_account_summary(rows)}
+    assert by_acc == {ACC: D("0"), MMF_ACC: D("5000")}
+
+
+def test_withdrawal_paired_counts_once():
+    group = uuid4()
+    rows = [*xfer("out", 2000, own="money_market", other="mobile_money", group=group, account=MMF_ACC),
+            *xfer("in", 2000, other="money_market", group=group)]
+    assert totals(rows) == (D("0"), D("0"), D("-2000"))
+
+
+def test_only_the_mmf_leg_uploaded_counts():
+    assert totals(xfer("in", 5000, own="money_market", other="mobile_money")) == (D("0"), D("0"), D("5000"))
+
+
+def test_spending_to_spending_stays_neutral():
+    assert totals(xfer("out", 5000, other="bank")) == (D("0"), D("0"), D("0"))
+
+
+def test_sacco_move_handled_as_saving_still_counts_once():
+    """ab-259: deposit handled as saving + withdrawable leg a transfer to its
+    own SACCO account."""
+    group = uuid4()
+    rows = [*xfer("out", 3000, own="sacco", own_role="spending", other="sacco", group=group),
+            *txn("in", 3000, [(None, None, 3000)], handled_as="saving", role="locked_saving")]
+    assert totals(rows)[2] == D("3000")
+
+
+def test_hand_paired_leg_to_a_deposits_ledger_counts_once():
+    """ab-293: an M-Pesa leg aimed at the deposits sub-ledger, paired with the
+    credit handled as saving there."""
+    group = uuid4()
+    rows = [*xfer("out", 4000, other=None, other_role="locked_saving", group=group),
+            *txn("in", 4000, [(None, None, 4000)], handled_as="saving", role="locked_saving")]
+    for r in rows[1:]:
+        r["transfer_group_id"] = group
+    assert totals(rows)[2] == D("4000")
+
+
+def test_only_the_transfer_part_of_a_mixed_row_is_saving():
+    rows = xfer("out", 5000, other="money_market", extra=[(GROC, None, 2000)])
+    rows[0]["alloc_amount"] = D("3000")
+    assert totals(rows) == (D("0"), D("0"), D("3000"))

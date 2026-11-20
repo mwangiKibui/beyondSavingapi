@@ -107,3 +107,62 @@ async def test_dismissing_the_handled_side_keeps_the_users_own_choice(repo):
     assert back == [handled]
     deleted = [c.kwargs["transaction_ids"] for c in repo["delete_allocations"].await_args_list]
     assert deleted == [[handled]]
+
+
+# --- ab-293: a leg aimed at a deposits / shares sub-ledger -------------------------
+
+DEPOSITS = uuid4()
+
+
+def ledger_leg(**kw):
+    """M-Pesa money out filed to the SACCO's deposits sub-ledger."""
+    return {**leg(direction="out", **kw), "source_sub_ledger_id": DEPOSITS}
+
+
+def ledger_cand(*, sub_ledger=DEPOSITS, handled_as="saving", role="locked_saving", **kw):
+    return {**cand(direction="in", handled_as=handled_as, role=role, **kw), "sub_ledger_id": sub_ledger}
+
+
+def test_a_ledger_leg_pairs_with_the_saving_row_on_that_sub_ledger():
+    hand, c = ledger_leg(), ledger_cand()
+    assert plan_hand_pairs([hand], [c]) == [(hand, c)]
+
+
+def test_a_ledger_leg_never_pairs_another_sub_ledger_or_an_unhandled_row():
+    hand = ledger_leg()
+    for c in (ledger_cand(sub_ledger=uuid4()), ledger_cand(handled_as=None), ledger_cand(amount=1.0),
+              ledger_cand(day=14)):
+        assert plan_hand_pairs([hand], [c]) == []
+
+
+def test_an_account_leg_still_never_pairs_a_saving_ledger_row():
+    assert plan_hand_pairs([leg(direction="out")], [ledger_cand()]) == []
+
+
+async def test_pairing_a_ledger_leg_keeps_the_saving_handling(repo):
+    hand, c = ledger_leg(), ledger_cand()
+    repo["get_hand_filed_legs"].return_value = [hand]
+    repo["get_hand_pair_candidates"].return_value = [c]
+
+    assert await pair_hand_filed_transfers(object(), user_id=USER) == 1
+
+    ids = repo["set_transfer_group"].await_args.kwargs["ids"]
+    assert ids == [hand["id"], c["id"]]
+    repo["link_hand_pair"].assert_not_awaited()
+    repo["delete_allocations"].assert_not_awaited()
+    repo["insert_handled_allocations"].assert_not_awaited()
+
+
+async def test_undoing_a_ledger_leg_leaves_the_deposit_saving(repo):
+    hand, other = uuid4(), uuid4()
+    repo["get_hand_paired"].return_value = [{"id": hand, "other_id": other}]
+    repo["get_handled_transaction"].return_value = {
+        "id": other, "handled_as": "saving", "provider": "Mentor Sacco", "description": "DEPOSIT",
+        "direction": "in", "amount": 4000.0, "currency": "KES", "account_id": SAVINGS,
+        "sub_ledger_role": "locked_saving",
+    }
+
+    back = await unpair_hand_filed(object(), user_id=USER, transaction_ids=[hand], secret=SECRET)
+
+    assert back == []
+    assert repo["set_handled"].await_args.kwargs["kinds"] == ["saving"]
