@@ -9,7 +9,7 @@ from app.core.config import get_settings
 from app.core.queues import PARSE_JOBS_QUEUE
 from app.core.redis import get_redis
 from app.core.storage import get_storage_client
-from app.parsers import PARSERS
+from app.parsers import MENTOR_SACCO, PARSERS
 from app.parsers.base import ParsedTransaction, StatementParseError, derive_opening_balance, statement_period
 from app.parsers.mentor_sacco import SubLedgerStatement, parse_mentor_sacco_statement
 from app.repositories.statement_imports import (
@@ -33,8 +33,8 @@ POLL_TIMEOUT_SECONDS = 5
 # deliberately leaves it unregistered - see ab-115/ab-116): its parser
 # returns list[SubLedgerStatement], one entry per sub-ledger *instance*,
 # not the flat list[ParsedTransaction] every other provider's parser
-# returns, so it needs its own write path below.
-MENTOR_SACCO = "Mentor Sacco"
+# returns, so it needs its own write path below. The name lives in
+# app.parsers so the institutions API knows it has a statement reader too.
 
 
 class ImportWriteError(Exception):
