@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import asyncpg
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
 
 from app.api.payee_group_models import ListParams, PayeeGroup, check_page_size, list_params
 from app.core.config import get_settings
@@ -59,16 +59,19 @@ from app.services.limits import STATEMENT_IMPORTS_PER_DAY, enforce_limit
 from app.services.payee_groups import REVIEW_TABS, build_groups, review_tab, select_groups
 from app.services.preview_csv import build_preview_csv
 from app.services.statement_files import (
+    UNSUPPORTED_FILE_MESSAGE,
     IncorrectStatementPassword,
+    UnreadableStatementFile,
+    check_file_contents,
     check_password,
     decrypt_if_needed,
+    file_type_of,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/statement-imports", tags=["statement-imports"])
 
-ALLOWED_EXTENSIONS = (".pdf", ".doc", ".docx")
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10MB
 
 ALLOWED_PAGE_SIZES = (5, 10, 20, 30)
@@ -76,7 +79,18 @@ ImportStatus = Literal["pending", "parsed", "failed"]
 SortDir = Literal["asc", "desc"]
 
 
-class StatementImportResponse(BaseModel):
+class _FileTyped(BaseModel):
+    file_name: str
+
+    # ab-319: pdf / csv / xlsx, from the name - the mapping wizard (ab-315)
+    # skips its Table step for spreadsheets.
+    @computed_field
+    @property
+    def file_type(self) -> str | None:
+        return file_type_of(self.file_name)
+
+
+class StatementImportResponse(_FileTyped):
     id: UUID
     account_id: UUID
     file_name: str
@@ -95,7 +109,7 @@ class ListProgress(BaseModel):
     updated_at: datetime
 
 
-class StatementImportListItem(BaseModel):
+class StatementImportListItem(_FileTyped):
     id: UUID
     account_id: UUID
     account_nickname: str
@@ -135,7 +149,7 @@ class StatementImportListResponse(BaseModel):
     page_size: int
 
 
-class PreviewImport(BaseModel):
+class PreviewImport(_FileTyped):
     id: UUID
     account_id: UUID
     account_nickname: str
@@ -319,11 +333,11 @@ async def upload_statement_endpoint(
         ) from None
 
     file_name = file.filename or ""
-    if not file_name.lower().endswith(ALLOWED_EXTENSIONS):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="File must be a PDF or Word document (.pdf, .doc, .docx)",
-        )
+    # ab-319: PDF, CSV and XLSX; .doc/.docx (accepted before, never read)
+    # and old .xls are refused.
+    file_type = file_type_of(file_name)
+    if file_type is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=UNSUPPORTED_FILE_MESSAGE)
 
     content = await file.read()
     if len(content) > MAX_FILE_SIZE_BYTES:
@@ -331,6 +345,10 @@ async def upload_statement_endpoint(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="File must be 10MB or smaller",
         )
+    try:
+        check_file_contents(content, file_type)
+    except UnreadableStatementFile as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from None
 
     try:
         account = await get_account(pool, account_id=account_id, user_id=user_id)

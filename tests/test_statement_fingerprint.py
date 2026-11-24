@@ -106,3 +106,44 @@ def test_a_page_with_no_table_still_fingerprints_on_its_labels():
 
 def test_not_a_pdf_gives_none():
     assert fingerprint_pdf(b"Date,Amount\n2026-10-01,5.00\n") is None
+
+
+# --- ab-319: CSV and XLSX ---------------------------------------------------------
+
+
+def test_a_csv_fingerprint_is_its_heading_row_and_labels():
+    from app.parsers.profiles.fingerprint import fingerprint_file
+    from tests.statement_sheets import HEADER, PREAMBLE, csv_bytes, rows
+
+    fp = fingerprint_file(csv_bytes([*PREAMBLE, HEADER, *rows(3)]), "export.csv")
+    assert fp.file_type == "csv"
+    assert fp.header == ["date", "details", "money in", "money out", "balance"]
+    assert fp.cols == 5 and fp.x == [0, 1, 2, 3, 4]
+    assert fp.labels == ["account name", "statement period"]
+    assert "alex" not in fp.to_text().lower()
+
+
+def test_csv_and_xlsx_of_the_same_layout_differ_only_in_file_type():
+    from app.parsers.profiles.fingerprint import fingerprint_file
+    from tests.statement_sheets import HEADER, PREAMBLE, csv_bytes, rows, xlsx_bytes
+
+    grid = [*PREAMBLE, HEADER, *rows(3)]
+    a, b = fingerprint_file(csv_bytes(grid), "a.csv"), fingerprint_file(xlsx_bytes(grid), "b.xlsx")
+    assert a.model_copy(update={"file_type": "xlsx"}) == b
+
+
+def test_another_person_and_month_give_the_same_spreadsheet_fingerprint():
+    from app.parsers.profiles.fingerprint import fingerprint_file
+    from tests.statement_sheets import HEADER, csv_bytes, rows
+
+    a = csv_bytes([["Account Name:", "ALEX SAMPLE"], HEADER, *rows(3)])
+    b = csv_bytes([["Account Name:", "BRIAN OTHER"], HEADER, *rows(9, start=5.0)])
+    assert fingerprint_file(a, "a.csv") == fingerprint_file(b, "b.csv")
+
+
+def test_fingerprint_file_routes_by_extension_and_refuses_the_rest():
+    from app.parsers.profiles.fingerprint import fingerprint_file
+
+    assert fingerprint_file(build(sample_rows()), "s.pdf").file_type == "pdf"
+    assert fingerprint_file(b"anything", "s.docx") is None
+    assert fingerprint_file(b"PK\x03\x04broken", "s.xlsx") is None

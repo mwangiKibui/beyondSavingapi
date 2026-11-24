@@ -64,9 +64,56 @@ def test_upload_statement_returns_503_when_db_unreachable(client, fake_user):
     assert response.status_code == 503
 
 
-def test_upload_statement_rejects_unsupported_file_type(client, fake_user, fake_pool):
-    response = _upload(client, filename="statement.txt", content=b"not a statement")
+@pytest.mark.parametrize("filename", ["statement.txt", "statement.doc", "statement.docx", "statement.xls"])
+def test_upload_statement_rejects_unsupported_file_type(client, fake_user, fake_pool, filename):
+    # ab-319: Word files were accepted but never read; old .xls isn't read.
+    response = _upload(client, filename=filename, content=b"not a statement")
     assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "This file type can't be read. Download your statement as a PDF, CSV or Excel (.xlsx) file."
+    )
+
+
+def test_upload_statement_rejects_a_file_that_isnt_what_its_name_says(client, fake_user, fake_pool):
+    response = _upload(client, filename="statement.csv", content=PDF_CONTENT)
+    assert response.status_code == 422
+    assert response.json()["detail"] == "This file isn't a CSV file"
+
+
+def _accept_upload(monkeypatch, file_name):
+    import_id = uuid4()
+    row = {
+        "id": import_id, "account_id": ACCOUNT_ID, "file_name": file_name, "status": "pending",
+        "storage_key": f"statements/{import_id}/{file_name}", "created_at": "2026-01-01T00:00:00+00:00",
+    }
+    monkeypatch.setattr("app.api.statement_imports.get_account", AsyncMock(return_value=FAKE_ACCOUNT))
+    monkeypatch.setattr("app.api.statement_imports.list_sub_ledgers", AsyncMock(return_value=[]))
+    monkeypatch.setattr("app.api.statement_imports.create_statement_import", AsyncMock(return_value=row))
+    monkeypatch.setattr("app.api.statement_imports.add_import_sub_ledgers", AsyncMock())
+    storage = MagicMock()
+    monkeypatch.setattr("app.api.statement_imports.get_storage_client", lambda: storage)
+    redis = MagicMock()
+    redis.lpush = AsyncMock()
+    monkeypatch.setattr("app.api.statement_imports.get_redis", lambda: redis)
+    return storage
+
+
+def test_a_csv_statement_is_accepted_without_a_password_step(client, fake_user, fake_pool, monkeypatch):
+    storage = _accept_upload(monkeypatch, "export.csv")
+    content = b"Date,Details,Amount\n01/10/2026,Shop,5.00\n"
+    response = _upload(client, filename="export.csv", content=content, password="ignored")
+    assert response.status_code == 201
+    assert response.json()["file_type"] == "csv"
+    assert storage.put_object.call_args.kwargs["Body"] == content
+
+
+def test_an_xlsx_statement_is_accepted(client, fake_user, fake_pool, monkeypatch):
+    from tests.test_statement_file_types import xlsx_bytes
+
+    _accept_upload(monkeypatch, "export.xlsx")
+    response = _upload(client, filename="export.xlsx", content=xlsx_bytes([["Date", "Details", "Amount"]]))
+    assert response.status_code == 201
+    assert response.json()["file_type"] == "xlsx"
 
 
 def test_upload_statement_rejects_oversized_file(client, fake_user, fake_pool):
@@ -151,6 +198,7 @@ def test_upload_statement_success(client, fake_user, fake_pool, monkeypatch):
     assert response.status_code == 201
     body = response.json()
     assert body["file_name"] == "statement.pdf"
+    assert body["file_type"] == "pdf"
     assert body["status"] == "pending"
 
     mock_storage_client.put_object.assert_called_once()

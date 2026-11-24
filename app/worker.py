@@ -23,6 +23,7 @@ from app.repositories.statement_imports import (
 from app.repositories.statement_profiles import list_active_profiles, record_check_passed
 from app.repositories.transactions import insert_transactions
 from app.services.import_handling import handle_import_by_id
+from app.services.statement_files import file_type_of
 from app.services.statement_profiles import ProfileRead, read_with_profiles
 
 logging.basicConfig(level=logging.INFO)
@@ -181,7 +182,7 @@ async def _load_profiles(pool: asyncpg.Pool, record: dict) -> list[dict]:
         return []
 
 
-def _no_read_detail(record: dict, attempt: ProfileRead) -> str:
+def _no_read_detail(record: dict, attempt: ProfileRead, file_type: str = "pdf") -> str:
     if attempt.wrong_institution:
         return (
             f"This looks like a {attempt.wrong_institution} statement. "
@@ -189,6 +190,9 @@ def _no_read_detail(record: dict, attempt: ProfileRead) -> str:
         )
     if attempt.failure:
         return attempt.failure
+    if file_type != "pdf":
+        # ab-319: until the AI proposer and the mapping wizard (ab-314/315).
+        return "We can't read this file's layout yet"
     return f"No parser available yet for {record['provider']}"
 
 
@@ -209,8 +213,16 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
 
         is_mentor_sacco = record["provider"] == MENTOR_SACCO
         parser = parse_mentor_sacco_statement if is_mentor_sacco else PARSERS.get(record["provider"])
+        # ab-319: the bespoke parsers only read PDFs; CSV/XLSX only profiles.
+        file_type = file_type_of(record.get("file_name") or "") or "pdf"
+        if file_type != "pdf":
+            parser = None
         profiles = [] if is_mentor_sacco else await _load_profiles(pool, record)
-        has_own_profile = any(p["institution_id"] == record.get("institution_id") for p in profiles)
+        has_own_profile = any(
+            p["institution_id"] == record.get("institution_id")
+            and (p.get("profile") or {}).get("file_type", "pdf") == file_type
+            for p in profiles
+        )
         if parser is None and not has_own_profile:
             logger.info(
                 "No parser registered for provider %s (import %s) - marking failed",
@@ -220,7 +232,7 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
             await mark_import_failed(
                 pool,
                 import_id=parsed_import_id,
-                error_detail=f"No parser available yet for {record['provider']}",
+                error_detail=_no_read_detail(record, ProfileRead(), file_type),
             )
             return
 
@@ -236,6 +248,7 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
             # when one of this institution's matches and passes its check.
             attempt = read_with_profiles(
                 content,
+                file_name=record.get("file_name") or "statement.pdf",
                 institution_id=record.get("institution_id"),
                 currency=record.get("currency") or "KES",
                 candidates=profiles,
@@ -271,8 +284,16 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
                     profile_id=attempt.profile_id,
                 )
                 await record_check_passed(pool, profile_id=attempt.profile_id)
+                logger.info(
+                    "Import %s (provider %s) read by profile %s v%s (%d rows)",
+                    import_id,
+                    record["provider"],
+                    attempt.profile_id,
+                    attempt.profile_version,
+                    len(attempt.transactions),
+                )
             elif parser is None:
-                detail = _no_read_detail(record, attempt)
+                detail = _no_read_detail(record, attempt, file_type)
                 logger.info("Import %s (provider %s) not read: %s", import_id, record["provider"], detail)
                 await mark_import_failed(pool, import_id=parsed_import_id, error_detail=detail)
                 return
