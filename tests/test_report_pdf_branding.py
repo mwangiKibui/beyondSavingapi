@@ -127,3 +127,31 @@ def test_mark_is_vertically_centred_on_the_wordmark_capitals():
         caps_centre = baseline_top - (18 * 0.718) / 2
         tile_centre = (tile["top"] + tile["bottom"]) / 2
         assert abs(tile_centre - caps_centre) < 0.5
+
+
+def _first_table_line(text: str) -> str:
+    """The first line after the page's header block (or the page top on
+    continuation pages) that isn't the footer."""
+    return next(line for line in text.splitlines() if line.strip() and "Centrail" not in line)
+
+
+def test_a_long_table_repeats_its_column_headings_on_every_page():
+    rows = [[f"Row {i}", str(i)] for i in range(150)]
+    texts = _page_texts(build_simple_table_pdf("Transfers", ["Name", "Value"], rows))
+    assert len(texts) >= 2
+    for text in texts[1:]:
+        assert _first_table_line(text).split() == ["Name", "Value"]
+
+
+def test_a_long_category_breakdown_repeats_its_column_headings_on_every_page():
+    pdf = build_report_pdf(
+        _report(categories=120),
+        account_name=None,
+        from_date=date(2026, 10, 1),
+        to_date=date(2026, 10, 31),
+        direction=None,
+    )
+    texts = _page_texts(pdf)
+    assert len(texts) >= 2
+    for text in texts[1:]:
+        assert _first_table_line(text).startswith("Category Type Total (KES)")
