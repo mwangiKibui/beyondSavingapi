@@ -99,13 +99,23 @@ async def test_another_users_account_is_rejected(db):
     db["insert_apply"].assert_not_awaited()
 
 
-async def test_the_rows_own_account_is_rejected(db):
+async def test_the_rows_own_account_is_rejected_naming_it_and_where_money_came_from(db):
     a = row(SENDER, direction="in")
     db["get_account"].return_value = account(a["account_id"])
     with pytest.raises(AllocationRejected) as exc:
         await run(db, [a], [ApplyGroup(transaction_ids=[a["id"]], transfer_reason_id=BETWEEN["id"],
                                        other_account_id=a["account_id"])])
     assert exc.value.status_code == 422
+    assert exc.value.detail == "These rows are on Savings. Choose the account the money came from."
+
+
+async def test_the_rows_own_account_is_rejected_saying_where_money_went(db):
+    a = row(SENDER, direction="out")
+    db["get_account"].return_value = account(a["account_id"])
+    with pytest.raises(AllocationRejected) as exc:
+        await run(db, [a], [ApplyGroup(transaction_ids=[a["id"]], transfer_reason_id=BETWEEN["id"],
+                                       other_account_id=a["account_id"])])
+    assert exc.value.detail == "These rows are on Savings. Choose the account the money went to."
 
 
 async def test_an_account_added_from_the_drawer_is_created_and_linked(db):
