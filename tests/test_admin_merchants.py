@@ -262,3 +262,73 @@ def test_dismiss_unknown_number(client, admin, repo):
     assert client.post("/admin/unknown-numbers/dismiss", json=body).status_code == 204
     assert repo["dismiss_unknown_number"].call_args.kwargs["number"] == "9120385"
     assert client.post("/admin/unknown-numbers/dismiss", json={**body, "number": "12"}).status_code == 422
+
+
+# --- what users actually get suggested (ab-304) ---------------------------
+
+
+def key_votes(kind, value, *counts):
+    rows = [{"category_name": name, "users": users} for name, users in counts]
+    return {"key_kind": kind, "key_value": value, "users": sum(u for _, u in counts), "votes": rows}
+
+
+def suggested(client):
+    item = client.get("/admin/merchants").json()["items"][0]
+    return item["suggested_category"], item["suggested_from"], item["suggested_by_key"]
+
+
+def test_suggested_list_wins_without_a_majority(client, admin, repo):
+    repo["list_merchants"].return_value = ([merchant(key_votes=[key_votes("name", "NAIVAS", ("Food", 2))])], 1)
+    assert suggested(client) == ("Groceries", "list", [])
+
+
+def test_suggested_users_majority_overrides_the_list(client, admin, repo):
+    repo["list_merchants"].return_value = ([merchant(key_votes=[
+        key_votes("name", "NAIVAS", ("Food", 3), ("Groceries", 1))])], 1)
+    assert suggested(client) == ("Food", "users", [{"key_kind": "name", "key_value": "NAIVAS", "category_name": "Food"}])
+
+
+def test_suggested_tie_gives_the_list(client, admin, repo):
+    repo["list_merchants"].return_value = ([merchant(key_votes=[
+        key_votes("name", "NAIVAS", ("Food", 2), ("Household", 2))])], 1)
+    assert suggested(client)[:2] == ("Groceries", "list")
+
+
+def test_suggested_below_three_users_per_key_gives_the_list(client, admin, repo):
+    # 2 on the Till and 2 others on the name: 4 users merged, but no single
+    # key reaches 3, so nobody gets the users' choice.
+    repo["list_merchants"].return_value = ([merchant(
+        votes=[{"category_name": "Food", "users": 4}],
+        key_votes=[key_votes("till", "5551234", ("Food", 2)), key_votes("name", "NAIVAS", ("Food", 2))])], 1)
+    assert suggested(client)[:2] == ("Groceries", "list")
+
+
+def test_suggested_unapproved_merchant_without_a_majority_is_null(client, admin, repo):
+    repo["list_merchants"].return_value = ([merchant(status="candidate")], 1)
+    assert suggested(client) == (None, None, [])
+
+
+def test_suggested_numbers_come_before_names_like_the_preview(client, admin, repo):
+    repo["list_merchants"].return_value = ([merchant(key_votes=[
+        key_votes("name", "NAIVAS", ("Household", 5)), key_votes("till", "5551234", ("Food", 3))])], 1)
+    category, source, by_key = suggested(client)
+    assert (category, source) == ("Food", "users")
+    assert {k["key_value"]: k["category_name"] for k in by_key} == {"5551234": "Food", "NAIVAS": "Household"}
+
+
+def test_suggested_on_get_one(client, admin, repo):
+    repo["get_merchant"].return_value = merchant(key_votes=[key_votes("name", "NAIVAS", ("Food", 3))])
+    body = client.get(f"/admin/merchants/{uuid4()}").json()
+    assert (body["suggested_category"], body["suggested_from"]) == ("Food", "users")
+    assert "key_votes" not in body
+
+
+def test_from_users_says_whether_a_number_is_blocked(client, admin, repo):
+    repo["list_from_users"].return_value = ([
+        {"key_kind": "paybill", "key_value": "999999", "direction": "out", "users": 3, "on_list": False,
+         "is_blocked": True, "votes": [{"category_name": "Fees", "users": 3}]},
+        {"key_kind": "name", "key_value": "MAMA PIMA HARDWARE", "direction": "out", "users": 3, "on_list": False,
+         "is_blocked": False, "votes": [{"category_name": "Household", "users": 3}]},
+    ], 2)
+    items = client.get("/admin/merchants/from-users").json()["items"]
+    assert [i["is_blocked"] for i in items] == [True, False]

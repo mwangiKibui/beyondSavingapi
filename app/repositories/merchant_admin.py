@@ -29,11 +29,16 @@ def _merchant(row: asyncpg.Record) -> dict:
     return out
 
 
-async def _vote_breakdowns(pool, merchant_ids: list[UUID]) -> dict[UUID, list[dict]]:
-    """Per merchant: distinct users per category name (ignoring case), from
-    votes on its numbers and on its plain names (display name, and name
-    patterns without '*'). A user who voted both a name and a number counts
-    once."""
+async def _vote_breakdowns(pool, merchant_ids: list[UUID]) -> dict[UUID, dict]:
+    """Per merchant, in one query:
+
+    votes      distinct users per category name (ignoring case), from votes
+               on its numbers and on its plain names (display name, and
+               name patterns without '*'). A user who voted both a name and
+               a number counts once.
+    key_votes  the same per key - what the suggestion path actually reads
+               (ab-304) - as [{key_kind, key_value, users, votes}]. Blocked
+               numbers are left out: their votes are never read."""
     if not merchant_ids:
         return {}
     rows = await pool.fetch(
@@ -48,31 +53,52 @@ async def _vote_breakdowns(pool, merchant_ids: list[UUID]) -> dict[UUID, list[di
             WHERE k.key_kind = 'name_pattern' AND position('*' IN k.key_value) = 0
         ),
         number_keys AS (
-            SELECT k.merchant_id AS id, k.key_kind, k.key_value, k.direction
+            SELECT k.merchant_id AS id, k.key_kind, k.key_value, k.direction,
+                   EXISTS (SELECT 1 FROM blocked_numbers b
+                           WHERE b.number_kind = k.key_kind AND b.number = k.key_value) AS blocked
             FROM merchant_directory_keys k JOIN m ON m.id = k.merchant_id
             WHERE k.key_kind <> 'name_pattern'
         ),
         votes AS (
-            SELECT nk.id, v.user_id, v.category_name
+            SELECT nk.id, 'name' AS key_kind, nk.key_value, false AS blocked, v.user_id, v.category_name
             FROM name_keys nk
             JOIN merchant_directory_votes v ON v.merchant_key = nk.key_value AND v.direction = nk.direction
             UNION
-            SELECT nk.id, v.user_id, v.category_name
+            SELECT nk.id, nk.key_kind, nk.key_value, nk.blocked, v.user_id, v.category_name
             FROM number_keys nk
             JOIN unknown_number_votes v
               ON v.number_kind = nk.key_kind AND v.number = nk.key_value AND v.direction = nk.direction
         )
-        SELECT id, min(category_name) AS category_name, count(DISTINCT user_id) AS users
+        SELECT id, key_kind, key_value, blocked, GROUPING(key_kind, key_value, blocked) <> 0 AS merged,
+               min(category_name) AS category_name, count(DISTINCT user_id) AS users
         FROM votes
-        GROUP BY id, lower(category_name)
+        GROUP BY GROUPING SETS ((id, lower(category_name)),
+                                (id, key_kind, key_value, blocked, lower(category_name)))
         ORDER BY users DESC, category_name
         """,
         merchant_ids,
     )
-    out: dict[UUID, list[dict]] = {}
+    out: dict[UUID, dict] = {}
     for r in rows:
-        out.setdefault(r["id"], []).append({"category_name": r["category_name"], "users": r["users"]})
-    return out
+        entry = out.setdefault(r["id"], {"votes": [], "key_votes": {}})
+        count = {"category_name": r["category_name"], "users": r["users"]}
+        if r["merged"]:
+            entry["votes"].append(count)
+        elif not r["blocked"]:
+            group = entry["key_votes"].setdefault(
+                (r["key_kind"], r["key_value"]),
+                {"key_kind": r["key_kind"], "key_value": r["key_value"], "users": 0, "votes": []},
+            )
+            # One vote per user per key, so per-category counts add up.
+            group["users"] += r["users"]
+            group["votes"].append(count)
+    return {mid: {"votes": e["votes"], "key_votes": list(e["key_votes"].values())} for mid, e in out.items()}
+
+
+def _attach_votes(item: dict, breakdowns: dict[UUID, dict]) -> None:
+    found = breakdowns.get(item["id"], {})
+    item["votes"] = found.get("votes", [])
+    item["key_votes"] = found.get("key_votes", [])
 
 
 async def list_merchants(
@@ -103,9 +129,9 @@ async def list_merchants(
         (page - 1) * page_size,
     )
     items = [_merchant(r) for r in rows]
-    votes = await _vote_breakdowns(pool, [i["id"] for i in items])
+    breakdowns = await _vote_breakdowns(pool, [i["id"] for i in items])
     for item in items:
-        item["votes"] = votes.get(item["id"], [])
+        _attach_votes(item, breakdowns)
     return items, total
 
 
@@ -114,7 +140,7 @@ async def get_merchant(pool: asyncpg.Pool | asyncpg.Connection, *, merchant_id: 
     if row is None:
         return None
     item = _merchant(row)
-    item["votes"] = (await _vote_breakdowns(pool, [merchant_id])).get(merchant_id, [])
+    _attach_votes(item, await _vote_breakdowns(pool, [merchant_id]))
     return item
 
 
@@ -261,7 +287,12 @@ async def list_from_users(
                ) OR EXISTS (
                    SELECT 1 FROM merchant_directory m
                    WHERE t.key_kind = 'name' AND upper(m.display_name) = t.key_value AND m.direction = t.direction
-               ) AS on_list
+               ) AS on_list,
+               -- ab-304: a blocked number's votes are never read, so it can't
+               -- become a merchant key.
+               t.key_kind <> 'name' AND EXISTS (
+                   SELECT 1 FROM blocked_numbers b WHERE b.number_kind = t.key_kind AND b.number = t.key_value
+               ) AS is_blocked
         FROM ({base}) t
         ORDER BY t.users DESC, t.key_value
         LIMIT $3 OFFSET $4

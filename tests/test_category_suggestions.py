@@ -7,8 +7,10 @@ import pytest
 
 from app.services.category_suggestions import (
     Directory,
+    Merchant,
     build_preview_rows,
     extract_keys,
+    pick_payee_category,
     pick_rule,
     pick_shared,
     rule_key,
@@ -567,3 +569,51 @@ def test_the_amount_rule_still_wins_for_a_split_merchant():
     rules = [rule(groceries, times_used=2, avg_amount=5000), rule(household, times_used=3, avg_amount=300)]
     assert pick_rule(rules, account_hash=None, amount=4800)["category_id"] == groceries
     assert pick_rule(rules, account_hash=None, amount=250)["category_id"] == household
+
+
+# --- the shared pick, used by the preview and the admin list (ab-304) -------
+
+
+def _listed(category="Groceries"):
+    return lambda: Merchant(uuid4(), "Mama Pima", category, "out")
+
+
+def vote_counts(*counts):
+    return [{"category_name": name, "users": users} for name, users in counts]
+
+
+def test_payee_pick_list_wins_without_enough_votes():
+    assert pick_payee_category([], _listed())[:2] == ("Groceries", "list")
+    assert pick_payee_category([vote_counts(("Food", 2))], _listed())[:2] == ("Groceries", "list")
+
+
+def test_payee_pick_users_majority_overrides_the_list():
+    assert pick_payee_category([vote_counts(("Food", 2), ("Household", 1))], _listed()) == ("Food", "users", None)
+
+
+def test_payee_pick_tie_falls_back_to_the_list_or_nothing():
+    tied = vote_counts(("Food", 2), ("Household", 2))
+    assert pick_payee_category([tied], _listed())[:2] == ("Groceries", "list")
+    assert pick_payee_category([tied], lambda: None) is None
+
+
+def test_payee_pick_needs_two_agreeing_users():
+    spread = vote_counts(("Food", 1), ("Household", 1), ("Fun", 1))
+    assert pick_payee_category([spread], lambda: None) is None
+
+
+def test_payee_pick_first_key_with_a_majority_wins():
+    lists = [vote_counts(("Food", 1)), vote_counts(("Household", 3)), vote_counts(("Food", 3))]
+    assert pick_payee_category(lists, lambda: None)[:2] == ("Household", "users")
+
+
+def test_payee_pick_returns_the_listed_merchant():
+    found = Merchant(uuid4(), "Mama Pima", "Groceries", "out")
+    assert pick_payee_category([], lambda: found) == ("Groceries", "list", found)
+
+
+def test_payee_pick_only_looks_up_the_list_when_users_dont_decide():
+    def boom():
+        raise AssertionError("list looked up")
+
+    assert pick_payee_category([vote_counts(("Food", 3))], boom)[:2] == ("Food", "users")

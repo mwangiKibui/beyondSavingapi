@@ -25,9 +25,9 @@ import hashlib
 import math
 import re
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from app.services.merchant_keys import RowKey, extract_key
@@ -318,6 +318,29 @@ def pick_shared(votes: list[dict]) -> str | None:
     return ranked[0]["category_name"]
 
 
+def pick_payee_category(
+    vote_lists: Iterable[list[dict]], find_listed: Callable[[], "Merchant | None"]
+) -> tuple[str, Literal["users", "list"], "Merchant | None"] | None:
+    """What everyone gets suggested for a payee from shared data - the one
+    rule the preview ("others" then "directory") and the admin merchant
+    list (ab-304) both use.
+
+    vote_lists: per-key vote totals in the order the preview reads them
+    (Paybill/Till first, then business name). The first key where users
+    clearly agree (pick_shared) wins over the list; otherwise the listed
+    merchant's category. find_listed is only called when users don't
+    decide, so the preview's text match runs no more often than before.
+    Returns (category_name, "users" | "list", listed merchant) or None."""
+    for votes in vote_lists:
+        chosen = pick_shared(votes)
+        if chosen:
+            return chosen, "users", None
+    merchant = find_listed()
+    if merchant:
+        return merchant.category_name, "list", merchant
+    return None
+
+
 # --- shared Till/Paybill -> name learning (ab-253 PR 4) ---------------------
 
 LEARNED_NAME_MIN_USERS = 1  # the name is printed by Safaricom, not chosen by the user
@@ -543,17 +566,16 @@ def build_preview_rows(
 
         if suggestion is None:
             name_key, number_key = vote_keys(key, direction, directory)
-            for vote_key in (number_key, name_key):
-                chosen_name = vote_key and pick_shared(shared_votes.get(vote_key, []))
-                if chosen_name:
-                    suggestion = _shared(chosen_name, by_name, wanted_type, "others")
-                    break
-
-        if suggestion is None:
-            merchant = directory.match(key, direction)
-            if merchant:
-                suggestion = _shared(merchant.category_name, by_name, wanted_type, "directory")
-                suggestion["merchant_name"] = merchant.display_name
+            picked_shared = pick_payee_category(
+                (shared_votes.get(k, []) for k in (number_key, name_key) if k),
+                lambda: directory.match(key, direction),  # noqa: B023 - called right here
+            )
+            if picked_shared:
+                category_name, picked_from, merchant = picked_shared
+                suggestion = _shared(category_name, by_name, wanted_type,
+                                     "others" if picked_from == "users" else "directory")
+                if merchant:
+                    suggestion["merchant_name"] = merchant.display_name
 
         # ab-290: meaningful words in the description (SALARY -> Salary;
         # dividends and interest, ab-259). Suggested, never filed alone.
