@@ -16,7 +16,7 @@ when the check fails.
 import hashlib
 import io
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
@@ -32,6 +32,7 @@ from app.parsers.base import (
 )
 from app.parsers.profiles.layout import MONEY_TOKEN, Line, page_lines
 from app.parsers.profiles.schema import StatementProfile
+from app.parsers.profiles.tabular import cell_text, find_header_row, load_grid
 from app.parsers.profiles.text import normalise
 
 _PAGE_NUMBER = re.compile(r"^(page\s*)?\d+\s*(of|/)\s*\d+$|^\d{1,3}$", re.IGNORECASE)
@@ -304,19 +305,55 @@ def _to_transaction(row: _Row, profile: StatementProfile, currency: str) -> Pars
     return txn  # type: ignore[return-value]
 
 
-def read_statement(content: bytes, profile: StatementProfile, *, default_currency: str) -> ReadResult:
-    rows: list[_Row] = []
+@dataclass
+class _Collected:
+    """Rows and the statement's own anchors, gathered from any file type."""
+
+    rows: list[_Row] = field(default_factory=list)
     opening: float | None = None
     totals: tuple[float, float] | None = None
+    current: _Row | None = None
+    ended: bool = False
+
+
+def _take_line(state: _Collected, text: str, cells: dict[str, str], profile: StatementProfile) -> None:
+    """One line of the table (a PDF line or a spreadsheet row): ends the
+    table, is skipped, is an opening/totals row, starts a transaction, or
+    continues the one above."""
+    if any(_starts(text, m) for m in profile.table.end_markers):
+        state.ended = True
+        return
+    if _skipped(text, profile):
+        return
+    desc = cells.get("description", text)
+    if profile.opening_balance.source == "table_row" and _starts(desc, profile.opening_balance.label):
+        state.opening = _amount(cells.get("balance", ""), profile)
+        state.current = None
+        return
+    if profile.totals.source == "table_row" and _starts(desc, profile.totals.label):
+        total_in = _amount(cells.get("money_in", ""), profile) or 0.0
+        total_out = _amount(cells.get("money_out", ""), profile) or 0.0
+        state.totals = (abs(total_in), abs(total_out))
+        state.current = None
+        return
+    if _date(cells.get("date", ""), profile) is not None:
+        state.current = _Row(cells=cells, continuation=[])
+        if _status_kept(cells, profile):
+            state.rows.append(state.current)
+    elif state.current is not None and cells.get("description"):
+        state.current.continuation.append(cells["description"])
+
+
+def _collect_pdf(content: bytes, profile: StatementProfile) -> _Collected:
+    state = _Collected()
     bounds = None
-    ended = False
     try:
         pdf = pdfplumber.open(io.BytesIO(content))
     except Exception:
         raise StatementParseError("This file couldn't be opened as a PDF") from None
     with pdf:
         for page_no, page in enumerate(pdf.pages):
-            if ended:
+            if state.ended:
                 break
             lines = page_lines(page, y_tolerance=profile.table.y_tolerance)
             band = _header_band(lines, profile)
@@ -327,8 +364,8 @@ def read_statement(content: bytes, profile: StatementProfile, *, default_currenc
                 start = last + 1
                 if profile.table.column_bounds == "ruled":
                     table_bottom = _ruled_bottom(page, lines[top].top - 2, lines[last].top + 12)
-                if profile.totals.source == "summary_row" and totals is None:
-                    totals = _summary_totals(lines[:top], profile)
+                if profile.totals.source == "summary_row" and state.totals is None:
+                    state.totals = _summary_totals(lines[:top], profile)
             elif profile.table.column_bounds == "explicit" or (
                 page_no > 0 and not profile.table.header_repeats_each_page and bounds is not None
             ):
@@ -340,34 +377,67 @@ def read_statement(content: bytes, profile: StatementProfile, *, default_currenc
                 raise StatementParseError("The statement's table headings weren't found for this layout")
             else:
                 continue  # a page without the table (notes, disclaimers)
-            current: _Row | None = None
+            state.current = None
             for line in lines[start:]:
                 if table_bottom is not None and line.top > table_bottom:
                     break  # below the ruled table: footers, disclaimers
-                text = line.text
-                if any(_starts(text, m) for m in profile.table.end_markers):
-                    ended = True
+                _take_line(state, line.text, _cells(line, bounds, profile), profile)
+                if state.ended:
                     break
-                if _skipped(text, profile):
-                    continue
-                cells = _cells(line, bounds, profile)
-                desc = cells.get("description", text)
-                if profile.opening_balance.source == "table_row" and _starts(desc, profile.opening_balance.label):
-                    opening = _amount(cells.get("balance", ""), profile)
-                    current = None
-                    continue
-                if profile.totals.source == "table_row" and _starts(desc, profile.totals.label):
-                    total_in = _amount(cells.get("money_in", ""), profile) or 0.0
-                    total_out = _amount(cells.get("money_out", ""), profile) or 0.0
-                    totals = (abs(total_in), abs(total_out))
-                    current = None
-                    continue
-                if _date(cells.get("date", ""), profile) is not None:
-                    current = _Row(cells=cells, continuation=[])
-                    if _status_kept(cells, profile):
-                        rows.append(current)
-                elif current is not None and cells.get("description"):
-                    current.continuation.append(cells["description"])
+    return state
+
+
+def _collect_spreadsheet(content: bytes, profile: StatementProfile) -> _Collected:
+    """ab-319: CSV / XLSX. The heading row is the first whose cells hold
+    every column heading; each row below is one line of the table."""
+    state = _Collected()
+    grid = load_grid(content, profile.file_type, sheet=profile.table.sheet)
+    found = find_header_row(grid, profile)
+    if found is None:
+        raise StatementParseError("The statement's table headings weren't found for this layout")
+    header_at, mapping = found
+    if profile.totals.source == "summary_row":
+        state.totals = _spreadsheet_summary(grid[:header_at], profile)
+    for row in grid[header_at + 1 :]:
+        texts = [cell_text(v, profile, None) for v in row]
+        text = " ".join(t for t in texts if t)
+        if not text:
+            continue
+        cells: dict[str, str] = {}
+        for col, index in mapping.items():
+            role = profile.table.columns[col].role
+            value = cell_text(row[index] if index < len(row) else None, profile, role)
+            if role != "ignore" and value:
+                cells[role] = value
+        _take_line(state, text, cells, profile)
+        if state.ended:
+            break
+    return state
+
+
+def _spreadsheet_summary(rows: list[list], profile: StatementProfile) -> tuple[float, float] | None:
+    for row in rows:
+        texts = [cell_text(v, profile, "balance") for v in row]
+        filled = [t for t in texts if t]
+        if not filled or not _starts(filled[0], profile.totals.label):
+            continue
+        amounts = []
+        for t in filled[1:]:
+            try:
+                amounts.append(_amount(t, profile))
+            except StatementParseError:
+                continue
+        if len(amounts) >= 2 and None not in amounts[:2]:
+            return abs(amounts[0]), abs(amounts[1])
+    return None
+
+
+def read_statement(content: bytes, profile: StatementProfile, *, default_currency: str) -> ReadResult:
+    if profile.file_type == "pdf":
+        state = _collect_pdf(content, profile)
+    else:
+        state = _collect_spreadsheet(content, profile)
+    rows, opening, totals = state.rows, state.opening, state.totals
 
     keyed = [
         (_datetime(r.cells.get("date", ""), profile), t)

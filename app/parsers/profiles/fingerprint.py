@@ -24,7 +24,7 @@ import re
 import pdfplumber
 from pydantic import BaseModel, ConfigDict
 
-from app.parsers.profiles.layout import Line, clusters, is_body_line, money_words, page_lines
+from app.parsers.profiles.layout import DATE_TOKEN, MONEY_TOKEN, Line, clusters, is_body_line, money_words, page_lines
 from app.parsers.profiles.text import normalise
 
 _ALLOWED = re.compile(r"^[a-z][a-z .:/()&'%-]*$")
@@ -156,3 +156,71 @@ def fingerprint_pdf(content: bytes) -> PageFingerprint | None:
             return fingerprint_page(page)
     except Exception:
         return None
+
+
+# --- ab-319: CSV and XLSX ---------------------------------------------------------
+
+
+def _date_like(value) -> bool:
+    from datetime import date
+
+    if isinstance(value, date):
+        return True
+    return isinstance(value, str) and bool(value.split() and DATE_TOKEN.match(value.split()[0]))
+
+
+def _money_like(value) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    return isinstance(value, str) and bool(MONEY_TOKEN.match(value.replace(" ", "")))
+
+
+def fingerprint_grid(grid: list[list], file_type: str) -> PageFingerprint:
+    """The heading row (nearest row above the first transaction-like row
+    with 3+ digit-free text cells) and "Label:" cells above it. Positions
+    are column indexes; values are never taken."""
+    body = next(
+        (i for i, row in enumerate(grid) if any(_date_like(v) for v in row) and any(_money_like(v) for v in row)),
+        None,
+    )
+    header_at = None
+    for i in range(body - 1 if body is not None else len(grid) - 1, -1, -1):
+        texts = [v for v in grid[i] if v not in (None, "")]
+        if len(texts) >= 3 and all(isinstance(v, str) and not any(ch.isdigit() for ch in v) for v in texts):
+            header_at = i
+            break
+    header, xs = [], []
+    if header_at is not None:
+        for index, value in enumerate(grid[header_at]):
+            text = _safe(value, max_words=5) if isinstance(value, str) and value.strip() else None
+            if text and len(header) < 12:
+                header.append(text)
+                xs.append(min(index, X_BUCKETS))
+    labels = set()
+    for row in grid[: header_at if header_at is not None else (body or 0)]:
+        first = next((v for v in row if v not in (None, "")), None)
+        if isinstance(first, str) and ":" in first:
+            before = first.split(":", 1)[0]
+            label = _safe(before, max_words=4)
+            if label and not any(ch.isdigit() for ch in before):
+                labels.add(label)
+    return PageFingerprint(file_type=file_type, labels=sorted(labels)[:20], header=header, cols=len(header), x=xs)
+
+
+def fingerprint_file(content: bytes, file_name: str) -> PageFingerprint | None:
+    """By file type: PDFs as page 1, CSV/XLSX by their heading row. None
+    for other files or ones that can't be opened."""
+    from app.parsers.profiles.tabular import load_grid
+    from app.services.statement_files import file_type_of
+
+    file_type = file_type_of(file_name)
+    if file_type == "pdf":
+        return fingerprint_pdf(content)
+    if file_type in ("csv", "xlsx"):
+        try:
+            return fingerprint_grid(load_grid(content, file_type)[:200], file_type)
+        except Exception:
+            return None
+    return None

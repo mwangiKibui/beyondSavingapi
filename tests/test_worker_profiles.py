@@ -202,3 +202,50 @@ async def test_storing_the_fingerprint_failing_doesnt_fail_the_import(pool, job)
     await process_job(pool, str(job.import_id))
     job.failed.assert_not_called()
     job.parsed.assert_awaited_once()
+
+
+# --- ab-319: spreadsheets, and the success log -----------------------------------
+
+
+def _sheet_candidate():
+    from app.parsers.profiles.fingerprint import fingerprint_file
+    from tests.statement_sheets import HEADER, csv_bytes, rows
+
+    content = csv_bytes([HEADER, *rows(4)])
+    c = candidate()
+    c["fingerprint"] = fingerprint_file(content, "x.csv").to_text()
+    c["profile"] = {**PROFILE, "file_type": "csv", "table": {**PROFILE["table"], "column_bounds": "cells", "end_markers": []}}
+    return content, c
+
+
+async def test_a_csv_is_read_by_a_csv_profile_and_never_reaches_the_pdf_parser(pool, job, caplog):
+    content, c = _sheet_candidate()
+    job.content, job.record["file_name"] = content, "export.csv"
+    job.profiles.return_value = [c]
+    parser = MagicMock(return_value=[])
+    job.parsers["Sample Bank"] = parser
+    with caplog.at_level(logging.INFO):
+        await process_job(pool, str(job.import_id))
+    parser.assert_not_called()
+    assert job.parsed.call_args.kwargs["profile_id"] == c["id"]
+    assert len(job.insert.call_args.kwargs["transactions"]) == 4
+    assert any("read by profile" in r.message for r in caplog.records)
+
+
+async def test_a_csv_nothing_can_read_fails_clearly_without_trying_the_pdf_parser(pool, job):
+    from tests.statement_sheets import HEADER, csv_bytes, rows
+
+    job.content, job.record["file_name"] = csv_bytes([HEADER, *rows(2)]), "export.csv"
+    parser = MagicMock(return_value=[])
+    job.parsers["Sample Bank"] = parser
+    await process_job(pool, str(job.import_id))
+    parser.assert_not_called()
+    job.failed.assert_awaited_once_with(pool, import_id=job.import_id, error_detail="We can't read this file's layout yet")
+    job.storage.get_object.assert_not_called()
+
+
+async def test_a_successful_profile_read_is_logged(pool, job, caplog):
+    job.profiles.return_value = [candidate()]
+    with caplog.at_level(logging.INFO):
+        await process_job(pool, str(job.import_id))
+    assert any("read by profile" in r.message and "6 rows" in r.message for r in caplog.records)

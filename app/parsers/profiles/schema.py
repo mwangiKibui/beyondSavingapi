@@ -114,8 +114,11 @@ class SkipRow(_Strict):
 class Table(_Strict):
     columns: list[Column] = Field(min_length=2, max_length=12)
     # ruled: the PDF's vertical lines; header_gaps: midway between headings;
-    # explicit: each column's x0/x1.
-    column_bounds: Literal["ruled", "header_gaps", "explicit"]
+    # explicit: each column's x0/x1; cells: a CSV/XLSX file's own columns,
+    # found by their heading (ab-319).
+    column_bounds: Literal["ruled", "header_gaps", "explicit", "cells"]
+    # XLSX: which sheet (0 = the first).
+    sheet: int = Field(default=0, ge=0, le=20)
     header_lines: int = Field(default=1, ge=1, le=3)
     header_repeats_each_page: bool = True
     # The table ends at a line starting with one of these ("Disclaimer").
@@ -159,7 +162,7 @@ class TotalsSource(_Strict):
 
 class StatementProfile(_Strict):
     schema_version: Literal[1] = 1
-    file_type: Literal["pdf"] = "pdf"  # ab-319 adds csv / xlsx
+    file_type: Literal["pdf", "csv", "xlsx"] = "pdf"
     currency: CurrencyCode | None = None  # None: the account's currency
     date_format: DateFormat
     amounts: Amounts = Field(default_factory=Amounts)
@@ -188,6 +191,11 @@ class StatementProfile(_Strict):
         if not ((signed == 1 and ins == outs == 0) or (signed == 0 and ins == outs == 1)):
             raise ValueError("use one signed amount column, or one money in and one money out column")
 
+        spreadsheet = self.file_type in ("csv", "xlsx")
+        if spreadsheet != (self.table.column_bounds == "cells"):
+            raise ValueError("CSV and XLSX profiles use cells column bounds, and only they do")
+        if spreadsheet and self.table.header_lines != 1:
+            raise ValueError("a CSV or XLSX heading is one row")
         if self.table.column_bounds == "explicit":
             previous_end = 0.0
             for column in self.table.columns:

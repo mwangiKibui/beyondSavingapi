@@ -13,7 +13,7 @@ from uuid import UUID
 
 from app.parsers.base import ParsedTransaction
 from app.parsers.profiles.builtin import load_builtin_profiles
-from app.parsers.profiles.fingerprint import fingerprint_pdf
+from app.parsers.profiles.fingerprint import fingerprint_file
 from app.parsers.profiles.matching import match_profile
 from app.parsers.profiles.reader import read_statement
 from app.parsers.profiles.schema import validate_profile
@@ -32,6 +32,7 @@ class ProfileRead:
     fingerprint: str | None = None
     # Set only when the read passed its balance check.
     profile_id: UUID | None = None
+    profile_version: int | None = None
     transactions: list[ParsedTransaction] | None = None
     opening_balance: float | None = None
     # The profile that matched, whether or not its read passed.
@@ -43,9 +44,14 @@ class ProfileRead:
 
 
 def read_with_profiles(
-    content: bytes, *, institution_id: UUID, currency: str, candidates: list[dict]
+    content: bytes,
+    *,
+    institution_id: UUID,
+    currency: str,
+    candidates: list[dict],
+    file_name: str = "statement.pdf",
 ) -> ProfileRead:
-    fp = fingerprint_pdf(content)
+    fp = fingerprint_file(content, file_name)
     if fp is None:
         return ProfileRead()
     result = ProfileRead(fingerprint=fp.to_text())
@@ -73,6 +79,7 @@ def read_with_profiles(
         result.failure = read.check.message or "The statement's balances don't add up"
         return result
     result.profile_id = row["id"]
+    result.profile_version = row.get("version")
     result.transactions = read.transactions
     result.opening_balance = read.opening_balance
     return result

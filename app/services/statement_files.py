@@ -1,5 +1,7 @@
 import io
 import warnings
+import zipfile
+from typing import Literal
 
 import pikepdf
 
@@ -63,3 +65,51 @@ def decrypt_if_needed(*, content: bytes, filename: str, password: str | None) ->
         return buffer.getvalue()
     finally:
         pdf.close()
+
+
+# --- ab-319: which files are accepted ----------------------------------------
+
+FileType = Literal["pdf", "csv", "xlsx"]
+_EXTENSIONS: dict[str, FileType] = {".pdf": "pdf", ".csv": "csv", ".xlsx": "xlsx"}
+UNSUPPORTED_FILE_MESSAGE = (
+    "This file type can't be read. Download your statement as a PDF, CSV or Excel (.xlsx) file."
+)
+
+
+class UnreadableStatementFile(Exception):
+    """The file's contents don't match its type (e.g. a renamed file)."""
+
+
+def file_type_of(file_name: str) -> FileType | None:
+    """pdf / csv / xlsx from the name; None for anything else (.doc,
+    .docx and old .xls are no longer accepted)."""
+    lower = (file_name or "").lower()
+    return next((t for ext, t in _EXTENSIONS.items() if lower.endswith(ext)), None)
+
+
+def decode_csv(content: bytes) -> str:
+    """UTF-8 (with or without a byte-order mark), else Windows-1252 /
+    Latin-1 - what banks' CSV exports use."""
+    for encoding in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise UnreadableStatementFile("This CSV file couldn't be read")
+
+
+def check_file_contents(content: bytes, file_type: FileType) -> None:
+    if file_type == "pdf":
+        if not content.lstrip()[:5].startswith(b"%PDF"):
+            raise UnreadableStatementFile("This file isn't a PDF")
+    elif file_type == "csv":
+        if not content.strip() or b"\x00" in content or content.startswith(b"%PDF") or content.startswith(b"PK"):
+            raise UnreadableStatementFile("This file isn't a CSV file")
+        decode_csv(content)
+    elif file_type == "xlsx":
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as z:
+                if "xl/workbook.xml" not in z.namelist():
+                    raise UnreadableStatementFile("This file isn't an Excel (.xlsx) file")
+        except zipfile.BadZipFile:
+            raise UnreadableStatementFile("This file isn't an Excel (.xlsx) file") from None

@@ -233,3 +233,27 @@ def test_a_summary_row_needs_a_label():
     raw = profile()
     raw["totals"] = {"source": "summary_row"}
     rejected(raw)
+
+
+# --- ab-319: CSV and XLSX -----------------------------------------------------------
+
+
+def test_a_csv_profile_uses_cell_columns():
+    raw = with_table(column_bounds="cells")
+    raw["file_type"] = "csv"
+    assert validate_profile(raw).table.column_bounds == "cells"
+    xlsx = with_table(column_bounds="cells", sheet=1)
+    xlsx["file_type"] = "xlsx"
+    assert validate_profile(xlsx).table.sheet == 1
+
+
+def test_cells_and_spreadsheet_types_go_together():
+    rejected(with_table(column_bounds="cells"))  # a PDF with cell columns
+    raw = profile(file_type="csv")  # a CSV with ruled columns
+    rejected(raw)
+
+
+def test_a_spreadsheet_heading_is_one_row():
+    raw = with_table(column_bounds="cells", header_lines=2)
+    raw["file_type"] = "xlsx"
+    rejected(raw)
