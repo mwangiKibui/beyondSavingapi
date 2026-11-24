@@ -32,6 +32,7 @@ from app.repositories.category_suggestions import (
     upsert_number_votes,
 )
 from app.repositories.accounts import DuplicateAccount, create_account, get_account
+from app.services.limits import ACCOUNTS_MAX, enforce_limit
 from app.repositories.row_handling import get_or_create_transfer_reason
 from app.repositories.transfer_reasons import get_user_transfer_reasons
 from app.repositories.description_keywords import (
@@ -506,7 +507,7 @@ async def _resolve_other_sides(conn, *, user_id: UUID, groups: list[ApplyGroup],
     """Each transfer group's other side as {account_id, description}. The
     account must be the user's (two-user isolation) and not the rows' own
     account; an account added from the drawer is created here, in the same
-    save, with the same checks as POST /accounts."""
+    save, with the same checks (and accounts_max limit) as POST /accounts."""
     out, created = [], []
     for g in groups:
         given = sum([g.other_account_id is not None, g.new_account is not None, bool(g.someone_else_name)])
@@ -531,6 +532,10 @@ async def _resolve_other_sides(conn, *, user_id: UUID, groups: list[ApplyGroup],
         elif g.new_account is not None:
             new = dict(g.new_account)
             new["currency"] = new.get("currency") or rows_by_id[g.transaction_ids[0]]["currency"]
+            # ab-309: same plan limit as POST /accounts. Raises the 429
+            # (an HTTPException), which rolls the whole save back. On conn,
+            # so an earlier group's new account in this save counts too.
+            await enforce_limit(conn, user_id, ACCOUNTS_MAX)
             try:
                 account = await create_account(conn, user_id=user_id, **new)
             except DuplicateAccount:

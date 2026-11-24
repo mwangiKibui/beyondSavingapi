@@ -656,3 +656,16 @@ def test_review_lines_say_which_upload_first_recorded_them(client, fake_user, fa
     assert by_import[str(IMPORT_ID)]["file_name"] == "statement.pdf"
     assert by_import[str(earlier)]["file_name"] == "september.pdf"
     assert by_import[str(earlier)]["imported_at"].startswith("2026-10-01T09:00:00")
+
+
+def test_apply_passes_the_accounts_max_429_through(client, fake_user, fake_pool, applies):
+    # ab-309: a new account from the drawer at the plan's limit.
+    from app.services.limits import LimitReached, LimitStatus
+
+    applies["apply_groups"].side_effect = LimitReached(LimitStatus(key="accounts_max", limit=2, used=2,
+                                                                   resets_at=None))
+    response = client.post("/category-applies", json=body(category_id=str(uuid4())))
+
+    assert response.status_code == 429
+    assert response.json() == {"detail": {"code": "limit_reached", "limit_key": "accounts_max", "used": 2,
+                                          "limit": 2, "resets_at": None}}

@@ -22,6 +22,7 @@ from app.repositories.accounts import (
     update_account,
 )
 from app.repositories.institutions import provider_allowed
+from app.services.limits import ACCOUNTS_MAX, enforce_limit
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +187,8 @@ async def create_account_endpoint(
     try:
         await _validate_provider(pool, payload.account_type, payload.provider)
         account_number = _validate_account_number(payload.account_type, payload.account_number)
+        # ab-309: raises the 429 at the plan's accounts_max (active accounts).
+        await enforce_limit(pool, user_id, ACCOUNTS_MAX)
 
         account = await create_account(
             pool,

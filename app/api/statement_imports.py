@@ -55,6 +55,7 @@ from app.services.directory_cache import get_directory
 from app.services.import_confirm import ConfirmItem, confirm_import
 from app.services.import_handling import handle_import_by_id
 from app.services.import_progress import Draft, payee_keys, progress_counts
+from app.services.limits import STATEMENT_IMPORTS_PER_DAY, enforce_limit
 from app.services.payee_groups import REVIEW_TABS, build_groups, review_tab, select_groups
 from app.services.preview_csv import build_preview_csv
 from app.services.statement_files import (
@@ -304,6 +305,18 @@ async def upload_statement_endpoint(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE
         )
+
+    # ab-309: at the plan's statement_imports_per_day, a 429 before the file
+    # is even read. Its own try: a failing check is logged, never leaked.
+    try:
+        await enforce_limit(pool, user_id, STATEMENT_IMPORTS_PER_DAY)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error checking the import limit for user %s", user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
+        ) from None
 
     file_name = file.filename or ""
     if not file_name.lower().endswith(ALLOWED_EXTENSIONS):

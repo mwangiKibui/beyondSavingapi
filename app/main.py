@@ -11,6 +11,7 @@ from app.api import (
     admin_keywords,
     admin_institutions,
     admin_merchants,
+    admin_plans,
     auth,
     budget_plans,
     categories,
@@ -80,6 +81,7 @@ app.include_router(admin.router)
 app.include_router(admin_institutions.router)
 app.include_router(admin_merchants.router)
 app.include_router(admin_keywords.router)
+app.include_router(admin_plans.router)
 app.include_router(budget_plans.router)
 app.include_router(categories.router)
 app.include_router(category_applies.router)
