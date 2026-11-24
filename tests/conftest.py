@@ -49,3 +49,28 @@ def seeded_providers(monkeypatch):
     mock = AsyncMock(side_effect=provider_allowed)
     monkeypatch.setattr("app.api.accounts.provider_allowed", mock)
     return mock
+
+
+@pytest.fixture(autouse=True)
+def _unlimited_plans(monkeypatch):
+    """ab-309: limit checks read the user's plan from the DB. Tests run
+    against fake pools, so every plan is unlimited unless a test sets a
+    value (patch app.services.limits.get_plan_limit, or use the limits
+    fixture)."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("app.services.limits.get_plan_limit", AsyncMock(return_value=None))
+
+
+@pytest.fixture
+def limits(monkeypatch):
+    """ab-309: set a plan value and usage for every limit check:
+    limits(value, used) - value None = unlimited."""
+    from unittest.mock import AsyncMock
+
+    def set_limit(value, used=0):
+        monkeypatch.setattr("app.services.limits.get_plan_limit", AsyncMock(return_value=value))
+        for name in ("count_imports_reached_allocation", "count_active_accounts"):
+            monkeypatch.setattr(f"app.services.limits.{name}", AsyncMock(return_value=used))
+
+    return set_limit

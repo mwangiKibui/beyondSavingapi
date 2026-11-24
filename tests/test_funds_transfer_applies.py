@@ -10,6 +10,7 @@ import pytest
 
 from app.repositories.accounts import DuplicateAccount
 from app.services.allocations import AllocationRejected
+from app.services.limits import LimitReached
 from app.services.category_applies import ApplyGroup, apply_earlier
 from tests.test_category_applies import PERSON, SALARY, USER, row, run
 from tests.test_category_applies import db  # noqa: F401 - the shared fixture; pytest finds it by name
@@ -257,3 +258,31 @@ async def test_earlier_rows_follow_the_same_transfer_and_other_side(db):
     alloc = db["insert_applied_allocations"].await_args.kwargs
     assert alloc["transfer_reason_id"] == FAMILY_IN["id"] and alloc["source_account_id"] == mine["id"]
     assert result.groups[0]["remember"] is False
+
+
+# --- ab-309: accounts_max on the drawer's new account --------------------------
+
+
+async def test_a_new_account_from_the_drawer_at_accounts_max_is_429(db, limits):
+    limits(3, used=3)
+    a = row(SENDER, direction="in")
+    with pytest.raises(LimitReached) as exc:
+        await run(db, [a], [ApplyGroup(
+            transaction_ids=[a["id"]], transfer_reason_id=BETWEEN["id"],
+            new_account={"nickname": "S", "account_type": "bank", "provider": "Equity Bank",
+                         "account_number": ""},
+        )])
+    assert exc.value.status_code == 429
+    assert exc.value.detail == {"code": "limit_reached", "limit_key": "accounts_max", "used": 3, "limit": 3,
+                                "resets_at": None}
+    db["create_account"].assert_not_awaited()
+
+
+async def test_picking_an_existing_account_ignores_accounts_max(db, limits):
+    limits(0)
+    other = account()
+    db["get_account"].return_value = other
+    a = row(SENDER, direction="in")
+    await run(db, [a], [ApplyGroup(transaction_ids=[a["id"]], transfer_reason_id=BETWEEN["id"],
+                                   other_account_id=other["id"])])
+    db["create_account"].assert_not_awaited()

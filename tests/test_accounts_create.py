@@ -299,3 +299,32 @@ def test_create_account_provider_check_db_error_is_generic_500(client, fake_user
     response = client.post("/accounts", json=VALID_PAYLOAD)
     assert response.status_code == 500
     assert response.json()["detail"] == "Something went wrong. Please try again."
+
+
+# --- ab-309: accounts_max ----------------------------------------------------
+
+
+def test_create_account_at_accounts_max_is_429(client, fake_user, fake_pool, monkeypatch, limits):
+    limits(5, used=5)
+    mock_create = AsyncMock()
+    monkeypatch.setattr("app.api.accounts.create_account", mock_create)
+
+    response = client.post("/accounts", json=VALID_PAYLOAD)
+
+    assert response.status_code == 429
+    assert response.json() == {"detail": {
+        "code": "limit_reached", "limit_key": "accounts_max", "used": 5, "limit": 5, "resets_at": None,
+    }}
+    mock_create.assert_not_awaited()
+
+
+def test_create_account_below_accounts_max_is_created(client, fake_user, fake_pool, monkeypatch, limits):
+    limits(5, used=4)
+    mock_create = AsyncMock(return_value={
+        "id": str(uuid4()), **VALID_PAYLOAD, "is_active": True,
+        "created_at": "2026-11-24T00:00:00Z", "updated_at": "2026-11-24T00:00:00Z",
+    })
+    monkeypatch.setattr("app.api.accounts.create_account", mock_create)
+
+    assert client.post("/accounts", json=VALID_PAYLOAD).status_code == 201
+    mock_create.assert_awaited_once()

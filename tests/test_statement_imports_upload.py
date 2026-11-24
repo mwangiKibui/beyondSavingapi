@@ -348,3 +348,41 @@ def test_upload_statement_refused_for_a_provider_without_uploads(client, fake_us
     assert response.status_code == 422
     assert response.json()["detail"] == "Statements can't be uploaded for this provider yet"
     mock_create.assert_not_called()
+
+
+# --- ab-309: statement_imports_per_day ---------------------------------------
+
+
+def test_upload_at_the_daily_limit_is_429_before_any_work(client, fake_user, fake_pool, monkeypatch, limits):
+    limits(5, used=5)
+    mock_get_account = AsyncMock(return_value=FAKE_ACCOUNT)
+    mock_create = AsyncMock()
+    monkeypatch.setattr("app.api.statement_imports.get_account", mock_get_account)
+    monkeypatch.setattr("app.api.statement_imports.create_statement_import", mock_create)
+
+    response = _upload(client)
+
+    assert response.status_code == 429
+    body = response.json()["detail"]
+    assert {k: body[k] for k in ("code", "limit_key", "used", "limit")} == {
+        "code": "limit_reached", "limit_key": "statement_imports_per_day", "used": 5, "limit": 5,
+    }
+    assert body["resets_at"].endswith("T00:00:00+03:00")
+    mock_get_account.assert_not_awaited()
+    mock_create.assert_not_awaited()
+
+
+def test_upload_below_the_daily_limit_goes_ahead(client, fake_user, fake_pool, monkeypatch, limits):
+    limits(5, used=4)
+    monkeypatch.setattr("app.api.statement_imports.get_account", AsyncMock(return_value=None))
+
+    assert _upload(client).status_code == 404  # past the limit check, on to the account
+
+
+def test_upload_limit_check_failing_is_a_generic_500(client, fake_user, fake_pool, monkeypatch):
+    monkeypatch.setattr("app.services.limits.get_plan_limit", AsyncMock(side_effect=RuntimeError("db down")))
+
+    response = _upload(client)
+
+    assert response.status_code == 500
+    assert "db down" not in response.text
