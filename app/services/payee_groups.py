@@ -17,7 +17,7 @@ from app.services.merchant_keys import RowKey, extract_key
 
 ALLOWED_PAGE_SIZES = (5, 10, 20, 30)
 DEFAULT_PAGE_SIZE = 30
-SORTS = ("rows", "amount", "payee")
+SORTS = ("rows", "amount", "payee", "recent")
 REVIEW_TABS = ("decide", "decided", "sorted", "handled")
 
 
@@ -282,6 +282,9 @@ def select_groups(
         sort_key = lambda g: (g["display_name"] or "").lower()  # noqa: E731
     elif sort == "amount":
         sort_key = lambda g: g["total"]  # noqa: E731
+    elif sort == "recent":
+        # ab-284: newest filed first ("Categorised here"), else latest row.
+        sort_key = lambda g: g.get("applied_at") or g["last_date"]  # noqa: E731
     else:
         sort_key = lambda g: (g["row_count"], g["total"])  # noqa: E731
     out.sort(key=lambda g: g["group_key"])  # stable tie-break

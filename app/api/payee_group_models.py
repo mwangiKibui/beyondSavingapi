@@ -105,6 +105,8 @@ class PayeeGroup(BaseModel):
     # A transfer's other side (account nickname or the name the user gave).
     other_side: str | None = None
     apply_id: UUID | None = None
+    # Uncategorised -> "Categorised here" only (ab-284): when it was filed.
+    applied_at: datetime | None = None
     # Handled tab only (ab-281).
     handled_as: Literal["charge", "loan", "transfer", "saving"] | None = None
     handled_reason: str | None = None
@@ -118,7 +120,7 @@ class PayeeGroup(BaseModel):
 
 Direction = Literal["in", "out"]
 Kind = Literal["person", "business"]
-Sort = Literal["rows", "amount", "payee"]
+Sort = Literal["rows", "amount", "payee", "recent"]
 Order = Literal["asc", "desc"]
 
 
