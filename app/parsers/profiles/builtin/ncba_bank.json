@@ -1,0 +1,64 @@
+{
+  "institution": {
+    "name": "NCBA Bank",
+    "type": "bank"
+  },
+  "fingerprint": "{\"cols\":6,\"file_type\":\"pdf\",\"header\":[\"date\",\"transaction type and details\",\"value date\",\"debit\",\"credit\",\"balance\"],\"labels\":[\"account number\",\"currency\",\"from\"],\"title\":[\"e-statement of account\"],\"v\":1,\"x\":[4,7,20,26,28,34]}",
+  "profile": {
+    "schema_version": 1,
+    "file_type": "pdf",
+    "currency": "KES",
+    "date_format": "%d/%m/%Y",
+    "amounts": {
+      "decimal_mark": ".",
+      "thousands_sep": ",",
+      "negative": "minus"
+    },
+    "table": {
+      "columns": [
+        {
+          "role": "date",
+          "header": "Date"
+        },
+        {
+          "role": "description",
+          "header": "Transaction Type and Details"
+        },
+        {
+          "role": "ignore",
+          "header": "Value"
+        },
+        {
+          "role": "money_out",
+          "header": "Debit"
+        },
+        {
+          "role": "money_in",
+          "header": "Credit"
+        },
+        {
+          "role": "balance",
+          "header": "Balance"
+        }
+      ],
+      "column_bounds": "ruled",
+      "header_lines": 2,
+      "word_order": "top_then_left",
+      "end_markers": [
+        "Important notice"
+      ]
+    },
+    "opening_balance": {
+      "source": "labelled_line",
+      "label": "Opening Balance"
+    },
+    "totals": {
+      "source": "labelled_lines",
+      "label": "Payments In",
+      "out_label": "Payments Out"
+    },
+    "balance_check": "totals",
+    "amounts_from": "balance_change",
+    "dedupe": "description_amount"
+  }
+}

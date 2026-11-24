@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from app.parsers.base import StatementParseError
-from app.parsers.equity_bank import (
+from tests.golden.equity_bank import (
     _dedouble_word,
     _parse_pages,
     _parse_statement_text,

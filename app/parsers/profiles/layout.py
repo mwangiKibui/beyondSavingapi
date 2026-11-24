@@ -4,7 +4,7 @@ into lines, lines into x-clusters, and the date / money token shapes."""
 import re
 from dataclasses import dataclass
 
-from app.parsers.profiles.text import dedouble_word
+from app.parsers.profiles.text import dedouble_line
 
 DATE_TOKEN = re.compile(r"^\d{1,4}[-/.]\d{1,2}[-/.]\d{2,4}$")
 MONEY_TOKEN = re.compile(r"^[-(]?[\d,]+\.\d{2}\)?(?:DR|CR)?$", re.IGNORECASE)
@@ -58,7 +58,7 @@ def page_lines(page, *, y_tolerance: float = 3.0) -> list[Line]:
     """pdfplumber words, faux-bold undone, grouped into lines top to bottom
     (words whose tops are within y_tolerance of the line's first word)."""
     words = [
-        Word(text=dedouble_word(w["text"]), x0=w["x0"], x1=w["x1"], top=w["top"])
+        Word(text=w["text"], x0=w["x0"], x1=w["x1"], top=w["top"])
         for w in page.extract_words(keep_blank_chars=False, use_text_flow=False)
     ]
     words.sort(key=lambda w: (w.top, w.x0))
@@ -70,6 +70,8 @@ def page_lines(page, *, y_tolerance: float = 3.0) -> list[Line]:
             lines.append(Line(words=[word]))
     for line in lines:
         line.words.sort(key=lambda w: w.x0)
+        for word, text in zip(line.words, dedouble_line([w.text for w in line.words]), strict=True):
+            word.text = text
     return lines
 
 

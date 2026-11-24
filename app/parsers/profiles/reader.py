@@ -50,7 +50,10 @@ class ReadResult:
 @dataclass
 class _Row:
     cells: dict[str, str]
-    continuation: list[str]
+    # (y, text) of the description lines that belong to this row besides
+    # its own line at `y` - ordered by y when the description is built.
+    continuation: list[tuple[float, str]]
+    y: float = 0.0
 
 
 def _amount(text: str, profile: StatementProfile) -> float | None:
@@ -209,12 +212,19 @@ def _ruled_bottom(page, band_top: float, band_bottom: float) -> float | None:
     for top, seg_bottom in segments:
         if top <= bottom + _RULE_MERGE and seg_bottom > bottom:
             bottom = seg_bottom
+    # Only the heading is ruled (Equity, ab-320): the body has no rules to
+    # end at - the end markers / totals row end it instead.
+    if bottom <= band_bottom:
+        return None
     return bottom
 
 
 def _cells(line: Line, bounds: dict[int, tuple[float, float]], profile: StatementProfile) -> dict[str, str]:
     by_col: dict[int, list[str]] = {i: [] for i in bounds}
-    for word in line.words:
+    words = line.words
+    if profile.table.word_order == "top_then_left":
+        words = sorted(words, key=lambda w: (w.top, w.x0))
+    for word in words:
         centre = (word.x0 + word.x1) / 2
         col = next((i for i, (x0, x1) in bounds.items() if x0 <= centre <= x1), None)
         if col is None:
@@ -264,14 +274,18 @@ def _hash(row: dict, reference: str | None) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
 
-def _to_transaction(row: _Row, profile: StatementProfile, currency: str) -> ParsedTransaction | None:
+def _to_transaction(
+    row: _Row, profile: StatementProfile, currency: str, forced: tuple[float, str] | None = None
+) -> ParsedTransaction | None:
     cells = row.cells
     txn_date = _date(cells.get("date", ""), profile)
-    pieces = [cells.get("description", ""), *row.continuation]
+    pieces = [text for _, text in sorted([(row.y, cells.get("description", "")), *row.continuation], key=lambda p: p[0])]
     if profile.table.drop_digit_only_lines:
         pieces = [piece for piece in pieces if not piece.strip().isdigit()]
     description = " ".join(p.strip() for p in pieces if p.strip()) or None
-    if "signed_amount" in {c.role for c in profile.table.columns}:
+    if forced is not None:
+        amount, direction = forced  # amounts_from: balance_change
+    elif "signed_amount" in {c.role for c in profile.table.columns}:
         value = _amount(cells.get("signed_amount", ""), profile)
         if value is None:
             return None
@@ -295,13 +309,16 @@ def _to_transaction(row: _Row, profile: StatementProfile, currency: str) -> Pars
     txn: dict = {
         "txn_date": txn_date,
         "amount": amount,
-        "currency": profile.currency or currency,
+        "currency": currency,
         "direction": direction,
         "counterparty": None,
         "description": description,
         "balance_after": balance,
     }
-    txn["dedupe_hash"] = _hash(txn, (cells.get("reference") or "").strip() or None)
+    if profile.dedupe == "description_amount":
+        txn["dedupe_hash"] = hashlib.sha256(f"{description}|{amount:.2f}".encode()).hexdigest()
+    else:
+        txn["dedupe_hash"] = _hash(txn, (cells.get("reference") or "").strip() or None)
     return txn  # type: ignore[return-value]
 
 
@@ -312,15 +329,35 @@ class _Collected:
     rows: list[_Row] = field(default_factory=list)
     opening: float | None = None
     totals: tuple[float, float] | None = None
+    # The totals row's balance cell (opening_balance: from_totals).
+    closing: float | None = None
+    currency: str | None = None
     current: _Row | None = None
+    # continuation "nearest": lines waiting for the next row to decide.
+    pending: list[tuple[float, str]] = field(default_factory=list)
     ended: bool = False
 
 
-def _take_line(state: _Collected, text: str, cells: dict[str, str], profile: StatementProfile) -> None:
+def _flush_pending(state: _Collected, new_row: _Row | None) -> None:
+    """Gives each waiting line to the nearer of the row above it on this
+    page and `new_row` (the earlier one on a tie)."""
+    for y, text in state.pending:
+        above, below = state.current, new_row
+        if above is not None and (below is None or abs(y - above.y) <= abs(y - below.y)):
+            above.continuation.append((y, text))
+        elif below is not None:
+            below.continuation.append((y, text))
+    state.pending = []
+
+
+def _take_line(
+    state: _Collected, text: str, cells: dict[str, str], profile: StatementProfile, y: float = 0.0
+) -> None:
     """One line of the table (a PDF line or a spreadsheet row): ends the
     table, is skipped, is an opening/totals row, starts a transaction, or
-    continues the one above."""
+    continues a row's description."""
     if any(_starts(text, m) for m in profile.table.end_markers):
+        _end_page(state)
         state.ended = True
         return
     if _skipped(text, profile):
@@ -328,20 +365,67 @@ def _take_line(state: _Collected, text: str, cells: dict[str, str], profile: Sta
     desc = cells.get("description", text)
     if profile.opening_balance.source == "table_row" and _starts(desc, profile.opening_balance.label):
         state.opening = _amount(cells.get("balance", ""), profile)
-        state.current = None
+        _end_page(state)
         return
     if profile.totals.source == "table_row" and _starts(desc, profile.totals.label):
         total_in = _amount(cells.get("money_in", ""), profile) or 0.0
         total_out = _amount(cells.get("money_out", ""), profile) or 0.0
         state.totals = (abs(total_in), abs(total_out))
-        state.current = None
+        state.closing = _amount(cells.get("balance", ""), profile)
+        _end_page(state)
         return
     if _date(cells.get("date", ""), profile) is not None:
-        state.current = _Row(cells=cells, continuation=[])
+        row = _Row(cells=cells, continuation=[], y=y)
+        _flush_pending(state, row)
+        state.current = row
         if _status_kept(cells, profile):
-            state.rows.append(state.current)
-    elif state.current is not None and cells.get("description"):
-        state.current.continuation.append(cells["description"])
+            state.rows.append(row)
+    elif cells.get("description"):
+        if profile.table.continuation == "nearest":
+            state.pending.append((y, cells["description"]))
+        elif state.current is not None:
+            state.current.continuation.append((y, cells["description"]))
+
+
+def _end_page(state: _Collected) -> None:
+    """Waiting lines go to the last row; nothing continues past here."""
+    _flush_pending(state, None)
+    state.current = None
+
+
+def _labelled(lines: list[Line], label: str | None, pattern: re.Pattern) -> str | None:
+    """The first word matching `pattern` after `label` on a line."""
+    if not label:
+        return None
+    wanted = normalise(label).split()
+    for line in lines:
+        tokens = [normalise(w.text) for w in line.words]
+        for i in range(len(tokens) - len(wanted) + 1):
+            if tokens[i : i + len(wanted)] == wanted:
+                after = next((w.text for w in line.words[i + len(wanted) :] if pattern.match(w.text)), None)
+                if after is not None:
+                    return after
+    return None
+
+
+_CURRENCY = re.compile(r"^[A-Z]{3}$")
+
+
+def _above_table(state: _Collected, lines: list[Line], profile: StatementProfile) -> None:
+    """Anchors printed above the table, taken from the first page that has one."""
+    if profile.totals.source == "summary_row" and state.totals is None:
+        state.totals = _summary_totals(lines, profile)
+    if profile.totals.source == "labelled_lines" and state.totals is None:
+        money_in = _labelled(lines, profile.totals.label, MONEY_TOKEN)
+        money_out = _labelled(lines, profile.totals.out_label, MONEY_TOKEN)
+        if money_in is not None and money_out is not None:
+            state.totals = (abs(_amount(money_in, profile)), abs(_amount(money_out, profile)))
+    if profile.opening_balance.source == "labelled_line" and state.opening is None:
+        opening = _labelled(lines, profile.opening_balance.label, MONEY_TOKEN)
+        if opening is not None:
+            state.opening = _amount(opening, profile)
+    if profile.currency_label and state.currency is None:
+        state.currency = _labelled(lines, profile.currency_label, _CURRENCY)
 
 
 def _collect_pdf(content: bytes, profile: StatementProfile) -> _Collected:
@@ -364,9 +448,8 @@ def _collect_pdf(content: bytes, profile: StatementProfile) -> _Collected:
                 start = last + 1
                 if profile.table.column_bounds == "ruled":
                     table_bottom = _ruled_bottom(page, lines[top].top - 2, lines[last].top + 12)
-                if profile.totals.source == "summary_row" and state.totals is None:
-                    state.totals = _summary_totals(lines[:top], profile)
-            elif profile.table.column_bounds == "explicit" or (
+                _above_table(state, lines[:top], profile)
+            elif (profile.table.column_bounds == "explicit" and not any(c.header for c in profile.table.columns)) or (
                 page_no > 0 and not profile.table.header_repeats_each_page and bounds is not None
             ):
                 if bounds is None:
@@ -381,9 +464,14 @@ def _collect_pdf(content: bytes, profile: StatementProfile) -> _Collected:
             for line in lines[start:]:
                 if table_bottom is not None and line.top > table_bottom:
                     break  # below the ruled table: footers, disclaimers
-                _take_line(state, line.text, _cells(line, bounds, profile), profile)
+                _take_line(state, line.text, _cells(line, bounds, profile), profile, line.top)
                 if state.ended:
                     break
+            _end_page(state)
+            # With a heading on every page, an end marker (a per-page
+            # footer such as NCBA's notice) ends only this page's table.
+            if state.ended and profile.table.header_repeats_each_page:
+                state.ended = False
     return state
 
 
@@ -398,7 +486,7 @@ def _collect_spreadsheet(content: bytes, profile: StatementProfile) -> _Collecte
     header_at, mapping = found
     if profile.totals.source == "summary_row":
         state.totals = _spreadsheet_summary(grid[:header_at], profile)
-    for row in grid[header_at + 1 :]:
+    for index, row in enumerate(grid[header_at + 1 :], start=header_at + 1):
         texts = [cell_text(v, profile, None) for v in row]
         text = " ".join(t for t in texts if t)
         if not text:
@@ -409,9 +497,10 @@ def _collect_spreadsheet(content: bytes, profile: StatementProfile) -> _Collecte
             value = cell_text(row[index] if index < len(row) else None, profile, role)
             if role != "ignore" and value:
                 cells[role] = value
-        _take_line(state, text, cells, profile)
+        _take_line(state, text, cells, profile, float(index))
         if state.ended:
             break
+    _end_page(state)
     return state
 
 
@@ -438,17 +527,37 @@ def read_statement(content: bytes, profile: StatementProfile, *, default_currenc
     else:
         state = _collect_spreadsheet(content, profile)
     rows, opening, totals = state.rows, state.opening, state.totals
+    currency = state.currency or profile.currency or default_currency
+    balance_change = profile.amounts_from == "balance_change"
+    if balance_change:
+        # A row without a balance can't give an amount - skipped, as the
+        # bespoke parsers did.
+        rows = [r for r in rows if _amount(r.cells.get("balance", ""), profile) is not None]
 
-    keyed = [
-        (_datetime(r.cells.get("date", ""), profile), t)
-        for r, t in ((r, _to_transaction(r, profile, default_currency)) for r in rows)
-        if t is not None
-    ]
+    keyed_rows = [(_datetime(r.cells.get("date", ""), profile), r) for r in rows]
     if profile.table.row_order == "newest_first":
         if profile.table.tie_order == "reverse":
-            keyed.reverse()
+            keyed_rows.reverse()
         # Stable: rows with the same date/time keep the order above.
-        keyed.sort(key=lambda kt: kt[0])
+        keyed_rows.sort(key=lambda kr: kr[0])
+
+    if opening is None and profile.opening_balance.source == "from_totals" and totals and state.closing is not None:
+        opening = round(state.closing - totals[0] + totals[1], 2)
+
+    if balance_change:
+        if opening is None:
+            check = BalanceCheck(kind="totals", passed=False, message="The statement's opening balance wasn't found")
+            return ReadResult(transactions=[], opening_balance=None, totals=totals, check=check)
+        keyed, previous = [], opening
+        for when, row in keyed_rows:
+            balance = _amount(row.cells["balance"], profile)
+            forced = (round(abs(balance - previous), 2), "in" if balance >= previous else "out")
+            previous = balance
+            keyed.append((when, _to_transaction(row, profile, currency, forced)))
+    else:
+        keyed = [
+            (when, t) for when, row in keyed_rows if (t := _to_transaction(row, profile, currency)) is not None
+        ]
     if profile.table.resolve_first_tie:
         keyed = resolve_leading_tie(keyed)
     transactions = [t for _, t in keyed]

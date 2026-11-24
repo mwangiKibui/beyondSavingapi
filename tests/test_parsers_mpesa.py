@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.parsers.mpesa import parse_mpesa_statement
+from tests.golden.mpesa import parse_mpesa_statement
 from app.services.statement_files import decrypt_if_needed
 
 FIXTURE = Path(__file__).parent / "fixtures" / "statements" / "mpesa" / "statement_sample.pdf"

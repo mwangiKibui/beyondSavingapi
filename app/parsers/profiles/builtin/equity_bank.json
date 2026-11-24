@@ -1,0 +1,61 @@
+{
+  "institution": {
+    "name": "Equity Bank",
+    "type": "bank"
+  },
+  "fingerprint": "{\"cols\":6,\"file_type\":\"pdf\",\"header\":[\"transaction details\",\"payment reference\",\"value date\",\"credit (money in)\",\"debit (money out)\",\"balance\"],\"labels\":[],\"title\":[\"account\"],\"v\":1,\"x\":[3,17,22,26,31,36]}",
+  "profile": {
+    "schema_version": 1,
+    "file_type": "pdf",
+    "currency": "KES",
+    "currency_label": "Currency",
+    "date_format": "%d/%m/%Y",
+    "amounts": {
+      "decimal_mark": ".",
+      "thousands_sep": ",",
+      "negative": "minus"
+    },
+    "table": {
+      "columns": [
+        {
+          "role": "description",
+          "header": "Transaction Details"
+        },
+        {
+          "role": "reference",
+          "header": "Payment reference"
+        },
+        {
+          "role": "date",
+          "header": "Value Date"
+        },
+        {
+          "role": "money_in",
+          "header": "Credit"
+        },
+        {
+          "role": "money_out",
+          "header": "Debit"
+        },
+        {
+          "role": "balance",
+          "header": "Balance"
+        }
+      ],
+      "column_bounds": "ruled",
+      "continuation": "nearest",
+      "end_markers": [
+        "Disclaimer"
+      ]
+    },
+    "opening_balance": {
+      "source": "from_totals"
+    },
+    "totals": {
+      "source": "table_row",
+      "label": "Total"
+    },
+    "balance_check": "totals",
+    "amounts_from": "balance_change"
+  }
+}

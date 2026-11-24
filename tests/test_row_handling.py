@@ -130,9 +130,9 @@ def test_constants():
 
 from collections import Counter  # noqa: E402
 
-from app.parsers.equity_bank import parse_equity_bank_statement  # noqa: E402
-from app.parsers.mpesa import parse_mpesa_statement  # noqa: E402
-from app.parsers.ncba_bank import parse_ncba_bank_statement  # noqa: E402
+from tests.golden.equity_bank import parse_equity_bank_statement  # noqa: E402
+from tests.golden.mpesa import parse_mpesa_statement  # noqa: E402
+from tests.golden.ncba_bank import parse_ncba_bank_statement  # noqa: E402
 from app.services.statement_files import decrypt_if_needed  # noqa: E402
 from tests import test_parsers_equity_bank, test_parsers_mpesa, test_parsers_ncba_bank  # noqa: E402
 
