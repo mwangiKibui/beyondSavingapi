@@ -27,6 +27,13 @@ def fake_pool():
     return object()
 
 
+@pytest.fixture(autouse=True)
+def _no_profiles(monkeypatch):
+    """ab-312: no stored profiles unless a test adds some - the bespoke
+    parser tests below run exactly as before."""
+    monkeypatch.setattr("app.worker.list_active_profiles", AsyncMock(return_value=[]))
+
+
 async def test_process_job_skips_unknown_import(fake_pool, monkeypatch, caplog):
     monkeypatch.setattr("app.worker.get_import_for_processing", AsyncMock(return_value=None))
     mock_mark_failed = AsyncMock()

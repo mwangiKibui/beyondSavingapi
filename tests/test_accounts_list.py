@@ -18,6 +18,7 @@ SAMPLE_ITEM = {
     "currency": "KES",
     "is_active": True,
     "statements_uploadable": True,  # ab-294
+    "recognised_layout": True,  # ab-312
     "balance": 30000.0,
     "unreconciled_count": 3,
 }

@@ -53,6 +53,8 @@ class AccountResponse(BaseModel):
     # ab-294: from the provider's institutions row - whether statements
     # can be uploaded for this account.
     statements_uploadable: bool = False
+    # ab-312: an active statement profile reads this provider's layout.
+    recognised_layout: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -72,6 +74,7 @@ class AccountListItem(BaseModel):
     currency: str
     is_active: bool
     statements_uploadable: bool = False
+    recognised_layout: bool = False
     balance: float
     unreconciled_count: int
 

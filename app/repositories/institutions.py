@@ -10,6 +10,8 @@ the account forms check a provider against this table by name + type.
 import re
 from uuid import UUID
 
+from app.repositories.statement_profiles import RECOGNISED_EXPR
+
 _COLUMNS = "id, name, type, regulator, statements_uploadable, retired_at, created_at, updated_at"
 
 # Same rule as the DB's unique index institutions_name_type_key:
@@ -153,10 +155,11 @@ async def provider_allowed(conn, *, name: str, type: str, current: str | None = 
 async def list_active(conn, *, type: str | None) -> list[dict]:
     """Active institutions for the account pickers, A-Z."""
     rows = await conn.fetch(
-        """
-        SELECT id, name, type, statements_uploadable FROM institutions
-        WHERE retired_at IS NULL AND ($1::text IS NULL OR type = $1)
-        ORDER BY lower(name)
+        f"""
+        SELECT i.id, i.name, i.type, i.statements_uploadable, {RECOGNISED_EXPR}
+        FROM institutions i
+        WHERE i.retired_at IS NULL AND ($1::text IS NULL OR i.type = $1)
+        ORDER BY lower(i.name)
         """,
         type,
     )

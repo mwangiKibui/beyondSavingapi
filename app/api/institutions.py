@@ -26,6 +26,8 @@ class ProviderOut(BaseModel):
     name: str
     type: str
     statements_uploadable: bool
+    # ab-312: an active statement profile reads this provider's layout.
+    recognised_layout: bool = False
 
 
 class ProviderListResponse(BaseModel):

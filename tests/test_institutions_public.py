@@ -43,8 +43,11 @@ def user():
     app.dependency_overrides.pop(get_current_user_id, None)
 
 
-def provider(name, type, uploadable=False):
-    return {"id": uuid4(), "name": name, "type": type, "statements_uploadable": uploadable}
+def provider(name, type, uploadable=False, recognised=False):
+    return {
+        "id": uuid4(), "name": name, "type": type,
+        "statements_uploadable": uploadable, "recognised_layout": recognised,
+    }
 
 
 @pytest.fixture
@@ -63,7 +66,8 @@ def test_lists_active_providers(client, user, pool, list_active):
     assert r.status_code == 200
     items = r.json()["items"]
     assert [i["name"] for i in items] == ["Equity Bank", "M-Pesa"]
-    assert set(items[0]) == {"id", "name", "type", "statements_uploadable"}
+    assert set(items[0]) == {"id", "name", "type", "statements_uploadable", "recognised_layout"}
+    assert items[0]["recognised_layout"] is False
     assert items[0]["statements_uploadable"] is True
     assert list_active.await_args.kwargs == {"type": None}
 
