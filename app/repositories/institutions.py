@@ -2,8 +2,9 @@
 and money market funds users hold money with. Admin-managed (ab-197/198/
 199); never deleted, only retired.
 
-accounts.provider still stores the institution's *name* (no foreign key
-yet - ab-294 decides), so a rename here also renames it on accounts.
+accounts.provider stores the institution's *name* (ab-294 kept it that
+way - no foreign key), so a rename here also renames it on accounts, and
+the account forms check a provider against this table by name + type.
 """
 
 import re
@@ -132,3 +133,67 @@ async def set_retired(conn, *, institution_id: UUID, retired: bool) -> dict:
     )
     return dict(row)
 
+
+
+# --- ab-294: account pickers and the CSV import ---------------------------
+
+
+async def provider_allowed(conn, *, name: str, type: str, current: str | None = None) -> bool:
+    """True when an active institution of this type has exactly this name,
+    or when it is the account's current provider (so an account whose
+    provider was retired can still be edited). `conn` may be a pool."""
+    if current is not None and name == current:
+        return True
+    return bool(await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM institutions WHERE name = $1 AND type = $2 AND retired_at IS NULL)",
+        name, type,
+    ))
+
+
+async def list_active(conn, *, type: str | None) -> list[dict]:
+    """Active institutions for the account pickers, A-Z."""
+    rows = await conn.fetch(
+        """
+        SELECT id, name, type, statements_uploadable FROM institutions
+        WHERE retired_at IS NULL AND ($1::text IS NULL OR type = $1)
+        ORDER BY lower(name)
+        """,
+        type,
+    )
+    return [dict(r) for r in rows]
+
+
+async def existing_normalized(conn, *, keys: set[tuple[str, str]]) -> dict[tuple[str, str], bool]:
+    """Which (normalized name, type) keys are already taken, retired ones
+    included: {key: is_retired}. One query for the whole import file."""
+    if not keys:
+        return {}
+    names = [k[0] for k in keys]
+    types = [k[1] for k in keys]
+    rows = await conn.fetch(
+        f"""
+        SELECT {_NORMALIZED_SQL} AS key_name, type, retired_at IS NOT NULL AS retired
+        FROM institutions
+        WHERE ({_NORMALIZED_SQL}, type) IN (SELECT * FROM unnest($1::text[], $2::text[]))
+        """,
+        names, types,
+    )
+    return {(r["key_name"], r["type"]): r["retired"] for r in rows}
+
+
+async def insert_institutions(conn, *, rows: list[dict]) -> int:
+    """Adds the import's new rows (uploads off); a row someone else added in
+    the meantime is skipped by the unique index. Returns how many went in."""
+    if not rows:
+        return 0
+    result = await conn.fetch(
+        """
+        INSERT INTO institutions (name, type, regulator, statements_uploadable)
+        SELECT name, type, regulator, false
+        FROM unnest($1::text[], $2::text[], $3::text[]) AS t(name, type, regulator)
+        ON CONFLICT DO NOTHING
+        RETURNING id
+        """,
+        [r["name"] for r in rows], [r["type"] for r in rows], [r["regulator"] for r in rows],
+    )
+    return len(result)

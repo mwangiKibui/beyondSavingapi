@@ -19,6 +19,9 @@ VALID_PAYLOAD = {
 }
 
 
+pytestmark = pytest.mark.usefixtures("seeded_providers")
+
+
 @pytest.fixture(scope="module")
 def client():
     with TestClient(app) as c:
@@ -278,3 +281,21 @@ def test_create_account_rejects_a_mobile_number_that_isnt_kenyan(client, fake_us
         "account_number": typed, "currency": "KES",
     })
     assert response.status_code == 422
+
+
+# --- ab-294: providers come from the institutions table -----------------------
+
+
+def test_create_account_checks_the_provider_against_the_table(client, fake_user, fake_pool, seeded_providers):
+    response = client.post("/accounts", json={**VALID_PAYLOAD, "provider": "Sample Bank"})
+    assert response.status_code == 422
+    assert response.json()["detail"] == "'Sample Bank' is not a supported provider for bank accounts"
+    kwargs = seeded_providers.await_args.kwargs
+    assert kwargs["name"] == "Sample Bank" and kwargs["type"] == "bank" and kwargs.get("current") is None
+
+
+def test_create_account_provider_check_db_error_is_generic_500(client, fake_user, fake_pool, seeded_providers):
+    seeded_providers.side_effect = RuntimeError("boom")
+    response = client.post("/accounts", json=VALID_PAYLOAD)
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Something went wrong. Please try again."

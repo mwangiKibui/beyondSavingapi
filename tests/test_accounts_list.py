@@ -17,6 +17,7 @@ SAMPLE_ITEM = {
     "account_number": "1100234501",
     "currency": "KES",
     "is_active": True,
+    "statements_uploadable": True,  # ab-294
     "balance": 30000.0,
     "unreconciled_count": 3,
 }

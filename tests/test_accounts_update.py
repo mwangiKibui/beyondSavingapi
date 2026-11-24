@@ -25,6 +25,9 @@ EXISTING_ACCOUNT = {
 }
 
 
+pytestmark = pytest.mark.usefixtures("seeded_providers")
+
+
 @pytest.fixture(scope="module")
 def client():
     with TestClient(app) as c:
@@ -229,3 +232,36 @@ def test_update_account_logs_and_returns_generic_500_on_unexpected_error(
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(error_records) == 1
     assert error_records[0].exc_info is not None
+
+
+# --- ab-294: providers come from the institutions table -----------------------
+
+
+def test_update_keeps_a_retired_provider_the_account_already_has(client, fake_user, fake_pool, monkeypatch):
+    # In the table but retired, so provider_allowed only passes it as `current`.
+    retired, kind = "Old Sample Bank", "bank"
+    existing = {**EXISTING_ACCOUNT, "provider": retired, "account_type": kind}
+    monkeypatch.setattr("app.api.accounts.get_account", AsyncMock(return_value=existing))
+    monkeypatch.setattr("app.api.accounts.update_account", AsyncMock(return_value={**existing, "nickname": "X"}))
+
+    response = client.patch(f"/accounts/{ACCOUNT_ID}", json={"nickname": "X", "provider": retired})
+    assert response.status_code == 200
+
+
+def test_update_rejects_moving_to_a_provider_not_in_the_table(client, fake_user, fake_pool, monkeypatch):
+    monkeypatch.setattr("app.api.accounts.get_account", AsyncMock(return_value=EXISTING_ACCOUNT))
+    monkeypatch.setattr("app.api.accounts.update_account", AsyncMock(return_value=EXISTING_ACCOUNT))
+    response = client.patch(f"/accounts/{ACCOUNT_ID}", json={"provider": "Sample Bank"})
+    assert response.status_code == 422
+
+
+def test_update_doesnt_keep_the_old_provider_when_the_type_changes(
+    client, fake_user, fake_pool, monkeypatch, seeded_providers
+):
+    monkeypatch.setattr("app.api.accounts.get_account", AsyncMock(return_value=EXISTING_ACCOUNT))
+    monkeypatch.setattr("app.api.accounts.update_account", AsyncMock(return_value=EXISTING_ACCOUNT))
+    client.patch(
+        f"/accounts/{ACCOUNT_ID}",
+        json={"account_type": "sacco", "provider": "Mentor Sacco", "account_number": "1100234501"},
+    )
+    assert seeded_providers.await_args.kwargs.get("current") is None

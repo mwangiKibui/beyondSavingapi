@@ -21,6 +21,7 @@ from app.repositories.accounts import (
     list_accounts,
     update_account,
 )
+from app.repositories.institutions import provider_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -28,22 +29,6 @@ router = APIRouter(prefix="/accounts", tags=["accounts"])
 
 AccountType = Literal["bank", "mobile_money", "sacco", "money_market"]
 Currency = Literal["KES", "USD", "EUR", "GBP", "UGX", "TZS"]
-
-# MVP1 supports a fixed set of institutions per account type - keep in
-# sync with beyondSavingUI's PROVIDERS_BY_TYPE (src/lib/accountFormatting.ts).
-PROVIDERS_BY_TYPE: dict[str, list[str]] = {
-    "bank": ["Equity Bank", "NCBA Bank"],
-    "mobile_money": ["M-Pesa", "Airtel Money"],
-    "sacco": ["Mentor Sacco", "Biashara Sacco"],
-    # ab-288: money market funds - no statement parser yet; tracked as the
-    # other side of Funds transfers.
-    "money_market": [
-        "CIC Money Market Fund",
-        "Sanlam Money Market Fund",
-        "Etica Money Market Fund",
-        "Old Mutual Money Market Fund",
-    ],
-}
 
 MAX_ACCOUNT_NUMBER_LENGTH = 20
 
@@ -64,6 +49,9 @@ class AccountResponse(BaseModel):
     account_number: str
     currency: str
     is_active: bool
+    # ab-294: from the provider's institutions row - whether statements
+    # can be uploaded for this account.
+    statements_uploadable: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -82,6 +70,7 @@ class AccountListItem(BaseModel):
     account_number: str
     currency: str
     is_active: bool
+    statements_uploadable: bool = False
     balance: float
     unreconciled_count: int
 
@@ -120,8 +109,11 @@ class UpdateAccountRequest(BaseModel):
     account_number: str | None = Field(default=None, min_length=1)
 
 
-def _validate_provider(account_type: str, provider: str) -> None:
-    if provider not in PROVIDERS_BY_TYPE[account_type]:
+async def _validate_provider(pool, account_type: str, provider: str, *, current: str | None = None) -> None:
+    """ab-294: the provider must be an active institution of this type in
+    the admin-managed table - or the account's current provider, so an
+    account whose provider was since retired can still be edited."""
+    if not await provider_allowed(pool, name=provider, type=account_type, current=current):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"'{provider}' is not a supported provider for {account_type} accounts",
@@ -192,7 +184,7 @@ async def create_account_endpoint(
         )
 
     try:
-        _validate_provider(payload.account_type, payload.provider)
+        await _validate_provider(pool, payload.account_type, payload.provider)
         account_number = _validate_account_number(payload.account_type, payload.account_number)
 
         account = await create_account(
@@ -334,7 +326,10 @@ async def update_account_endpoint(
         effective_type = payload.account_type or existing["account_type"]
 
         if payload.provider is not None:
-            _validate_provider(effective_type, payload.provider)
+            same_type = effective_type == existing["account_type"]
+            await _validate_provider(
+                pool, effective_type, payload.provider, current=existing["provider"] if same_type else None
+            )
 
         account_number = payload.account_number
         if account_number is not None:

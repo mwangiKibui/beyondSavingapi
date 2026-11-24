@@ -3,7 +3,7 @@ from app.parsers.equity_bank import parse_equity_bank_statement
 from app.parsers.mpesa import parse_mpesa_statement
 from app.parsers.ncba_bank import parse_ncba_bank_statement
 
-# Matches accounts.PROVIDERS_BY_TYPE's provider names.
+# Keyed by the institution's name, as accounts.provider stores it.
 PARSERS["M-Pesa"] = parse_mpesa_statement
 PARSERS["Equity Bank"] = parse_equity_bank_statement
 PARSERS["NCBA Bank"] = parse_ncba_bank_statement

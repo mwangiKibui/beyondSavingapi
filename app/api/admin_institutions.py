@@ -8,14 +8,16 @@ renames it on accounts, and renaming a provider the app reads statements
 for is refused (the reader is looked up by name).
 """
 
+import csv
+import io
 import logging
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Literal, get_args
 from uuid import UUID
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, field_validator, model_validator
 
 from app.core.db import get_pool
@@ -25,9 +27,12 @@ from app.parsers import STATEMENT_PROVIDERS
 from app.repositories.institutions import (
     count_accounts_using,
     create_institution,
+    existing_normalized,
     find_duplicate,
     get_institution,
+    insert_institutions,
     list_institutions,
+    normalize_name,
     rename_account_providers,
     set_retired,
     update_institution,
@@ -313,3 +318,155 @@ async def restore_institution_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     return await _set_retired(pool, institution_id=institution_id, retired=False, admin_id=admin_id)
+
+
+# --- ab-294 CSV import --------------------------------------------------------
+# Preview then confirm. Stateless: confirm re-reads the same file, so what
+# goes in is whatever the file says at that moment. Only the four account
+# types are accepted, and imported rows never have uploads turned on - an
+# admin does that per institution once the app has a reader.
+
+IMPORT_TYPES = ("bank", "mobile_money", "sacco", "money_market")
+IMPORT_HEADERS = ("name", "account_type", "regulator")
+IMPORT_MAX_ROWS = 1000
+IMPORT_MAX_BYTES = 200 * 1024
+REGULATORS = get_args(Regulator)
+
+ImportStatus = Literal["add", "exists", "invalid"]
+
+
+class ImportRow(BaseModel):
+    row: int
+    name: str
+    account_type: str
+    regulator: str | None = None
+    status: ImportStatus
+    reason: str | None = None
+
+
+class ImportPreview(BaseModel):
+    rows: list[ImportRow]
+    add: int
+    exists: int
+    invalid: int
+
+
+class ImportResult(BaseModel):
+    added: int
+    exists: int
+    invalid: int
+
+
+def _unprocessable(detail: str) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail)
+
+
+def _parse_import(filename: str, content: bytes) -> list[dict]:
+    """The file's rows, each checked on its own and against the earlier
+    rows (status add / invalid; the table check comes after). Raises 422
+    when the file as a whole can't be used."""
+    if not filename.lower().endswith(".csv"):
+        raise _unprocessable("Choose a .csv file")
+    if len(content) > IMPORT_MAX_BYTES:
+        raise _unprocessable("The file must be 200KB or smaller")
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise _unprocessable("Save the file as CSV UTF-8") from None
+
+    reader = csv.reader(io.StringIO(text))
+    header = next(reader, None) or []
+    # "Account Type" or "account-type" from a spreadsheet = account_type.
+    columns = {re.sub(r"[\s-]+", "_", h.strip().lower()): i for i, h in enumerate(header)}
+    if any(h not in columns for h in IMPORT_HEADERS):
+        raise _unprocessable("The file needs name, account_type and regulator columns")
+
+    def cell(values: list[str], key: str) -> str:
+        i = columns[key]
+        return values[i].strip() if i < len(values) else ""
+
+    rows, seen = [], set()
+    for line_no, values in enumerate(reader, start=2):
+        if not any(v.strip() for v in values):
+            continue
+        if len(rows) == IMPORT_MAX_ROWS:
+            raise _unprocessable(f"The file can have at most {IMPORT_MAX_ROWS} rows")
+        raw_name = cell(values, "name")
+        kind = re.sub(r"[\s-]+", "_", cell(values, "account_type").lower())
+        regulator = cell(values, "regulator").upper() or None
+        row = {"row": line_no, "name": re.sub(r"\s+", " ", raw_name).strip(), "account_type": kind,
+               "regulator": regulator, "status": "add", "reason": None}
+        try:
+            row["name"] = _clean_name(raw_name)
+            if kind not in IMPORT_TYPES:
+                raise ValueError(f"Type must be one of {', '.join(IMPORT_TYPES)}")
+            if regulator is not None and regulator not in REGULATORS:
+                raise ValueError(f"Regulator must be blank or one of {', '.join(REGULATORS)}")
+            key = (normalize_name(row["name"]), kind)
+            if key in seen:
+                raise ValueError("Repeated in this file")
+            seen.add(key)
+        except ValueError as exc:
+            row["status"], row["reason"] = "invalid", str(exc)
+        rows.append(row)
+    return rows
+
+
+async def _mark_existing(conn, rows: list[dict]) -> None:
+    candidates = [r for r in rows if r["status"] == "add"]
+    keys = {(normalize_name(r["name"]), r["account_type"]) for r in candidates}
+    existing = await existing_normalized(conn, keys=keys)
+    for r in candidates:
+        retired = existing.get((normalize_name(r["name"]), r["account_type"]))
+        if retired is not None:
+            r["status"] = "exists"
+            r["reason"] = "Already there (retired - restore it)" if retired else "Already there"
+
+
+def _counts(rows: list[dict]) -> dict:
+    return {s: sum(r["status"] == s for r in rows) for s in ("add", "exists", "invalid")}
+
+
+async def _read_upload(file: UploadFile) -> list[dict]:
+    content = await file.read(IMPORT_MAX_BYTES + 1)
+    return _parse_import(file.filename or "", content)
+
+
+@router.post("/institutions/import/preview", response_model=ImportPreview)
+async def preview_institution_import_endpoint(
+    file: UploadFile = File(...),
+    admin_id: UUID = Depends(require_admin),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """What importing this CSV would do, row by row. Changes nothing."""
+    rows = await _read_upload(file)
+    try:
+        async with pool.acquire() as conn:
+            await _mark_existing(conn, rows)
+    except Exception:
+        raise _server_error("previewing institution import", admin_id) from None
+    return {"rows": rows, **_counts(rows)}
+
+
+@router.post("/institutions/import", response_model=ImportResult)
+async def import_institutions_endpoint(
+    file: UploadFile = File(...),
+    admin_id: UUID = Depends(require_admin),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """Adds the file's new rows in one transaction (uploads off). Rows
+    already listed, retired ones included, are skipped, so importing the
+    same file twice adds nothing the second time."""
+    rows = await _read_upload(file)
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await _mark_existing(conn, rows)
+                new = [{"name": r["name"], "type": r["account_type"], "regulator": r["regulator"]}
+                       for r in rows if r["status"] == "add"]
+                added = await insert_institutions(conn, rows=new) if new else 0
+    except Exception:
+        raise _server_error("importing institutions", admin_id) from None
+    counts = _counts(rows)
+    # Anything that lost a race to another admin counts as already there.
+    return {"added": added, "exists": counts["exists"] + counts["add"] - added, "invalid": counts["invalid"]}

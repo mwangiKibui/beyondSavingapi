@@ -42,9 +42,9 @@ class StatementParser(Protocol):
     def __call__(self, content: bytes) -> list[ParsedTransaction]: ...
 
 
-# Keyed by accounts.provider (see app/api/accounts.py's PROVIDERS_BY_TYPE
-# for the fixed set of MVP1 providers). Empty until ab-39/ab-40/ab-115
-# register a real parser for their provider(s).
+# Keyed by accounts.provider - an institution's name from the admin-managed
+# institutions table (ab-294). Empty until ab-39/ab-40/ab-115 register a
+# real parser for their provider(s).
 PARSERS: dict[str, StatementParser] = {}
 
 

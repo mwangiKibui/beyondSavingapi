@@ -223,15 +223,17 @@ async def apply_categories_endpoint(
             )
         if group.refund and group.remember:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Refunds aren't remembered")
-        if group.new_account is not None:
-            _validate_provider(group.new_account.account_type, group.new_account.provider)
-            if group.new_account.account_number:
-                group.new_account.account_number = _validate_account_number(
-                    group.new_account.account_type, group.new_account.account_number
-                )
+        if group.new_account is not None and group.new_account.account_number:
+            group.new_account.account_number = _validate_account_number(
+                group.new_account.account_type, group.new_account.account_number
+            )
     _require_pool(pool)
 
     try:
+        # ab-294: providers live in the institutions table now.
+        for group in body.groups:
+            if group.new_account is not None:
+                await _validate_provider(pool, group.new_account.account_type, group.new_account.provider)
         statement_import = None
         if body.import_id is not None:
             statement_import = await get_import_for_preview(pool, import_id=body.import_id, user_id=user_id)

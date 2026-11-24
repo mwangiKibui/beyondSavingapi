@@ -14,7 +14,7 @@ from app.main import app
 from app.services.statement_files import IncorrectStatementPassword
 
 ACCOUNT_ID = uuid4()
-FAKE_ACCOUNT = {"id": str(ACCOUNT_ID), "nickname": "Equity Salary"}
+FAKE_ACCOUNT = {"id": str(ACCOUNT_ID), "nickname": "Equity Salary", "statements_uploadable": True}
 PDF_CONTENT = b"%PDF-1.4 fake content"
 
 
@@ -332,3 +332,19 @@ def test_upload_statement_logs_and_returns_generic_500_on_unexpected_error(
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(error_records) == 1
     assert error_records[0].exc_info is not None
+
+
+def test_upload_statement_refused_for_a_provider_without_uploads(client, fake_user, fake_pool, monkeypatch):
+    # ab-294: e.g. a money market fund - the app has no reader for it yet.
+    monkeypatch.setattr(
+        "app.api.statement_imports.get_account",
+        AsyncMock(return_value={**FAKE_ACCOUNT, "statements_uploadable": False}),
+    )
+    mock_create = AsyncMock()
+    monkeypatch.setattr("app.api.statement_imports.create_statement_import", mock_create)
+
+    response = _upload(client)
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Statements can't be uploaded for this provider yet"
+    mock_create.assert_not_called()
