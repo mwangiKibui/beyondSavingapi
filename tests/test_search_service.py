@@ -96,6 +96,23 @@ def test_payee_person_row_shows_statement_text_and_links_by_query():
     assert items[0]["link"]["search"] == "other"
 
 
+NCBA_IN = "MPESA Paybill Transfer 1000000001 GRACE MPESA REF: {ref} JANE DOE 4c68f3c108f7 FTC2608{ref}"
+
+
+def test_payee_link_text_is_found_in_every_row_of_the_payee():
+    # The display name drops references from the middle of the text, so it
+    # isn't in the descriptions; Transactions searches by substring, so the
+    # link carries the longest text all of the payee's rows share.
+    rows = [row(NCBA_IN.format(ref=ref), direction="in", provider="NCBA Bank")
+            for ref in ("UHOJH3QNMJ", "UHHJH2Y0MX", "UHHJH2XXX6")]
+
+    [item], _ = payee_items(rows, q="grace", secret=SECRET, limit=5, offset=0)
+
+    search = item["link"]["search"]
+    assert all(search.lower() in r["description"].lower() for r in rows)
+    assert search == "MPESA Paybill Transfer 1000000001 GRACE MPESA REF: UH"
+
+
 def test_rows_without_a_payee_are_not_payees():
     items, total = payee_items([row("AGENT DEPOSIT 123")], q="agent", secret=SECRET, limit=5, offset=0)
     assert (items, total) == ([], 0)

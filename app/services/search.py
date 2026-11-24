@@ -72,6 +72,42 @@ def transaction_item(r: dict) -> dict:
     }
 
 
+def _shared_text(name: str | None, members: list[dict], q: str) -> str:
+    """Text Transactions' substring search finds in every row of a payee:
+    the payee's name when each description holds it, else the longest run
+    of text they all share (the name can drop references from the middle).
+    Every row matched q, so q is the fallback."""
+    texts = [m["description"] or "" for m in members]
+    lowered = [t.lower() for t in texts]
+    if name and all(name.lower() in t for t in lowered):
+        return name
+    first, low_first = texts[0], lowered[0]
+    if len(first) != len(low_first):  # lower() changed lengths; slice the lowered text
+        first = low_first
+
+    def shared(n: int) -> str | None:
+        seen = set()
+        for i in range(len(low_first) - n + 1):
+            piece = low_first[i:i + n]
+            if piece not in seen:
+                seen.add(piece)
+                if all(piece in t for t in lowered[1:]):
+                    return first[i:i + n]
+        return None
+
+    # A run shared by all rows has all its shorter runs shared too, so search on length.
+    lo, hi, best = 1, len(low_first), None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        found = shared(mid)
+        if found:
+            best, lo = found, mid + 1
+        else:
+            hi = mid - 1
+    best = (best or "").strip()
+    return best if len(best) > len(q.strip()) else q
+
+
 def payee_items(rows: list[dict], *, q: str, secret: str, limit: int, offset: int) -> tuple[list[dict], int]:
     """rows: the user's statement rows whose text matched q (id, txn_date,
     direction, description, provider). Grouped by payee like ab-282, newest
@@ -97,16 +133,21 @@ def payee_items(rows: list[dict], *, q: str, secret: str, limit: int, offset: in
             # Transactions has no payee filter yet: the UI searches it with
             # this text. A person's name never becomes reusable text here.
             "link": {"group_key": group_key, "direction": latest["direction"],
-                     "search": key.name if key.name and not key.is_person else q},
+                     "search": q if key.is_person else None},
             "is_person": key.is_person,
             "row_count": count,
             "_last": latest["txn_date"],
+            "_name": key.name,
+            "_members": members,
         })
     items.sort(key=lambda i: i["id"])
     items.sort(key=lambda i: i["_last"], reverse=True)
-    for i in items:
-        del i["_last"]
-    return items[offset:offset + limit], len(items)
+    page = items[offset:offset + limit]
+    for i in page:
+        if i["link"]["search"] is None:  # only for the payees returned: it's the costly part
+            i["link"]["search"] = _shared_text(i["_name"], i["_members"], q)
+        del i["_last"], i["_name"], i["_members"]
+    return page, len(items)
 
 
 def plan_item(r: dict) -> dict:
