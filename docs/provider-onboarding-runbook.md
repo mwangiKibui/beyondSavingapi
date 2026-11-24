@@ -14,7 +14,8 @@ uploads it. Live API sync (connecting directly to a provider) is MVP2 and
 will extend this runbook with the API-connection side when it lands.
 
 MVP1 ships parsing support for every provider a user can already create
-an account for today (see `PROVIDERS_BY_TYPE` in `app/api/accounts.py`):
+an account for today (the providers come from the admin-managed
+`institutions` table since ab-294; these six are seeded by migration 000034):
 
 - **M-Pesa** (mobile money)
 - **Airtel Money** (mobile money)

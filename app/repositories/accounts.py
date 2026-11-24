@@ -97,6 +97,22 @@ _SORT_COLUMNS = {
 }
 
 
+# ab-294: whether statements can be uploaded comes from the provider's
+# institutions row (matched by name + type; accounts.provider has no FK).
+# A provider missing from the table reads as not uploadable.
+_UPLOADABLE_JOIN = "LEFT JOIN institutions i ON i.name = a.provider AND i.type = a.account_type"
+_UPLOADABLE_EXPR = "COALESCE(i.statements_uploadable, false) AS statements_uploadable"
+
+
+def _with_uploadable(write_sql: str) -> str:
+    """Wraps an INSERT/UPDATE ... RETURNING on accounts so its row also
+    carries statements_uploadable."""
+    return f"""
+        WITH a AS ({write_sql})
+        SELECT a.*, {_UPLOADABLE_EXPR} FROM a {_UPLOADABLE_JOIN}
+    """
+
+
 async def create_account(
     pool: asyncpg.Pool,
     *,
@@ -109,12 +125,12 @@ async def create_account(
 ) -> dict:
     try:
         row = await pool.fetchrow(
-            """
+            _with_uploadable("""
             INSERT INTO accounts (user_id, nickname, account_type, provider, account_number, currency)
             VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING id, nickname, account_type, provider, account_number, currency,
                       is_active, created_at, updated_at
-            """,
+            """),
             user_id,
             nickname,
             account_type,
@@ -129,11 +145,12 @@ async def create_account(
 
 async def get_account(pool: asyncpg.Pool, *, account_id: UUID, user_id: UUID) -> dict | None:
     row = await pool.fetchrow(
-        """
-        SELECT id, nickname, account_type, provider, account_number, currency,
-               is_active, created_at, updated_at
-        FROM accounts
-        WHERE id = $1 AND user_id = $2
+        f"""
+        SELECT a.id, a.nickname, a.account_type, a.provider, a.account_number, a.currency,
+               a.is_active, a.created_at, a.updated_at, {_UPLOADABLE_EXPR}
+        FROM accounts a
+        {_UPLOADABLE_JOIN}
+        WHERE a.id = $1 AND a.user_id = $2
         """,
         account_id,
         user_id,
@@ -190,13 +207,13 @@ async def update_account(
     values.append(str(account_id))
     values.append(str(user_id))
 
-    query = f"""
+    query = _with_uploadable(f"""
         UPDATE accounts
         SET {", ".join(set_clauses)}
         WHERE id = ${len(values) - 1} AND user_id = ${len(values)}
         RETURNING id, nickname, account_type, provider, account_number, currency,
                   is_active, created_at, updated_at
-    """
+    """)
 
     try:
         row = await pool.fetchrow(query, *values)
@@ -208,13 +225,13 @@ async def update_account(
 
 async def deactivate_account(pool: asyncpg.Pool, *, account_id: UUID, user_id: UUID) -> dict | None:
     row = await pool.fetchrow(
-        """
+        _with_uploadable("""
         UPDATE accounts
         SET is_active = false, updated_at = now()
         WHERE id = $1 AND user_id = $2
         RETURNING id, nickname, account_type, provider, account_number, currency,
                   is_active, created_at, updated_at
-        """,
+        """),
         account_id,
         user_id,
     )
@@ -246,7 +263,7 @@ async def list_accounts(
         WITH account_data AS (
             SELECT
                 a.id, a.nickname, a.account_type, a.provider, a.account_number, a.currency,
-                a.is_active,
+                a.is_active, {_UPLOADABLE_EXPR},
                 {_BOOK_BALANCE_EXPR} AS balance,
                 COALESCE(unreconciled.count, 0) AS unreconciled_count
             FROM accounts a
@@ -258,6 +275,7 @@ async def list_accounts(
                     (SELECT SUM(al.original_amount) FROM allocations al WHERE al.transaction_id = t.id), 0
                 ) < t.amount
             ) unreconciled ON true
+            {_UPLOADABLE_JOIN}
             WHERE a.user_id = $1
               AND a.is_active = true
               AND ($2::text IS NULL OR a.nickname ILIKE '%' || $2 || '%')

@@ -537,7 +537,7 @@ def test_earlier_rejections_pass_through(client, fake_user, fake_pool, applies, 
 NEW_ACCOUNT = {"nickname": " Savings ", "account_type": "bank", "provider": "Equity Bank"}
 
 
-def test_apply_passes_a_transfer_and_its_other_side_through(client, fake_user, fake_pool, applies):
+def test_apply_passes_a_transfer_and_its_other_side_through(client, fake_user, fake_pool, applies, seeded_providers):
     reason_id, account_id = uuid4(), uuid4()
     created = {"id": account_id, "nickname": "Savings", "account_type": "bank", "provider": "Equity Bank",
                "account_number": "", "currency": "KES"}
@@ -575,7 +575,7 @@ def test_apply_passes_a_transfer_and_its_other_side_through(client, fake_user, f
                                                        "provider": "M-Pesa", "account_number": "0712"}),
     body(transfer_reason_id=str(uuid4()), new_account={**NEW_ACCOUNT, "nickname": "  "}),
 ])
-def test_apply_rejects_bad_transfer_bodies(client, fake_user, fake_pool, applies, payload):
+def test_apply_rejects_bad_transfer_bodies(client, fake_user, fake_pool, applies, seeded_providers, payload):
     assert client.post("/category-applies", json=payload).status_code == 422
     applies["apply_groups"].assert_not_awaited()
 

@@ -323,6 +323,13 @@ async def upload_statement_endpoint(
         account = await get_account(pool, account_id=account_id, user_id=user_id)
         if account is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+        # ab-294: the provider's institutions row says whether the app can
+        # read its statements (e.g. no money market fund reader yet).
+        if not account.get("statements_uploadable"):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Statements can't be uploaded for this provider yet",
+            )
 
         account_sub_ledgers = await list_sub_ledgers(pool, account_id=account_id)
         if account_sub_ledgers:
