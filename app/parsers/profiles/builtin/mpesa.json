@@ -1,0 +1,64 @@
+{
+  "institution": {
+    "name": "M-Pesa",
+    "type": "mobile_money"
+  },
+  "fingerprint": "{\"cols\":7,\"file_type\":\"pdf\",\"header\":[\"receipt no\",\"completion time\",\"details\",\"transaction status\",\"paid in\",\"withdrawn\",\"balance\"],\"labels\":[\"agent deposit\",\"agent withdrawal\",\"customer name\",\"email address\",\"lipa na m-pesa (paybill)\",\"mobile number\",\"others\",\"received money\",\"request date\",\"send money\",\"statement period\",\"total\"],\"title\":[\"m-pesa statement\"],\"v\":1,\"x\":[3,7,14,19,25,29,34]}",
+  "profile": {
+    "schema_version": 1,
+    "file_type": "pdf",
+    "currency": "KES",
+    "date_format": "%Y-%m-%d %H:%M:%S",
+    "amounts": {
+      "decimal_mark": ".",
+      "thousands_sep": ",",
+      "negative": "minus"
+    },
+    "table": {
+      "columns": [
+        {
+          "role": "reference",
+          "header": "Receipt No."
+        },
+        {
+          "role": "date",
+          "header": "Completion Time"
+        },
+        {
+          "role": "description",
+          "header": "Details"
+        },
+        {
+          "role": "status",
+          "header": "Transaction Status"
+        },
+        {
+          "role": "money_in",
+          "header": "Paid In"
+        },
+        {
+          "role": "money_out",
+          "header": "Withdrawn"
+        },
+        {
+          "role": "balance",
+          "header": "Balance"
+        }
+      ],
+      "column_bounds": "ruled",
+      "row_order": "newest_first",
+      "tie_order": "as_printed",
+      "resolve_first_tie": true,
+      "status_keep": "Completed",
+      "drop_digit_only_lines": true
+    },
+    "opening_balance": {
+      "source": "first_row"
+    },
+    "totals": {
+      "source": "summary_row",
+      "label": "Total"
+    },
+    "balance_check": "totals"
+  }
+}

@@ -12,10 +12,17 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from app.parsers.base import ParsedTransaction
+from app.parsers.profiles.builtin import load_builtin_profiles
 from app.parsers.profiles.fingerprint import fingerprint_pdf
 from app.parsers.profiles.matching import match_profile
 from app.parsers.profiles.reader import read_statement
 from app.parsers.profiles.schema import validate_profile
+from app.repositories.statement_profiles import (
+    create_profile,
+    find_institution_id,
+    list_active_builtin_profiles,
+    retire_profiles,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,3 +76,50 @@ def read_with_profiles(
     result.transactions = read.transactions
     result.opening_balance = read.opening_balance
     return result
+
+
+# Any fixed number: serialises API instances seeding at the same time.
+_BUILTIN_LOCK = 3130001
+
+
+async def ensure_builtin_profiles(pool) -> None:
+    """ab-313: makes each shipped profile (app/parsers/profiles/builtin)
+    the active built-in profile of its institution. Unchanged ones are left
+    alone; a changed one is stored as the next version and the previous
+    built-in retired. Never raises - startup carries on without it."""
+    for builtin in load_builtin_profiles():
+        try:
+            clean = validate_profile(builtin.profile).model_dump(mode="json")
+        except Exception:
+            logger.error("Built-in profile %s is invalid - skipped", builtin.key, exc_info=True)
+            continue
+        try:
+            async with pool.acquire() as conn, conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock($1)", _BUILTIN_LOCK)
+                institution_id = await find_institution_id(
+                    conn, name=builtin.institution_name, type=builtin.institution_type
+                )
+                if institution_id is None:
+                    logger.warning(
+                        "Built-in profile %s: no active institution %s (%s) - skipped",
+                        builtin.key,
+                        builtin.institution_name,
+                        builtin.institution_type,
+                    )
+                    continue
+                current = await list_active_builtin_profiles(conn, institution_id=institution_id)
+                if any(r["fingerprint"] == builtin.fingerprint and r["profile"] == clean for r in current):
+                    continue
+                created = await create_profile(
+                    conn,
+                    institution_id=institution_id,
+                    fingerprint=builtin.fingerprint,
+                    profile=builtin.profile,
+                    source="builtin",
+                    status="active",
+                )
+                if current:
+                    await retire_profiles(conn, profile_ids=[r["id"] for r in current])
+                logger.info("Built-in profile %s stored as version %s", builtin.key, created["version"])
+        except Exception:
+            logger.error("Storing built-in profile %s failed", builtin.key, exc_info=True)

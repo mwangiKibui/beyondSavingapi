@@ -28,6 +28,8 @@ class Layout:
     pre_rows: list[list[str]] = field(default_factory=list)  # e.g. an opening balance row
     post_rows: list[list[str]] = field(default_factory=list)  # e.g. a totals row
     repeat_header: bool = True
+    # Text under the description column just below the table (a footer).
+    footer: str | None = None
 
 
 def build(rows: list[list[str]], layout: Layout | None = None, *, continuation: dict[int, str] | None = None) -> bytes:
@@ -86,6 +88,8 @@ def build(rows: list[list[str]], layout: Layout | None = None, *, continuation: 
         if layout.ruled:
             for x in [*layout.xs, width - 30]:
                 c.line(x, top_of_table, x, y + 8)
+        if layout.footer:
+            c.drawString(layout.xs[desc_col] + 2, y - 2, layout.footer)
         if page_no == len(chunks) and layout.end_marker:
             c.drawString(40, y - 10, layout.end_marker)
         c.showPage()

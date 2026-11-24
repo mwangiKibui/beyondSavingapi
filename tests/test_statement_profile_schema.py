@@ -204,3 +204,32 @@ def test_validation_doesnt_change_the_input():
     before = copy.deepcopy(raw)
     validate_profile(raw)
     assert raw == before
+
+
+# --- ab-313 additions -----------------------------------------------------------
+
+
+def test_a_status_column_with_a_kept_status_is_valid():
+    raw = profile()
+    raw["table"]["columns"][3]["role"] = "status"
+    raw["table"]["status_keep"] = "Completed"
+    assert validate_profile(raw).table.status_keep == "Completed"
+
+
+def test_status_keep_needs_a_status_column():
+    raw = profile()
+    raw["table"]["status_keep"] = "Completed"
+    rejected(raw)
+
+
+def test_a_totals_check_needs_totals_to_check_against():
+    rejected(profile(balance_check="totals"))
+    raw = profile(balance_check="totals")
+    raw["totals"] = {"source": "summary_row", "label": "Total"}
+    assert validate_profile(raw).balance_check == "totals"
+
+
+def test_a_summary_row_needs_a_label():
+    raw = profile()
+    raw["totals"] = {"source": "summary_row"}
+    rejected(raw)

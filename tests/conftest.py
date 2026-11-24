@@ -9,6 +9,8 @@ os.environ.setdefault("STORAGE_ACCESS_KEY", "test")
 os.environ.setdefault("STORAGE_SECRET_KEY", "test")
 os.environ.setdefault("JWT_SECRET", "test-secret")
 os.environ.setdefault("SUGGESTION_KEY_SECRET", "test-suggestion-secret")
+# ab-313: tests never write built-in profiles into whatever DB is reachable.
+os.environ["SEED_BUILTIN_PROFILES"] = "false"
 
 
 @pytest.fixture(autouse=True)

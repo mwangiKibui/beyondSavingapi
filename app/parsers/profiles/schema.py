@@ -74,7 +74,9 @@ LayoutText = Annotated[str, AfterValidator(_layout_text)]
 DateFormat = Annotated[str, AfterValidator(_date_format)]
 CurrencyCode = Annotated[str, Field(pattern=r"^[A-Z]{3}$")]
 
-Role = Literal["date", "description", "money_in", "money_out", "signed_amount", "balance", "reference", "ignore"]
+Role = Literal[
+    "date", "description", "money_in", "money_out", "signed_amount", "balance", "reference", "status", "ignore"
+]
 
 
 class _Strict(BaseModel):
@@ -125,6 +127,18 @@ class Table(_Strict):
     continuation: Literal["below"] = "below"
     y_tolerance: float = Field(default=3, ge=1, le=6)
     row_order: Literal["oldest_first", "newest_first"] = "oldest_first"
+    # newest_first statements: rows with the same date/time either reverse
+    # with the rest (most banks) or keep their printed order (M-Pesa's
+    # Fuliza pairs, ab-313).
+    tie_order: Literal["reverse", "as_printed"] = "reverse"
+    # Order the statement's first same-time cluster by the one ordering
+    # whose balances follow on from each other, when exactly one does.
+    resolve_first_tie: bool = False
+    # Drop description lines that are only digits (M-Pesa's parser always
+    # has, so its dedupe hashes depend on it - ab-313).
+    drop_digit_only_lines: bool = False
+    # With a status column: keep only rows whose status is this (or blank).
+    status_keep: LayoutText | None = None
 
 
 class RowSource(_Strict):
@@ -135,9 +149,11 @@ class RowSource(_Strict):
 
 
 class TotalsSource(_Strict):
-    # table_row: a "Total" row stating money in and out, checked against
-    # the rows' own sums when the table has no balance column.
-    source: Literal["none", "table_row"] = "none"
+    # The statement's own money in / money out totals, checked against the
+    # rows' sums. table_row: a "Total" row inside the table; summary_row: a
+    # line above the table starting with `label` and holding two amounts,
+    # money in then money out (M-Pesa's SUMMARY "TOTAL:", ab-313).
+    source: Literal["none", "table_row", "summary_row"] = "none"
     label: LayoutText | None = None
 
 
@@ -152,6 +168,11 @@ class StatementProfile(_Strict):
     table: Table
     opening_balance: RowSource = Field(default_factory=RowSource)
     totals: TotalsSource = Field(default_factory=TotalsSource)
+    # running: every row's balance follows from the one before (the
+    # default proof). totals: the rows add up to the statement's stated
+    # totals - for layouts whose balance column isn't one continuous
+    # ledger (M-Pesa around Fuliza, ab-313).
+    balance_check: Literal["running", "totals"] = "running"
 
     @model_validator(mode="after")
     def _readable_and_checkable(self):
@@ -159,8 +180,10 @@ class StatementProfile(_Strict):
         count = roles.count
         if count("date") != 1 or count("description") != 1:
             raise ValueError("a profile needs exactly one date and one description column")
-        if count("reference") > 1 or count("balance") > 1:
-            raise ValueError("at most one reference and one balance column")
+        if count("reference") > 1 or count("balance") > 1 or count("status") > 1:
+            raise ValueError("at most one reference, balance and status column")
+        if self.table.status_keep and count("status") == 0:
+            raise ValueError("status_keep needs a status column")
         signed, ins, outs = count("signed_amount"), count("money_in"), count("money_out")
         if not ((signed == 1 and ins == outs == 0) or (signed == 0 and ins == outs == 1)):
             raise ValueError("use one signed amount column, or one money in and one money out column")
@@ -178,10 +201,12 @@ class StatementProfile(_Strict):
 
         if self.opening_balance.source == "table_row" and not self.opening_balance.label:
             raise ValueError("an opening balance row needs a label")
-        if self.totals.source == "table_row" and not self.totals.label:
+        if self.totals.source != "none" and not self.totals.label:
             raise ValueError("a totals row needs a label")
-        if count("balance") == 0 and self.totals.source != "table_row":
+        if count("balance") == 0 and self.totals.source == "none":
             raise ValueError("a profile needs a balance column or a totals row to check against")
+        if self.balance_check == "totals" and self.totals.source == "none":
+            raise ValueError("a totals check needs a totals row to check against")
         return self
 
 

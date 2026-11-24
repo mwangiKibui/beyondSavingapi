@@ -33,6 +33,7 @@ from app.core.config import get_settings
 from app.core.log_redaction import install_search_redaction
 from app.core.redis import get_redis
 from app.core.storage import ensure_bucket, get_storage_client
+from app.services.statement_profiles import ensure_builtin_profiles
 
 # Root logger defaults to WARNING, which would silently swallow the app's
 # own logger.info() calls (e.g. the password-reset dev-mode log) even
@@ -57,6 +58,9 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Could not reach Postgres at startup; continuing in a degraded state.", exc_info=True)
         app.state.db_pool = None
+
+    if app.state.db_pool is not None and settings.seed_builtin_profiles:
+        await ensure_builtin_profiles(app.state.db_pool)
 
     yield
 
