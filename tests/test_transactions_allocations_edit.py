@@ -459,3 +459,141 @@ def test_clear_allocations_returns_generic_error_and_logs_on_unexpected_failure(
 
     assert response.status_code == 500
     assert "connection reset" in caplog.text
+
+
+# --- Since ab-155 was first written: refunds, applies, remembering ---
+
+IMPORTED_TRANSACTION_ROW = {**TRANSACTION_ROW, "import_id": str(uuid4())}
+MONEY_IN_ROW = {**IMPORTED_TRANSACTION_ROW, "direction": "in"}
+REFUND_SPLIT = allocation_row(amount=1000.0, is_refund=True)
+
+
+@pytest.fixture
+def remember(monkeypatch):
+    mock = AsyncMock(return_value=1)
+    monkeypatch.setattr("app.api.transactions.remember_preferred", mock)
+    monkeypatch.setattr("app.api.transactions.update_allocation", AsyncMock(return_value=None))
+    monkeypatch.setattr("app.api.transactions.generate_budget_alerts", AsyncMock(return_value=None))
+    return mock
+
+
+def own(monkeypatch, transaction, allocations):
+    monkeypatch.setattr("app.api.transactions.get_transaction", AsyncMock(return_value=transaction))
+    monkeypatch.setattr("app.api.transactions.get_allocations", AsyncMock(return_value=allocations))
+
+
+def test_a_refund_split_can_move_to_another_expense_category(client, fake_user, fake_pool, remember, monkeypatch):
+    own(monkeypatch, MONEY_IN_ROW, [REFUND_SPLIT])
+    monkeypatch.setattr("app.api.transactions.get_categories_by_ids", expense_categories(OTHER_EXPENSE_CATEGORY_ID))
+
+    response = client.patch(ALLOCATION_URL, json={"category_id": str(OTHER_EXPENSE_CATEGORY_ID)})
+
+    assert response.status_code == 200
+
+
+def test_a_refund_split_cant_move_to_an_income_category(client, fake_user, fake_pool, remember, monkeypatch):
+    own(monkeypatch, MONEY_IN_ROW, [REFUND_SPLIT])
+    monkeypatch.setattr(
+        "app.api.transactions.get_categories_by_ids",
+        AsyncMock(return_value=[{"id": INCOME_CATEGORY_ID, "name": "Salary", "type": "income"}]),
+    )
+
+    response = client.patch(ALLOCATION_URL, json={"category_id": str(INCOME_CATEGORY_ID)})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "A refund stays under an expense category"
+
+
+def test_an_income_split_still_cant_move_to_an_expense_category(client, fake_user, fake_pool, remember, monkeypatch):
+    own(monkeypatch, MONEY_IN_ROW, [allocation_row(category_id=INCOME_CATEGORY_ID, amount=1000.0)])
+    monkeypatch.setattr("app.api.transactions.get_categories_by_ids", expense_categories(EXPENSE_CATEGORY_ID))
+
+    response = client.patch(ALLOCATION_URL, json={"category_id": str(EXPENSE_CATEGORY_ID)})
+
+    assert response.status_code == 422
+    assert "doesn't match" in response.json()["detail"]
+
+
+def test_a_changed_category_is_remembered_for_the_payee(client, fake_user, fake_pool, remember, monkeypatch):
+    own(monkeypatch, IMPORTED_TRANSACTION_ROW, [allocation_row(amount=1000.0)])
+    monkeypatch.setattr("app.api.transactions.get_categories_by_ids", expense_categories(OTHER_EXPENSE_CATEGORY_ID))
+
+    response = client.patch(ALLOCATION_URL, json={"category_id": str(OTHER_EXPENSE_CATEGORY_ID)})
+
+    assert response.status_code == 200
+    kwargs = remember.await_args.kwargs
+    assert kwargs["user_id"] == fake_user
+    assert kwargs["category_by_transaction"] == {TRANSACTION_ID: OTHER_EXPENSE_CATEGORY_ID}
+
+
+def test_a_note_or_amount_change_remembers_nothing(client, fake_user, fake_pool, remember, monkeypatch):
+    own(monkeypatch, IMPORTED_TRANSACTION_ROW, [allocation_row(amount=1000.0)])
+
+    response = client.patch(ALLOCATION_URL, json={"note": "Weekly shop", "amount": 900})
+
+    assert response.status_code == 200
+    remember.assert_not_awaited()
+
+
+def test_a_refund_is_never_remembered(client, fake_user, fake_pool, remember, monkeypatch):
+    own(monkeypatch, MONEY_IN_ROW, [REFUND_SPLIT])
+    monkeypatch.setattr("app.api.transactions.get_categories_by_ids", expense_categories(OTHER_EXPENSE_CATEGORY_ID))
+
+    client.patch(ALLOCATION_URL, json={"category_id": str(OTHER_EXPENSE_CATEGORY_ID)})
+
+    remember.assert_not_awaited()
+
+
+def test_splits_with_different_categories_remember_nothing(client, fake_user, fake_pool, remember, monkeypatch):
+    own(monkeypatch, IMPORTED_TRANSACTION_ROW, EXISTING_ALLOCATIONS)
+    monkeypatch.setattr("app.api.transactions.get_categories_by_ids", expense_categories(OTHER_EXPENSE_CATEGORY_ID))
+
+    client.patch(ALLOCATION_URL, json={"category_id": str(OTHER_EXPENSE_CATEGORY_ID)})
+
+    remember.assert_not_awaited()
+
+
+def test_a_transfer_split_alongside_remembers_nothing(client, fake_user, fake_pool, remember, monkeypatch):
+    transfer = allocation_row(
+        allocation_id=OTHER_ALLOCATION_ID, category_id=None, amount=400.0, transfer_reason_id=TRANSFER_REASON_ID
+    )
+    own(monkeypatch, IMPORTED_TRANSACTION_ROW, [allocation_row(), transfer])
+    monkeypatch.setattr("app.api.transactions.get_categories_by_ids", expense_categories(OTHER_EXPENSE_CATEGORY_ID))
+
+    client.patch(ALLOCATION_URL, json={"category_id": str(OTHER_EXPENSE_CATEGORY_ID)})
+
+    remember.assert_not_awaited()
+
+
+def test_a_manual_entry_remembers_nothing(client, fake_user, fake_pool, remember, monkeypatch):
+    own(monkeypatch, TRANSACTION_ROW, [allocation_row(amount=1000.0)])
+    monkeypatch.setattr("app.api.transactions.get_categories_by_ids", expense_categories(OTHER_EXPENSE_CATEGORY_ID))
+
+    client.patch(ALLOCATION_URL, json={"category_id": str(OTHER_EXPENSE_CATEGORY_ID)})
+
+    remember.assert_not_awaited()
+
+
+def test_a_failure_to_remember_still_saves_the_change(client, fake_user, fake_pool, remember, monkeypatch, caplog):
+    remember.side_effect = RuntimeError("boom")
+    own(monkeypatch, IMPORTED_TRANSACTION_ROW, [allocation_row(amount=1000.0)])
+    monkeypatch.setattr("app.api.transactions.get_categories_by_ids", expense_categories(OTHER_EXPENSE_CATEGORY_ID))
+
+    with caplog.at_level(logging.ERROR):
+        response = client.patch(ALLOCATION_URL, json={"category_id": str(OTHER_EXPENSE_CATEGORY_ID)})
+
+    assert response.status_code == 200
+    assert "remembering categories" in caplog.text
+
+
+async def test_an_edited_split_is_no_longer_part_of_its_bulk_apply():
+    from app.repositories.transactions import update_allocation
+
+    pool = AsyncMock()
+    await update_allocation(
+        pool, allocation_id=ALLOCATION_ID, transaction_id=TRANSACTION_ID,
+        category_id=EXPENSE_CATEGORY_ID, amount=600.0, note=None,
+    )
+
+    sql = pool.execute.await_args.args[0]
+    assert "apply_id = NULL" in sql

@@ -256,14 +256,15 @@ async def update_allocation(
     passed through unchanged, not as NULL. amount and original_amount move
     together, same "no FX yet" convention as insert_allocations. Transfer
     fields are left alone: editing a transfer-shaped split's reason or
-    source isn't supported (remove it and re-reconcile instead). Caller
-    must already have confirmed ownership and run the same guards as
-    create.
+    source isn't supported (remove it and re-reconcile instead). A split
+    changed by hand leaves its bulk apply (apply_id), so undoing that
+    apply never removes it (ab-282). Caller must already have confirmed
+    ownership and run the same guards as create.
     """
     await pool.execute(
         """
         UPDATE allocations
-        SET category_id = $3, original_amount = $4, amount = $4, note = $5
+        SET category_id = $3, original_amount = $4, amount = $4, note = $5, apply_id = NULL
         WHERE id = $1 AND transaction_id = $2
         """,
         allocation_id,

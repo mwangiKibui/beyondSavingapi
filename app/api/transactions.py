@@ -525,6 +525,8 @@ async def update_allocation_endpoint(
         category_id = body.category_id if "category_id" in sent else current_category_id
         amount = body.amount if "amount" in sent and body.amount is not None else current_amount
         note = body.note if "note" in sent else current["note"]
+        is_refund = bool(current.get("is_refund"))
+        category_changed = str(category_id) != str(current_category_id)
 
         if amount <= 0:
             raise HTTPException(
@@ -540,12 +542,21 @@ async def update_allocation_endpoint(
                 detail="Can't set both a category and a transfer reason",
             )
 
-        if category_id is not None and str(category_id) != str(current_category_id):
+        if category_id is not None and category_changed:
             found = await get_categories_by_ids(pool, category_ids=[category_id], user_id=user_id)
             if not found:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
+            # ab-286: a refund (money in under an expense category) can
+            # move to another expense category, never to income. Turning a
+            # split into a refund or back is remove-and-add, not an edit.
+            if is_refund:
+                if found[0]["type"] != "expense":
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail="A refund stays under an expense category",
+                    )
             # ab-60: category type must match the transaction's direction.
-            if found[0]["type"] != _CATEGORY_TYPE_FOR_DIRECTION[transaction["direction"]]:
+            elif found[0]["type"] != _CATEGORY_TYPE_FOR_DIRECTION[transaction["direction"]]:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail="Category type doesn't match this transaction's direction",
@@ -583,8 +594,9 @@ async def update_allocation_endpoint(
         # it stayed. A decrease or a move to no-category raises nothing.
         # Never allowed to break the response itself.
         try:
-            if category_id is not None:
-                if str(category_id) == str(current_category_id):
+            # A refund only ever lowers spending (ab-286).
+            if category_id is not None and not is_refund:
+                if not category_changed:
                     added = Decimal(str(amount)) - Decimal(str(current_amount))
                 else:
                     added = Decimal(str(amount))
@@ -604,6 +616,23 @@ async def update_allocation_endpoint(
                 user_id,
                 exc_info=True,
             )
+
+        # Every category choice is remembered for the payee, latest wins
+        # (2026-11-19): only when the category changed, the transaction
+        # came from a statement (a manual entry has no payee), it isn't a
+        # refund, and every split now shares this one category - a funds
+        # transfer or a mixed split has no single answer to remember.
+        others = [a for a in existing_allocations if str(a["id"]) != str(allocation_id)]
+        if (
+            category_changed
+            and category_id is not None
+            and not is_refund
+            and transaction.get("import_id") is not None
+            and all(
+                a["transfer_reason_id"] is None and str(a["category_id"]) == str(category_id) for a in others
+            )
+        ):
+            await _remember(pool, user_id=user_id, category_by_transaction={transaction_id: category_id})
 
         transaction = await get_transaction(pool, transaction_id=transaction_id, user_id=user_id)
         allocations = await get_allocations(pool, transaction_id=transaction_id)
