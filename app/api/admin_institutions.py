@@ -376,7 +376,8 @@ def _parse_import(filename: str, content: bytes) -> list[dict]:
 
     reader = csv.reader(io.StringIO(text))
     header = next(reader, None) or []
-    columns = {h.strip().lower(): i for i, h in enumerate(header)}
+    # "Account Type" or "account-type" from a spreadsheet = account_type.
+    columns = {re.sub(r"[\s-]+", "_", h.strip().lower()): i for i, h in enumerate(header)}
     if any(h not in columns for h in IMPORT_HEADERS):
         raise _unprocessable("The file needs name, account_type and regulator columns")
 

@@ -139,6 +139,12 @@ def test_preview_reads_headers_in_any_case_and_a_bom(client, admin, repo):
     assert r.json()["add"] == 1
 
 
+def test_preview_reads_spreadsheet_style_headers(client, admin, repo):
+    r = upload(client, PREVIEW, "Name,Account Type,Regulator\nSample Bank,bank,CBK\n")
+    assert r.status_code == 200, r.text
+    assert r.json()["add"] == 1
+
+
 def test_missing_headers_is_422(client, admin, repo):
     r = upload(client, PREVIEW, "name,type\nSample Bank,bank\n")
     assert r.status_code == 422
