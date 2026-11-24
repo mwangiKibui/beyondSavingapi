@@ -334,7 +334,8 @@ def build_report_pdf(
             table_data.append(
                 [item["category_name"] or "—", item["category_type"] or "—", str(item["total"])]
             )
-        category_table = Table(table_data, colWidths=[220, 120, 100])
+        # repeatRows: a table that runs onto more pages starts each with its headings.
+        category_table = Table(table_data, colWidths=[220, 120, 100], repeatRows=1)
         category_table.setStyle(TABLE_STYLE)
         elements.append(category_table)
     else:
@@ -380,7 +381,8 @@ def build_simple_table_pdf(
     elements.append(Spacer(1, 16))
 
     if rows:
-        table = Table([column_headers, *rows])
+        # repeatRows: a table that runs onto more pages starts each with its headings.
+        table = Table([column_headers, *rows], repeatRows=1)
         table.setStyle(TABLE_STYLE)
         elements.append(table)
     else:
