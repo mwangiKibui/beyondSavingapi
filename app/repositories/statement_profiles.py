@@ -96,3 +96,30 @@ async def record_check_passed(pool: asyncpg.Pool, *, profile_id: UUID) -> None:
         """,
         profile_id,
     )
+
+
+# --- ab-313: built-in profiles -------------------------------------------------
+
+
+async def find_institution_id(conn, *, name: str, type: str) -> UUID | None:
+    return await conn.fetchval(
+        "SELECT id FROM institutions WHERE name = $1 AND type = $2 AND retired_at IS NULL", name, type
+    )
+
+
+async def list_active_builtin_profiles(conn, *, institution_id: UUID) -> list[dict]:
+    rows = await conn.fetch(
+        """
+        SELECT id, fingerprint, profile FROM statement_profiles
+        WHERE institution_id = $1 AND source = 'builtin' AND status = 'active'
+        """,
+        institution_id,
+    )
+    return [_row(r) for r in rows]
+
+
+async def retire_profiles(conn, *, profile_ids: list[UUID]) -> None:
+    await conn.execute(
+        "UPDATE statement_profiles SET status = 'retired', updated_at = now() WHERE id = ANY($1::uuid[])",
+        profile_ids,
+    )

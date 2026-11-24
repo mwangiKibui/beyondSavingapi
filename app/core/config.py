@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     storage_access_key: str
     storage_secret_key: str
     storage_bucket: str = "statements"
+    # ab-313: load app/parsers/profiles/builtin into statement_profiles at
+    # startup. Off in the test suite.
+    seed_builtin_profiles: bool = True
     jwt_secret: str
     jwt_algorithm: str = "HS256"
     # Keys the HMAC that hashes private category-suggestion keys (account

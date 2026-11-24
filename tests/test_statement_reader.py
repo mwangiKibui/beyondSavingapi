@@ -256,3 +256,95 @@ def test_the_real_mpesa_statement_resolves_with_ruled_columns():
     first = result.transactions[-1]
     assert first["txn_date"] == date(2026, 9, 16)
     assert first["dedupe_hash"]
+
+
+# --- ab-313: what M-Pesa needs, on synthetic statements -------------------------
+
+
+def test_a_zero_amount_row_is_kept_in_the_column_it_was_written_in():
+    rows = [*sample_rows(2), ["03/10/2026", "Loan request", "0.00", "", "990.00"]]
+    out = read_transactions(build(rows), profile(), default_currency="KES")
+    assert [(r["direction"], r["amount"]) for r in out][-1] == ("in", 0.0)
+
+
+def test_rows_with_another_status_are_dropped():
+    layout = Layout(
+        headers=["Date", "Details", "Status", "Money In", "Money Out", "Balance"], xs=[40, 110, 260, 330, 410, 490]
+    )
+    rows = [[r[0], r[1], "Completed", *r[2:]] for r in sample_rows(3)]
+    rows.insert(1, ["02/10/2026", "Reversed payment", "Failed", "", "999.00", "1,100.00"])
+    p = validate_profile(
+        {
+            "date_format": "%d/%m/%Y",
+            "table": {
+                "columns": [
+                    {"role": "date", "header": "Date"},
+                    {"role": "description", "header": "Details"},
+                    {"role": "status", "header": "Status"},
+                    {"role": "money_in", "header": "Money In"},
+                    {"role": "money_out", "header": "Money Out"},
+                    {"role": "balance", "header": "Balance"},
+                ],
+                "column_bounds": "header_gaps",
+                "status_keep": "Completed",
+                "end_markers": ["End of statement"],
+            },
+        }
+    )
+    out = read_transactions(build(rows, layout), p, default_currency="KES")
+    assert [r["description"] for r in out] == ["Payment from Shop A", "Paid to Store B", "Payment from Shop C"]
+
+
+def _tied_rows():
+    # Printed newest first; two rows share 02/10 (printed: X then Y).
+    return [
+        ["03/10/2026", "Third", "", "5.00", "1,000.00"],
+        ["02/10/2026", "Tie X", "", "10.00", "1,005.00"],
+        ["02/10/2026", "Tie Y", "15.00", "", "1,015.00"],
+        ["01/10/2026", "First", "100.00", "", "1,000.00"],
+    ]
+
+
+def test_same_date_rows_reverse_by_default_or_keep_their_printed_order():
+    reverse = read_statement(build(_tied_rows()), profile(table={"row_order": "newest_first"}), default_currency="KES")
+    assert [r["description"] for r in reverse.transactions] == ["First", "Tie Y", "Tie X", "Third"]
+    kept = read_statement(
+        build(_tied_rows()), profile(table={"row_order": "newest_first", "tie_order": "as_printed"}), default_currency="KES"
+    )
+    assert [r["description"] for r in kept.transactions] == ["First", "Tie X", "Tie Y", "Third"]
+
+
+def test_the_first_tie_is_ordered_by_the_only_ordering_whose_balances_follow():
+    rows = [
+        ["02/10/2026", "Later", "", "5.00", "1,020.00"],
+        ["01/10/2026", "Out", "", "30.00", "1,025.00"],  # printed first, but must come second
+        ["01/10/2026", "In", "55.00", "", "1,055.00"],
+    ]
+    p = profile(table={"row_order": "newest_first", "tie_order": "as_printed", "resolve_first_tie": True})
+    out = read_transactions(build(rows), p, default_currency="KES")
+    assert [r["description"] for r in out] == ["In", "Out", "Later"]
+
+
+def test_summary_totals_above_the_table_prove_a_totals_check():
+    rows = sample_rows(4)  # in 100 + 120, out 110 + 130
+    p = profile(totals={"source": "summary_row", "label": "Total"}, balance_check="totals")
+    good = read_statement(build(rows, Layout(name_line_above_table="TOTAL: 220.00 240.00")), p, default_currency="KES")
+    assert good.totals == (220.0, 240.0) and good.check.kind == "totals" and good.check.passed
+    bad = read_statement(build(rows, Layout(name_line_above_table="TOTAL: 220.00 250.00")), p, default_currency="KES")
+    assert bad.check.passed is False
+    missing = read_statement(build(rows), p, default_currency="KES")
+    assert missing.check.passed is False
+
+
+def test_a_ruled_table_ends_where_its_rules_end():
+    pdf = build(sample_rows(3), Layout(ruled=True, footer="Visit our website for help", end_marker=None))
+    out = read_transactions(pdf, profile(table={"column_bounds": "ruled", "end_markers": []}), default_currency="KES")
+    assert out[-1]["description"] == "Payment from Shop C"
+
+
+def test_digit_only_description_lines_can_be_dropped():
+    pdf = build(sample_rows(3), continuation={1: "1003642748"})
+    kept = read_transactions(pdf, profile(), default_currency="KES")
+    assert kept[1]["description"] == "Paid to Store B 1003642748"
+    dropped = read_transactions(pdf, profile(table={"drop_digit_only_lines": True}), default_currency="KES")
+    assert dropped[1]["description"] == "Paid to Store B"

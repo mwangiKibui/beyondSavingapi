@@ -28,8 +28,9 @@ from app.parsers.base import (
     RunningBalanceMismatch,
     StatementParseError,
     check_balances,
+    resolve_leading_tie,
 )
-from app.parsers.profiles.layout import Line, page_lines
+from app.parsers.profiles.layout import MONEY_TOKEN, Line, page_lines
 from app.parsers.profiles.schema import StatementProfile
 from app.parsers.profiles.text import normalise
 
@@ -79,15 +80,32 @@ def _amount(text: str, profile: StatementProfile) -> float | None:
     return round(float(value), 2)
 
 
-def _date(text: str, profile: StatementProfile) -> date | None:
+def _datetime(text: str, profile: StatementProfile) -> datetime | None:
     words = text.split()
     needed = len(profile.date_format.split())
     if len(words) < needed:
         return None
     try:
-        return datetime.strptime(" ".join(words[:needed]), profile.date_format).date()
+        return datetime.strptime(" ".join(words[:needed]), profile.date_format)
     except ValueError:
         return None
+
+
+def _date(text: str, profile: StatementProfile) -> date | None:
+    parsed = _datetime(text, profile)
+    return parsed.date() if parsed else None
+
+
+def _summary_totals(lines: list[Line], profile: StatementProfile) -> tuple[float, float] | None:
+    """A line starting with the totals label and holding exactly two
+    amounts: money in, then money out (ab-313, M-Pesa's SUMMARY)."""
+    for line in lines:
+        if not _starts(line.text, profile.totals.label):
+            continue
+        amounts = [w.text for w in line.words if MONEY_TOKEN.match(w.text)]
+        if len(amounts) == 2:
+            return abs(_amount(amounts[0], profile) or 0.0), abs(_amount(amounts[1], profile) or 0.0)
+    return None
 
 
 def _header_band(lines: list[Line], profile: StatementProfile, start: int = 0):
@@ -172,6 +190,27 @@ def _bounds(page, profile: StatementProfile, header: dict[int, tuple[float, floa
     return out
 
 
+def _ruled_bottom(page, band_top: float, band_bottom: float) -> float | None:
+    """Where the ruled table ends. Rules are often drawn one segment per
+    row, so follow the leftmost rule crossing the heading band down while
+    its segments touch; the table ends where that chain stops."""
+    crossing = [
+        e for e in page.edges
+        if e.get("orientation") == "v" and e["top"] <= band_bottom + 2 and e["bottom"] >= band_top - 2
+    ]
+    if not crossing:
+        return None
+    x = min(e["x0"] for e in crossing)
+    segments = sorted(
+        (e["top"], e["bottom"]) for e in page.edges if e.get("orientation") == "v" and abs(e["x0"] - x) <= _RULE_MERGE
+    )
+    bottom = max(e["bottom"] for e in crossing if abs(e["x0"] - x) <= _RULE_MERGE)
+    for top, seg_bottom in segments:
+        if top <= bottom + _RULE_MERGE and seg_bottom > bottom:
+            bottom = seg_bottom
+    return bottom
+
+
 def _cells(line: Line, bounds: dict[int, tuple[float, float]], profile: StatementProfile) -> dict[str, str]:
     by_col: dict[int, list[str]] = {i: [] for i in bounds}
     for word in line.words:
@@ -207,6 +246,12 @@ def _skipped(text: str, profile: StatementProfile) -> bool:
     return False
 
 
+def _status_kept(cells: dict[str, str], profile: StatementProfile) -> bool:
+    keep = profile.table.status_keep
+    status = cells.get("status", "").strip()
+    return not (keep and status and normalise(status) != normalise(keep))
+
+
 def _hash(row: dict, reference: str | None) -> str:
     if reference:
         key = f"{reference}|{row['description']}|{row['amount']:.2f}"
@@ -221,10 +266,13 @@ def _hash(row: dict, reference: str | None) -> str:
 def _to_transaction(row: _Row, profile: StatementProfile, currency: str) -> ParsedTransaction | None:
     cells = row.cells
     txn_date = _date(cells.get("date", ""), profile)
-    description = " ".join([cells.get("description", ""), *row.continuation]).strip() or None
+    pieces = [cells.get("description", ""), *row.continuation]
+    if profile.table.drop_digit_only_lines:
+        pieces = [piece for piece in pieces if not piece.strip().isdigit()]
+    description = " ".join(p.strip() for p in pieces if p.strip()) or None
     if "signed_amount" in {c.role for c in profile.table.columns}:
         value = _amount(cells.get("signed_amount", ""), profile)
-        if not value:
+        if value is None:
             return None
         positive_in = profile.signed_amount_positive_is == "in"
         direction = ("in" if positive_in else "out") if value > 0 else ("out" if positive_in else "in")
@@ -234,9 +282,11 @@ def _to_transaction(row: _Row, profile: StatementProfile, currency: str) -> Pars
         money_out = _amount(cells.get("money_out", ""), profile)
         if money_in and money_out:
             raise StatementParseError(f"A row on {txn_date} has both money in and money out")
-        if money_in:
+        # A filled cell counts even at 0.00 (M-Pesa's "M-Shwari Loan
+        # Request 0.00" rows, ab-313); a non-zero cell wins over a zero one.
+        if money_in is not None and (money_in or not money_out):
             direction, amount = "in", abs(money_in)
-        elif money_out:
+        elif money_out is not None:
             direction, amount = "out", abs(money_out)
         else:
             return None
@@ -270,10 +320,15 @@ def read_statement(content: bytes, profile: StatementProfile, *, default_currenc
                 break
             lines = page_lines(page, y_tolerance=profile.table.y_tolerance)
             band = _header_band(lines, profile)
+            table_bottom = None
             if band is not None:
                 top, last, header = band
                 bounds = _bounds(page, profile, header, lines[top].top - 2, lines[last].top + 12)
                 start = last + 1
+                if profile.table.column_bounds == "ruled":
+                    table_bottom = _ruled_bottom(page, lines[top].top - 2, lines[last].top + 12)
+                if profile.totals.source == "summary_row" and totals is None:
+                    totals = _summary_totals(lines[:top], profile)
             elif profile.table.column_bounds == "explicit" or (
                 page_no > 0 and not profile.table.header_repeats_each_page and bounds is not None
             ):
@@ -287,6 +342,8 @@ def read_statement(content: bytes, profile: StatementProfile, *, default_currenc
                 continue  # a page without the table (notes, disclaimers)
             current: _Row | None = None
             for line in lines[start:]:
+                if table_bottom is not None and line.top > table_bottom:
+                    break  # below the ruled table: footers, disclaimers
                 text = line.text
                 if any(_starts(text, m) for m in profile.table.end_markers):
                     ended = True
@@ -307,19 +364,30 @@ def read_statement(content: bytes, profile: StatementProfile, *, default_currenc
                     continue
                 if _date(cells.get("date", ""), profile) is not None:
                     current = _Row(cells=cells, continuation=[])
-                    rows.append(current)
+                    if _status_kept(cells, profile):
+                        rows.append(current)
                 elif current is not None and cells.get("description"):
                     current.continuation.append(cells["description"])
 
-    transactions = [t for t in (_to_transaction(r, profile, default_currency) for r in rows) if t is not None]
+    keyed = [
+        (_datetime(r.cells.get("date", ""), profile), t)
+        for r, t in ((r, _to_transaction(r, profile, default_currency)) for r in rows)
+        if t is not None
+    ]
     if profile.table.row_order == "newest_first":
-        transactions.reverse()
+        if profile.table.tie_order == "reverse":
+            keyed.reverse()
+        # Stable: rows with the same date/time keep the order above.
+        keyed.sort(key=lambda kt: kt[0])
+    if profile.table.resolve_first_tie:
+        keyed = resolve_leading_tie(keyed)
+    transactions = [t for _, t in keyed]
     if opening is None and profile.opening_balance.source == "first_row" and transactions:
         first = transactions[0]
         if first["balance_after"] is not None:
             delta = first["amount"] if first["direction"] == "in" else -first["amount"]
             opening = round(first["balance_after"] - delta, 2)
-    check = check_balances(transactions, opening_balance=opening, totals=totals)
+    check = check_balances(transactions, opening_balance=opening, totals=totals, mode=profile.balance_check)
     return ReadResult(transactions=transactions, opening_balance=opening, totals=totals, check=check)
 
 
