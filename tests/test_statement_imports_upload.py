@@ -350,6 +350,22 @@ def test_upload_statement_refused_for_a_provider_without_uploads(client, fake_us
     mock_create.assert_not_called()
 
 
+
+def test_upload_allowed_when_an_active_profile_recognises_the_layout(client, fake_user, fake_pool, monkeypatch):
+    # ab-312: a stored profile reads the provider's statements even though
+    # no bespoke parser marked it uploadable.
+    monkeypatch.setattr(
+        "app.api.statement_imports.get_account",
+        AsyncMock(return_value={**FAKE_ACCOUNT, "statements_uploadable": False, "recognised_layout": True}),
+    )
+    mock_create = AsyncMock(side_effect=RuntimeError("stop after the gate"))
+    monkeypatch.setattr("app.api.statement_imports.create_statement_import", mock_create)
+
+    response = _upload(client)
+
+    assert response.json().get("detail") != "Statements can't be uploaded for this provider yet"
+
+
 # --- ab-309: statement_imports_per_day ---------------------------------------
 
 

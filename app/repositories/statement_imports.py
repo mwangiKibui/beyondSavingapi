@@ -76,14 +76,24 @@ async def get_import_owned_by_user(pool: asyncpg.Pool, *, import_id: UUID, user_
 async def get_import_for_processing(pool: asyncpg.Pool, *, import_id: UUID) -> dict | None:
     row = await pool.fetchrow(
         """
-        SELECT si.id, si.account_id, si.storage_key, si.file_name, a.provider
+        SELECT si.id, si.account_id, si.storage_key, si.file_name, a.provider, a.currency,
+               i.id AS institution_id
         FROM statement_imports si
         JOIN accounts a ON a.id = si.account_id
+        -- ab-312: the institution whose profiles may read this file
+        -- (matched by name + type; accounts.provider has no FK).
+        LEFT JOIN institutions i ON i.name = a.provider AND i.type = a.account_type
         WHERE si.id = $1
         """,
         import_id,
     )
     return dict(row) if row else None
+
+
+async def set_import_fingerprint(pool: asyncpg.Pool, *, import_id: UUID, fingerprint: str) -> None:
+    """ab-312: the upload's page-1 layout shape (never its values), kept so
+    an upload no profile could read can be re-matched once one exists."""
+    await pool.execute("UPDATE statement_imports SET fingerprint = $1 WHERE id = $2", fingerprint, import_id)
 
 
 async def get_import_sub_ledgers(pool: asyncpg.Pool, *, import_id: UUID) -> list[dict]:
@@ -255,12 +265,15 @@ async def mark_import_parsed(
     row_count: int,
     opening_balance: float | None = None,
     opening_balance_date: date | None = None,
+    profile_id: UUID | None = None,
 ) -> None:
+    """profile_id: the statement profile that read the file (ab-312);
+    None when a bespoke parser read it."""
     await pool.execute(
         """
         UPDATE statement_imports
         SET status = 'parsed', period_start = $1, period_end = $2, row_count = $3,
-            opening_balance = $4, opening_balance_date = $5
+            opening_balance = $4, opening_balance_date = $5, profile_id = $7
         WHERE id = $6
         """,
         period_start,
@@ -269,6 +282,7 @@ async def mark_import_parsed(
         opening_balance,
         opening_balance_date,
         import_id,
+        profile_id,
     )
 
 

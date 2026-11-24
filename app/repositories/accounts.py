@@ -2,6 +2,7 @@ from datetime import date
 from uuid import UUID
 
 import asyncpg
+from app.repositories.statement_profiles import RECOGNISED_EXPR
 
 
 class DuplicateAccount(Exception):
@@ -101,7 +102,8 @@ _SORT_COLUMNS = {
 # institutions row (matched by name + type; accounts.provider has no FK).
 # A provider missing from the table reads as not uploadable.
 _UPLOADABLE_JOIN = "LEFT JOIN institutions i ON i.name = a.provider AND i.type = a.account_type"
-_UPLOADABLE_EXPR = "COALESCE(i.statements_uploadable, false) AS statements_uploadable"
+# ab-312: plus recognised_layout - uploads are allowed when either is true.
+_UPLOADABLE_EXPR = f"COALESCE(i.statements_uploadable, false) AS statements_uploadable, {RECOGNISED_EXPR}"
 
 
 def _with_uploadable(write_sql: str) -> str:

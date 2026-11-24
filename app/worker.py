@@ -17,10 +17,13 @@ from app.repositories.statement_imports import (
     get_import_sub_ledgers,
     mark_import_failed,
     mark_import_parsed,
+    set_import_fingerprint,
     set_sub_ledger_opening_balances,
 )
+from app.repositories.statement_profiles import list_active_profiles, record_check_passed
 from app.repositories.transactions import insert_transactions
 from app.services.import_handling import handle_import_by_id
+from app.services.statement_profiles import ProfileRead, read_with_profiles
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -47,7 +50,12 @@ class ImportWriteError(Exception):
 
 
 async def _write_single_account_import(
-    pool: asyncpg.Pool, *, import_id: UUID, account_id: UUID, transactions: list[ParsedTransaction]
+    pool: asyncpg.Pool,
+    *,
+    import_id: UUID,
+    account_id: UUID,
+    transactions: list[ParsedTransaction],
+    profile_id: UUID | None = None,
 ) -> None:
     inserted = await insert_transactions(
         pool, account_id=account_id, import_id=import_id, transactions=transactions
@@ -60,6 +68,9 @@ async def _write_single_account_import(
 
     period_start, period_end = statement_period(transactions) if transactions else (None, None)
     opening_balance, opening_balance_date = derive_opening_balance(transactions)
+    # profile_id only when a stored profile read the file, so the bespoke
+    # parsers' writes are exactly what they were before ab-312.
+    extra = {"profile_id": profile_id} if profile_id is not None else {}
     await mark_import_parsed(
         pool,
         import_id=import_id,
@@ -68,6 +79,7 @@ async def _write_single_account_import(
         row_count=len(transactions),
         opening_balance=opening_balance,
         opening_balance_date=opening_balance_date,
+        **extra,
     )
 
 
@@ -157,6 +169,29 @@ async def _handle_rows(pool: asyncpg.Pool, *, import_id: UUID) -> None:
         logger.error("Handling rows failed for import %s - will retry when its review opens", import_id, exc_info=True)
 
 
+async def _load_profiles(pool: asyncpg.Pool, record: dict) -> list[dict]:
+    """ab-312: active profiles, when the account's provider is a known
+    institution. A failure here never blocks the bespoke parser."""
+    if record.get("institution_id") is None:
+        return []
+    try:
+        return await list_active_profiles(pool)
+    except Exception:
+        logger.error("Loading statement profiles failed for import %s", record["id"], exc_info=True)
+        return []
+
+
+def _no_read_detail(record: dict, attempt: ProfileRead) -> str:
+    if attempt.wrong_institution:
+        return (
+            f"This looks like a {attempt.wrong_institution} statement. "
+            "Check you uploaded it to the right account."
+        )
+    if attempt.failure:
+        return attempt.failure
+    return f"No parser available yet for {record['provider']}"
+
+
 async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
     try:
         parsed_import_id = UUID(import_id)
@@ -174,7 +209,9 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
 
         is_mentor_sacco = record["provider"] == MENTOR_SACCO
         parser = parse_mentor_sacco_statement if is_mentor_sacco else PARSERS.get(record["provider"])
-        if parser is None:
+        profiles = [] if is_mentor_sacco else await _load_profiles(pool, record)
+        has_own_profile = any(p["institution_id"] == record.get("institution_id") for p in profiles)
+        if parser is None and not has_own_profile:
             logger.info(
                 "No parser registered for provider %s (import %s) - marking failed",
                 record["provider"],
@@ -193,8 +230,53 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
             .get_object(Bucket=settings.storage_bucket, Key=record["storage_key"])["Body"]
             .read()
         )
+        attempt = ProfileRead()
+        if not is_mentor_sacco:
+            # ab-312: fingerprint every upload; read it with a stored profile
+            # when one of this institution's matches and passes its check.
+            attempt = read_with_profiles(
+                content,
+                institution_id=record.get("institution_id"),
+                currency=record.get("currency") or "KES",
+                candidates=profiles,
+            )
+            if attempt.fingerprint is not None:
+                try:
+                    await set_import_fingerprint(pool, import_id=parsed_import_id, fingerprint=attempt.fingerprint)
+                except Exception:
+                    logger.error("Storing the fingerprint failed for import %s", import_id, exc_info=True)
+            if attempt.wrong_institution:
+                logger.warning(
+                    "Import %s (provider %s) looks like a %s statement",
+                    import_id,
+                    record["provider"],
+                    attempt.wrong_institution,
+                )
+            if attempt.transactions is None and attempt.matched_profile_id is not None:
+                logger.warning(
+                    "Import %s: profile %s didn't read it (%s) - falling back to the %s",
+                    import_id,
+                    attempt.matched_profile_id,
+                    attempt.failure,
+                    "bespoke parser" if parser else "failure message",
+                )
+
         try:
-            if is_mentor_sacco:
+            if attempt.transactions is not None:
+                await _write_single_account_import(
+                    pool,
+                    import_id=parsed_import_id,
+                    account_id=record["account_id"],
+                    transactions=attempt.transactions,
+                    profile_id=attempt.profile_id,
+                )
+                await record_check_passed(pool, profile_id=attempt.profile_id)
+            elif parser is None:
+                detail = _no_read_detail(record, attempt)
+                logger.info("Import %s (provider %s) not read: %s", import_id, record["provider"], detail)
+                await mark_import_failed(pool, import_id=parsed_import_id, error_detail=detail)
+                return
+            elif is_mentor_sacco:
                 sections = parser(content)
                 await _write_sub_ledger_import(
                     pool,

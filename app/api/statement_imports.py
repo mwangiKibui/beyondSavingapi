@@ -337,8 +337,9 @@ async def upload_statement_endpoint(
         if account is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
         # ab-294: the provider's institutions row says whether the app can
-        # read its statements (e.g. no money market fund reader yet).
-        if not account.get("statements_uploadable"):
+        # read its statements (e.g. no money market fund reader yet);
+        # ab-312: or an active statement profile recognises its layout.
+        if not (account.get("statements_uploadable") or account.get("recognised_layout")):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Statements can't be uploaded for this provider yet",

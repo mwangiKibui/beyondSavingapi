@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Literal, Protocol, TypedDict
 
@@ -76,18 +77,93 @@ def validate_running_balance(transactions: list[ParsedTransaction], *, opening_b
     only to same-timestamp clusters for M-Pesa (its "Balance" column
     isn't one continuous ledger across Fuliza-related entries).
     """
-    previous_balance = opening_balance
     for i, txn in enumerate(transactions):
-        expected = round(
-            previous_balance + txn["amount"] if txn["direction"] == "in" else previous_balance - txn["amount"],
-            2,
-        )
-        if abs(expected - txn["balance_after"]) > 0.01:
+        expected = _expected_balance(transactions, i, opening_balance)
+        if txn["balance_after"] is None or abs(expected - txn["balance_after"]) > 0.01:
+            stated = "no balance" if txn["balance_after"] is None else f"{txn['balance_after']:.2f}"
             raise RunningBalanceMismatch(
                 f"Running balance mismatch at transaction {i + 1} ({txn['description'] or 'no description'}): "
-                f"expected {expected:.2f}, statement shows {txn['balance_after']:.2f}"
+                f"expected {expected:.2f}, statement shows {stated}"
             )
-        previous_balance = txn["balance_after"]
+
+
+def _expected_balance(transactions: list[ParsedTransaction], i: int, opening_balance: float) -> float:
+    """Row i's balance replayed from the row before's STATED balance (or the
+    opening balance), so one bad row doesn't fail every row after it."""
+    previous = opening_balance if i == 0 else transactions[i - 1]["balance_after"]
+    if previous is None:
+        previous = _expected_balance(transactions, i - 1, opening_balance)
+    txn = transactions[i]
+    return round(previous + txn["amount"] if txn["direction"] == "in" else previous - txn["amount"], 2)
+
+
+def running_balance_failures(transactions: list[ParsedTransaction], *, opening_balance: float) -> list[int]:
+    """Every row (0-based) whose stated balance doesn't follow from the row
+    before it - the same rule as validate_running_balance, reporting all
+    failures instead of raising on the first (ab-312; the mapping wizard's
+    preview highlights them). A row with no balance counts as failing."""
+    failures = []
+    for i, txn in enumerate(transactions):
+        expected = _expected_balance(transactions, i, opening_balance)
+        if txn["balance_after"] is None or abs(expected - txn["balance_after"]) > 0.01:
+            failures.append(i)
+    return failures
+
+
+def totals_failures(transactions: list[ParsedTransaction], *, total_in: float, total_out: float) -> list[str]:
+    """For statements with no balance column: the rows' own money in and out
+    against the statement's stated totals, to a cent."""
+    got_in = round(sum(t["amount"] for t in transactions if t["direction"] == "in"), 2)
+    got_out = round(sum(t["amount"] for t in transactions if t["direction"] == "out"), 2)
+    failures = []
+    if abs(got_in - total_in) > 0.01:
+        failures.append("money in")
+    if abs(got_out - total_out) > 0.01:
+        failures.append("money out")
+    return failures
+
+
+@dataclass(frozen=True)
+class BalanceCheck:
+    kind: Literal["running", "totals"]
+    passed: bool
+    failing_rows: list[int] = field(default_factory=list)
+    message: str | None = None
+
+
+def check_balances(
+    transactions: list[ParsedTransaction],
+    *,
+    opening_balance: float | None,
+    totals: tuple[float, float] | None,
+) -> BalanceCheck:
+    """ab-312: the proof a read is right. With a balance column, the running
+    balance must reconcile from the opening balance; otherwise the rows must
+    add up to the statement's stated totals. Nothing to check against, or no
+    rows at all, is a failure - a read that can't be proven isn't trusted."""
+    has_balances = any(t["balance_after"] is not None for t in transactions)
+    if not transactions:
+        return BalanceCheck(kind="running", passed=False, message="No transactions were found")
+    if has_balances and opening_balance is not None:
+        failing = running_balance_failures(transactions, opening_balance=opening_balance)
+        if not failing:
+            return BalanceCheck(kind="running", passed=True)
+        rows = ", ".join(str(i + 1) for i in failing[:5])
+        more = f" and {len(failing) - 5} more" if len(failing) > 5 else ""
+        return BalanceCheck(
+            kind="running",
+            passed=False,
+            failing_rows=failing,
+            message=f"The balance doesn't add up at row {rows}{more}",
+        )
+    if totals is not None:
+        failed = totals_failures(transactions, total_in=totals[0], total_out=totals[1])
+        if not failed:
+            return BalanceCheck(kind="totals", passed=True)
+        return BalanceCheck(
+            kind="totals", passed=False, message=f"The rows don't add up to the statement's total {' and '.join(failed)}"
+        )
+    return BalanceCheck(kind="running", passed=False, message="There's no balance or total to check the rows against")
 
 
 def statement_period(transactions: list[ParsedTransaction]) -> tuple[date, date]:
