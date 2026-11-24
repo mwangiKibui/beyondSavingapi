@@ -134,6 +134,7 @@ def test_every_group_type_maps_and_reports_its_total(client, fake_user, fake_poo
 
     assert groups["transactions"]["total"] == 12
     assert groups["transactions"]["items"][0]["subtitle"] == "3 Nov 2026 · My M-Pesa · −KES 2,600.00"
+    assert groups["transactions"]["items"][0]["account_nickname"] == "My M-Pesa"
     assert groups["payees"]["total"] == 1
     assert groups["payees"]["items"][0]["row_count"] == 2
     assert groups["payees"]["items"][0]["link"]["search"] == "ACME SUPERMARKET"

@@ -28,6 +28,7 @@ from app.api import (
     users,
 )
 from app.core.config import get_settings
+from app.core.log_redaction import install_search_redaction
 from app.core.redis import get_redis
 from app.core.storage import ensure_bucket, get_storage_client
 
@@ -35,6 +36,8 @@ from app.core.storage import ensure_bucket, get_storage_client
 # own logger.info() calls (e.g. the password-reset dev-mode log) even
 # though uvicorn's request logs still show up.
 logging.basicConfig(level=logging.INFO)
+# Search text never reaches the request log (ab-307).
+install_search_redaction()
 
 logger = logging.getLogger(__name__)
 

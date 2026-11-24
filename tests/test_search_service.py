@@ -153,6 +153,7 @@ def test_transaction_item_out():
         "subtitle": "3 Nov 2026 · My M-Pesa · −KES 2,600.00",
         "link": {"transaction_id": str(tid), "account_id": str(aid)},
         "txn_date": date(2026, 11, 3), "amount": 2600.0, "currency": "KES", "direction": "out",
+        "account_nickname": "My M-Pesa",
     }
 
 
@@ -164,6 +165,7 @@ def test_transaction_item_in_without_description_uses_counterparty():
     })
     assert item["title"] == "ACME LTD"
     assert item["subtitle"] == "5 Jan 2026 · Bank · +KES 10.00"
+    assert item["account_nickname"] == "Bank"
 
 
 def test_plan_item():
