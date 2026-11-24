@@ -515,9 +515,19 @@ async def _resolve_other_sides(conn, *, user_id: UUID, groups: list[ApplyGroup],
         own_accounts = {rows_by_id[t]["account_id"] for t in g.transaction_ids}
         account_id = None
         if g.other_account_id is not None:
-            if await get_account(conn, account_id=g.other_account_id, user_id=user_id) is None:
+            other = await get_account(conn, account_id=g.other_account_id, user_id=user_id)
+            if other is None:
                 raise AllocationRejected(422, "Account not found")
             account_id = g.other_account_id
+            if account_id in own_accounts:
+                # Money can't move from an account to itself: name it, and
+                # ask for the other side in the money's own direction.
+                went = rows_by_id[g.transaction_ids[0]]["direction"] == "out"
+                raise AllocationRejected(
+                    422,
+                    f"These rows are on {other['nickname']}. "
+                    f"Choose the account the money {'went to' if went else 'came from'}.",
+                )
         elif g.new_account is not None:
             new = dict(g.new_account)
             new["currency"] = new.get("currency") or rows_by_id[g.transaction_ids[0]]["currency"]
@@ -527,8 +537,6 @@ async def _resolve_other_sides(conn, *, user_id: UUID, groups: list[ApplyGroup],
                 raise AllocationRejected(409, "An account with that number already exists") from None
             created.append(account)
             account_id = account["id"]
-        if account_id is not None and account_id in own_accounts:
-            raise AllocationRejected(422, "Pick a different account from the one these rows are on")
         out.append({"account_id": account_id, "description": g.someone_else_name or None})
     return out, created
 
