@@ -34,6 +34,9 @@ class UncategorisedGroupsResponse(BaseModel):
     page_size: int
     # Every waiting row, whatever the filters - the Transactions badge.
     row_total: int
+    # Open groups with a suggestion, whatever the filters - "Use all N
+    # suggestions" (ab-284). 0 for Categorised here.
+    suggested: int = 0
 
 
 class UncategorisedCountResponse(BaseModel):
@@ -88,4 +91,9 @@ async def list_uncategorised_groups_endpoint(
         ) from None
     items, total = select_groups(groups, **params.model_dump())
     return {"items": items, "total": total, "page": params.page, "page_size": params.page_size,
-            "row_total": row_total}
+            "row_total": row_total,
+            "suggested": 0 if group_status == "categorised" else sum(1 for g in groups if _has_suggestion(g))}
+
+
+def _has_suggestion(group: dict) -> bool:
+    return bool(group.get("suggestion")) or any(r.get("suggestion") for r in group.get("rows") or [])

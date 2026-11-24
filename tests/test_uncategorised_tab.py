@@ -256,3 +256,17 @@ def test_categorised_errors_are_generic(client, fake_user, fake_pool, monkeypatc
     monkeypatch.setattr(f"{UNCAT}.categorised_here_groups", AsyncMock(side_effect=RuntimeError("db secret")))
     response = client.get("/uncategorised/groups?status=categorised")
     assert response.status_code == 500 and "db secret" not in response.text
+
+
+def test_open_groups_say_how_many_have_a_suggestion(client, fake_user, fake_pool, monkeypatch):
+    suggested = {**group("g:1"), "suggestion": {"category_id": None, "category_name": "Groceries",
+                                                "is_new_category": True, "source": "directory"}}
+    line_only = group("g:2")
+    line_only["rows"][0]["suggestion"] = suggested["suggestion"]
+    monkeypatch.setattr(f"{UNCAT}.uncategorised_groups",
+                        AsyncMock(return_value=([suggested, line_only, group("g:3")], 3)))
+
+    body = client.get("/uncategorised/groups?direction=in").json()
+
+    # Whatever the filters - "Use all N suggestions".
+    assert body["total"] == 0 and body["suggested"] == 2
