@@ -37,6 +37,44 @@ async def get_uncategorised_rows(pool: asyncpg.Pool | asyncpg.Connection, *, use
     return [dict(r) for r in rows]
 
 
+async def count_uncategorised_rows(pool: asyncpg.Pool | asyncpg.Connection, *, user_id: UUID) -> int:
+    """ab-284: how many rows wait in Transactions -> Uncategorised (the
+    sidebar badge and the tab label)."""
+    return await pool.fetchval("SELECT count(*) FROM (" + _UNCATEGORISED + ") waiting", user_id)
+
+
+async def get_categorised_here_rows(pool: asyncpg.Pool | asyncpg.Connection, *, user_id: UUID) -> list[dict]:
+    """ab-284: rows the user filed from the Uncategorised tab (applies with
+    no import) that are still filed, newest apply first, each with the
+    apply that filed it."""
+    rows = await pool.fetch(
+        """
+        SELECT t.id, t.txn_date, t.amount, t.currency, t.direction, t.description, t.import_id,
+               t.account_id, a.provider, a.nickname AS account_nickname, si.file_name,
+               si.created_at AS import_created_at, t.handled_as, t.handled_reason,
+               t.sub_ledger_id, sl.name AS sub_ledger_name, sl.role AS sub_ledger_role,
+               al.category_id, al.transfer_reason_id, tr.name AS transfer_reason_name,
+               sa.nickname AS source_account_name, al.source_description, al.note,
+               al.apply_id, ca.created_at AS applied_at
+        FROM category_applies ca
+        JOIN allocations al ON al.apply_id = ca.id
+        JOIN transactions t ON t.id = al.transaction_id
+        JOIN accounts a ON a.id = t.account_id
+        LEFT JOIN sub_ledgers sl ON sl.id = t.sub_ledger_id
+        LEFT JOIN statement_imports si ON si.id = t.import_id
+        LEFT JOIN transfer_reasons tr ON tr.id = al.transfer_reason_id
+        LEFT JOIN accounts sa ON sa.id = al.source_account_id
+        WHERE ca.user_id = $1
+          AND a.user_id = $1
+          AND ca.import_id IS NULL
+          AND ca.undone_at IS NULL
+        ORDER BY ca.created_at DESC, ca.id, t.txn_date, t.id
+        """,
+        user_id,
+    )
+    return [dict(r) for r in rows]
+
+
 async def lock_rows_for_apply(
     conn: asyncpg.Connection, *, user_id: UUID, transaction_ids: list[UUID]
 ) -> list[dict]:

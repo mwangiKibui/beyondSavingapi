@@ -44,6 +44,7 @@ from app.repositories.payee_groups import (
     delete_apply_allocations,
     delete_apply_line_allocations,
     get_apply_source,
+    get_categorised_here_rows,
     get_merchant_votes,
     get_number_votes,
     get_rule_rows,
@@ -214,6 +215,37 @@ async def uncategorised_groups(
         conn, user_id=user_id, rows=rows, keys=extract_row_keys(rows, secret=secret)
     )
     return build_groups(rows, keys=keys, preview=preview), len(rows)
+
+
+async def categorised_here_groups(
+    conn: asyncpg.Connection | asyncpg.Pool, *, user_id: UUID, secret: str
+) -> list[dict]:
+    """ab-284: Uncategorised -> "Categorised here": one group per apply the
+    user made from the tab that is still filed, newest first, each
+    carrying its apply_id (undo) and when it was filed (applied_at)."""
+    rows = await get_categorised_here_rows(conn, user_id=user_id)
+    if not rows:
+        return []
+    # Only the names (learned ones included); filed rows need no suggestion.
+    directory = await get_directory(conn)
+    keys = extract_row_keys(rows, secret=secret)
+    learned = await get_learned_names(conn, numbers=learned_name_lookups(rows, keys, directory))
+    keys = apply_learned_names(rows, keys, learned, directory)
+    categories = await get_user_categories(conn, user_id=user_id)
+    by_apply: dict[UUID, list[dict]] = {}
+    for r in rows:
+        by_apply.setdefault(r["apply_id"], []).append(r)
+    names = {c["id"]: c["name"] for c in categories}
+    types = {c["id"]: c["type"] for c in categories}
+    entry_types = {c["id"]: c.get("entry_type") for c in categories}
+    groups = []
+    for apply_id, members in by_apply.items():
+        for g in build_groups(members, keys=keys, category_names=names, category_types=types,
+                              category_entry_types=entry_types):
+            # The same payee can be filed twice: each apply is its own group.
+            groups.append({**g, "group_key": f"a:{apply_id}:{g['group_key']}",
+                           "applied_at": members[0]["applied_at"]})
+    return groups
 
 
 def _apply_kind(g: ApplyGroup, target: "_Target", category: dict | None, direction: str) -> str:
