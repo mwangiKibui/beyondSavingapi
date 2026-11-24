@@ -69,6 +69,7 @@ def transaction_item(r: dict) -> dict:
         "amount": float(r["amount"]),
         "currency": r["currency"].strip(),
         "direction": r["direction"],
+        "account_nickname": r["account_nickname"],
     }
 
 

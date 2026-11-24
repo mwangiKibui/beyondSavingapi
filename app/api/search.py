@@ -55,6 +55,7 @@ class SearchItem(BaseModel):
     amount: float | None = None
     currency: str | None = None
     direction: str | None = None
+    account_nickname: str | None = None
     # Payees
     is_person: bool | None = None
     row_count: int | None = None
