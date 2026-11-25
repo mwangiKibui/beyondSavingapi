@@ -27,6 +27,11 @@ async def list_statement_imports(
             -- means every row was already recorded by an earlier upload.
             CASE WHEN si.status = 'parsed'
                  THEN (SELECT COUNT(*) FROM transactions t WHERE t.import_id = si.id) END AS added_count,
+            -- ab-334: of those, rows with an allocation (the delete
+            -- confirmation says so).
+            CASE WHEN si.status = 'parsed'
+                 THEN (SELECT COUNT(*) FROM transactions t WHERE t.import_id = si.id
+                       AND EXISTS (SELECT 1 FROM allocations al WHERE al.transaction_id = t.id)) END AS allocated_count,
             p.step AS progress_step, p.reviewed_count AS progress_reviewed_count,
             p.total_count AS progress_total_count, p.updated_at AS progress_updated_at
         FROM statement_imports si
@@ -213,29 +218,50 @@ async def move_applies_to_earlier(conn: asyncpg.Connection, *, import_id: UUID) 
     return int(status.split()[-1])
 
 
-async def delete_import_without_rows(pool: asyncpg.Pool, *, import_id: UUID) -> str | None:
-    """ab-297: removes an upload that added no transactions (a re-upload of
-    a statement already recorded). Returns its stored file's key, or None
-    when it has rows of its own and was kept. Callers check ownership.
+class ImportStillProcessing(Exception):
+    """The upload is still being read; it can't be deleted yet."""
 
-    ab-301: in the same transaction, its allocation batches first move to
-    the earlier upload (see move_applies_to_earlier)."""
+
+async def soft_delete_import(pool: asyncpg.Pool, *, import_id: UUID) -> int | None:
+    """ab-334: deletes an upload - a soft delete of the upload and of every
+    transaction it added, in one transaction. `transactions` and
+    `statement_imports` are views over live rows (beyondSavingdb 000041),
+    so the deleted records drop out of every query; nothing is removed.
+    Callers check ownership. Returns how many transactions were deleted,
+    or None when the upload is already gone. Raises ImportStillProcessing
+    while it is being read.
+
+    ab-301: its allocation batches first move to an earlier upload holding
+    their rows (see move_applies_to_earlier). A live transfer paired with
+    one of its rows is unpaired, so it can be paired again."""
     async with pool.acquire() as conn, conn.transaction():
-        removable = await conn.fetchval(
+        status = await conn.fetchval(
+            "SELECT status FROM statement_imports WHERE id = $1 FOR UPDATE",
+            import_id,
+        )
+        if status is None:
+            return None
+        if status == "pending":
+            raise ImportStillProcessing()
+        await move_applies_to_earlier(conn, import_id=import_id)
+        await conn.execute(
             """
-            SELECT si.id FROM statement_imports si
-            WHERE si.id = $1 AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.import_id = si.id)
-            FOR UPDATE
+            UPDATE transactions o SET transfer_group_id = NULL
+            WHERE o.transfer_group_id IN (SELECT transfer_group_id FROM transactions WHERE import_id = $1
+                                          AND transfer_group_id IS NOT NULL)
+              AND o.import_id IS DISTINCT FROM $1
             """,
             import_id,
         )
-        if removable is None:
-            return None
-        await move_applies_to_earlier(conn, import_id=import_id)
-        return await conn.fetchval(
-            "DELETE FROM statement_imports WHERE id = $1 RETURNING storage_key",
+        removed = await conn.execute(
+            "UPDATE transactions SET deleted_at = now() WHERE import_id = $1",
             import_id,
         )
+        await conn.execute(
+            "UPDATE statement_imports SET deleted_at = now() WHERE id = $1",
+            import_id,
+        )
+        return int(removed.split()[-1])
 
 
 async def set_import_allocated(pool: asyncpg.Pool, *, import_id: UUID, allocated: bool):

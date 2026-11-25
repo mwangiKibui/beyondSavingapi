@@ -47,7 +47,7 @@ async def insert_transactions(
             $4::date[], $5::numeric[], $6::text[], $7::text[],
             $8::text[], $9::text[], $10::numeric[], $11::text[]
         )
-        ON CONFLICT (account_id, dedupe_hash) DO NOTHING
+        ON CONFLICT (account_id, dedupe_hash) WHERE deleted_at IS NULL DO NOTHING
         RETURNING id
         """,
         account_id,

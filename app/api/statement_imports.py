@@ -31,7 +31,8 @@ from app.repositories.import_progress import delete_progress, get_progress, upse
 from app.repositories.statement_imports import (
     add_import_sub_ledgers,
     create_statement_import,
-    delete_import_without_rows,
+    ImportStillProcessing,
+    soft_delete_import,
     get_import_overlap,
     list_statement_imports,
     set_import_allocated,
@@ -126,6 +127,8 @@ class StatementImportListItem(_FileTyped):
     allocated_at: datetime | None = None
     # ab-297: rows this upload created (null until parsed); 0 = already uploaded.
     added_count: int | None = None
+    # ab-334: of those, rows with an allocation (null until parsed).
+    allocated_count: int | None = None
     # ab-265: an unfinished review's saved progress; null when none.
     progress: ListProgress | None = None
 
@@ -1064,7 +1067,7 @@ async def set_import_step_endpoint(
     return {"step": body.step}
 
 
-# --- ab-297: removing an upload that was already uploaded ------------------------
+# --- ab-297 / ab-334: deleting an upload ----------------------------------------
 
 
 @router.delete("/{import_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1073,34 +1076,29 @@ async def delete_statement_import_endpoint(
     user_id: UUID = Depends(get_current_user_id),
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> Response:
-    """Removes an upload that added no transactions - a statement already
-    recorded by an earlier upload - and its stored file. An upload with
-    rows of its own is never removed here (409), so no data is lost.
-    Its allocation batches move to the earlier upload first (ab-301), so
-    their Undo stays in that upload's review."""
+    """ab-334: deletes an upload and the transactions it added - a soft
+    delete, so they drop out of everything the user sees while the records
+    are kept (as is the stored file). Allocated rows go too. Refused while
+    the upload is still being read. ab-301: its allocation batches move to
+    an earlier upload holding their rows first."""
     _require_pool(pool)
     try:
         statement_import = await _owned_import(pool, import_id=import_id, user_id=user_id)
         if statement_import["status"] == "pending":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT, detail="This statement hasn't finished processing yet"
-            )
-        storage_key = await delete_import_without_rows(pool, import_id=import_id)
-        if storage_key is None:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="This upload added transactions, so it can't be removed",
-            )
+            raise ImportStillProcessing()
+        removed = await soft_delete_import(pool, import_id=import_id)
+        if removed is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Statement import not found")
+    except ImportStillProcessing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="This statement hasn't finished processing yet"
+        ) from None
     except HTTPException:
         raise
     except Exception:
-        logger.error("Unexpected error removing import %s, user %s", import_id, user_id, exc_info=True)
+        logger.error("Unexpected error deleting import %s, user %s", import_id, user_id, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
         ) from None
-    # The record is gone; a stored file left behind is only logged.
-    try:
-        get_storage_client().delete_object(Bucket=get_settings().storage_bucket, Key=storage_key)
-    except Exception:
-        logger.error("Removed import %s but not its stored file %s", import_id, storage_key, exc_info=True)
+    logger.info("Deleted import %s (%d transactions), user %s", import_id, removed, user_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

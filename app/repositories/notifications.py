@@ -153,6 +153,11 @@ async def generate_budget_alerts(
         )
 
 
+# ab-334: a deleted upload's notifications aren't shown (statement_imports
+# is a view over live uploads).
+_LIVE_UPLOAD = "(import_id IS NULL OR import_id IN (SELECT id FROM statement_imports))"
+
+
 async def list_notifications(
     pool: asyncpg.Pool,
     *,
@@ -176,13 +181,15 @@ async def list_notifications(
     uses.
     """
     unread_count = await pool.fetchval(
-        "SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND read_at IS NULL",
+        "SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND read_at IS NULL"
+        f" AND {_LIVE_UPLOAD}",
         user_id,
     )
 
-    base_query = """
+    base_query = f"""
         FROM notifications
         WHERE user_id = $1
+          AND {_LIVE_UPLOAD}
           AND ($2::text = 'all' OR ($2::text = 'unread') = (read_at IS NULL))
           AND ($3::date IS NULL OR created_at::date >= $3)
           AND ($4::date IS NULL OR created_at::date <= $4)

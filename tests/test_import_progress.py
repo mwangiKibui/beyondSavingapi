@@ -369,12 +369,12 @@ def delete_url():
     return f"/statement-imports/{IMPORT_ID}"
 
 
-def patch_delete(monkeypatch, *, imp, deleted="statements/x/statement.pdf"):
+def patch_delete(monkeypatch, *, imp, removed=0):
     patch_repo(monkeypatch, imp=imp)
-    remove = AsyncMock(return_value=deleted)
-    monkeypatch.setattr(f"{API}.delete_import_without_rows", remove)
-    storage = type("S", (), {"delete_object": lambda self, **kw: storage_calls.append(kw)})()
+    remove = AsyncMock(return_value=removed)
+    monkeypatch.setattr(f"{API}.soft_delete_import", remove)
     storage_calls: list[dict] = []
+    storage = type("S", (), {"delete_object": lambda self, **kw: storage_calls.append(kw)})()
     monkeypatch.setattr(f"{API}.get_storage_client", lambda: storage)
     return remove, storage_calls
 
@@ -384,24 +384,42 @@ def test_delete_requires_auth(client):
 
 
 def test_an_upload_that_added_nothing_can_be_removed(client, fake_user, fake_pool, monkeypatch):
-    remove, storage_calls = patch_delete(monkeypatch, imp=import_row())
+    remove, _ = patch_delete(monkeypatch, imp=import_row())
     assert client.delete(delete_url()).status_code == 204
     assert remove.await_args.kwargs == {"import_id": IMPORT_ID}
-    assert storage_calls and storage_calls[0]["Key"] == "statements/x/statement.pdf"
 
 
-def test_an_upload_with_its_own_rows_is_kept(client, fake_user, fake_pool, monkeypatch):
-    _, storage_calls = patch_delete(monkeypatch, imp=import_row(), deleted=None)
-    response = client.delete(delete_url())
-    assert response.status_code == 409
-    assert "added transactions" in response.json()["detail"]
+def test_ab334_an_upload_with_its_own_rows_is_soft_deleted_with_them(client, fake_user, fake_pool, monkeypatch):
+    remove, _ = patch_delete(monkeypatch, imp=import_row(), removed=1040)
+    assert client.delete(delete_url()).status_code == 204
+    remove.assert_awaited_once()
+
+
+def test_ab334_the_stored_file_is_kept(client, fake_user, fake_pool, monkeypatch):
+    _, storage_calls = patch_delete(monkeypatch, imp=import_row(), removed=3)
+    assert client.delete(delete_url()).status_code == 204
     assert storage_calls == []
 
 
 def test_an_upload_still_processing_is_kept(client, fake_user, fake_pool, monkeypatch):
     remove, _ = patch_delete(monkeypatch, imp=import_row("pending"))
-    assert client.delete(delete_url()).status_code == 409
+    response = client.delete(delete_url())
+    assert response.status_code == 409
+    assert "processing" in response.json()["detail"]
     remove.assert_not_awaited()
+
+
+def test_ab334_an_upload_that_starts_processing_meanwhile_is_kept(client, fake_user, fake_pool, monkeypatch):
+    from app.repositories.statement_imports import ImportStillProcessing
+
+    patch_repo(monkeypatch, imp=import_row())
+    monkeypatch.setattr(f"{API}.soft_delete_import", AsyncMock(side_effect=ImportStillProcessing()))
+    assert client.delete(delete_url()).status_code == 409
+
+
+def test_ab334_an_upload_deleted_meanwhile_is_not_found(client, fake_user, fake_pool, monkeypatch):
+    patch_delete(monkeypatch, imp=import_row(), removed=None)
+    assert client.delete(delete_url()).status_code == 404
 
 
 def test_someone_elses_upload_is_not_found(client, fake_user, fake_pool, monkeypatch):
@@ -410,21 +428,8 @@ def test_someone_elses_upload_is_not_found(client, fake_user, fake_pool, monkeyp
     remove.assert_not_awaited()
 
 
-def test_a_storage_failure_after_removing_still_succeeds(client, fake_user, fake_pool, monkeypatch, caplog):
-    patch_repo(monkeypatch, imp=import_row())
-    monkeypatch.setattr(f"{API}.delete_import_without_rows", AsyncMock(return_value="statements/x/s.pdf"))
-
-    class Broken:
-        def delete_object(self, **kw):
-            raise RuntimeError("storage down")
-
-    monkeypatch.setattr(f"{API}.get_storage_client", lambda: Broken())
-    assert client.delete(delete_url()).status_code == 204
-    assert any("storage down" in str(r.exc_info) for r in caplog.records if r.exc_info)
-
-
 def test_delete_failure_is_a_generic_500(client, fake_user, fake_pool, monkeypatch):
     patch_repo(monkeypatch, imp=import_row())
-    monkeypatch.setattr(f"{API}.delete_import_without_rows", AsyncMock(side_effect=RuntimeError("db down")))
+    monkeypatch.setattr(f"{API}.soft_delete_import", AsyncMock(side_effect=RuntimeError("db down")))
     response = client.delete(delete_url())
     assert response.status_code == 500 and "db down" not in response.text
