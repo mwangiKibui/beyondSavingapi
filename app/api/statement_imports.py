@@ -854,6 +854,8 @@ class ProgressResponse(BaseModel):
     # sub_ledger_id only when the upload was for exactly one sub-ledger.
     account_id: UUID | None = None
     sub_ledger_id: UUID | None = None
+    # ab-330: the uploaded file's name, shown when going Back to Upload.
+    file_name: str | None = None
 
 
 class RecordedBy(BaseModel):
@@ -894,6 +896,7 @@ def _destination(statement_import: dict) -> dict:
     return {
         "account_id": statement_import.get("account_id"),
         "sub_ledger_id": statement_import.get("sub_ledger_id"),
+        "file_name": statement_import.get("file_name"),
     }
 
 
