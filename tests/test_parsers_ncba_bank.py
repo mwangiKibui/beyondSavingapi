@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from app.parsers.base import StatementParseError
-from app.parsers.ncba_bank import _find_opening_balance, parse_ncba_bank_statement
+from tests.golden.ncba_bank import _find_opening_balance, parse_ncba_bank_statement
 from app.services.statement_files import decrypt_if_needed
 
 FIXTURE = Path(__file__).parent / "fixtures" / "statements" / "ncba_bank" / "e_statement_sample.pdf"

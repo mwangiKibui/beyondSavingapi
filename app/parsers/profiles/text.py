@@ -18,6 +18,26 @@ def dedouble_word(word: str) -> str:
     return word
 
 
+def _doubled(word: str) -> bool:
+    return len(word) >= 2 and len(word) % 2 == 0 and all(word[i] == word[i + 1] for i in range(0, len(word), 2))
+
+
+def dedouble_line(words: list[str]) -> list[str]:
+    """Faux-bold undone for a whole line - only when every word on it is
+    doubled, so a real "5500" or "Ammaan" in a description is never
+    shortened (ab-320)."""
+    if (
+        words
+        and all(_doubled(w) for w in words)
+        and any(len(w) >= 4 for w in words)
+        # A label is always there ("TToottaall"); a line of numbers alone
+        # ("5500") is real data.
+        and any(c.isalpha() for w in words for c in w)
+    ):
+        return [w[::2] for w in words]
+    return words
+
+
 def normalise(text: str) -> str:
     """Lower-case, faux-bold undone, whitespace collapsed, trailing ':' and
     '.' dropped - the form layout words are compared and stored in."""

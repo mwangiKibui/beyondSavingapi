@@ -257,3 +257,36 @@ def test_a_spreadsheet_heading_is_one_row():
     raw = with_table(column_bounds="cells", header_lines=2)
     raw["file_type"] = "xlsx"
     rejected(raw)
+
+
+# --- ab-320: Equity / NCBA options ------------------------------------------------
+
+
+def _bc(**changes):
+    raw = profile(amounts_from="balance_change", balance_check="totals")
+    raw["totals"] = {"source": "table_row", "label": "Total"}
+    raw.update(changes)
+    return raw
+
+
+def test_amounts_from_the_balance_change_need_the_totals_check():
+    assert validate_profile(_bc()).amounts_from == "balance_change"
+    rejected(_bc(balance_check="running"))
+
+
+def test_labelled_lines_need_both_labels():
+    raw = _bc(totals={"source": "labelled_lines", "label": "Payments In"})
+    rejected(raw)
+    raw["totals"]["out_label"] = "Payments Out"
+    assert validate_profile(raw).totals.out_label == "Payments Out"
+
+
+def test_opening_from_totals_needs_a_totals_row_and_labelled_line_a_label():
+    assert validate_profile(_bc(opening_balance={"source": "from_totals"})).opening_balance.source == "from_totals"
+    rejected(_bc(opening_balance={"source": "from_totals"}, totals={"source": "labelled_lines", "label": "In", "out_label": "Out"}))
+    rejected(_bc(opening_balance={"source": "labelled_line"}))
+
+
+def test_currency_label_is_layout_text():
+    assert validate_profile(profile(currency_label="Currency")).currency_label == "Currency"
+    rejected(profile(currency_label="Currency KES 1"))

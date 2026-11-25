@@ -348,3 +348,88 @@ def test_digit_only_description_lines_can_be_dropped():
     assert kept[1]["description"] == "Paid to Store B 1003642748"
     dropped = read_transactions(pdf, profile(table={"drop_digit_only_lines": True}), default_currency="KES")
     assert dropped[1]["description"] == "Paid to Store B"
+
+
+# --- ab-320: Equity / NCBA options -----------------------------------------------
+
+
+def _no_amounts(rows):
+    """Amount cells blank - only the balances say what happened."""
+    return [[r[0], r[1], "", "", r[4]] for r in rows]
+
+
+def _labels(**values):
+    return [("Account Name", "ALEX SAMPLE"), *values.items()]
+
+
+def _balance_change(**changes):
+    base = {
+        "amounts_from": "balance_change",
+        "balance_check": "totals",
+        "opening_balance": {"source": "labelled_line", "label": "Opening Balance"},
+        "totals": {"source": "labelled_lines", "label": "Payments In", "out_label": "Payments Out"},
+    }
+    return profile(**{**base, **changes})
+
+
+def test_amounts_come_from_the_balance_change_proved_by_labelled_totals():
+    rows = _no_amounts(sample_rows(4))  # 1000 -> 1100 -> 990 -> 1110 -> 980
+    layout = Layout(labels=_labels(**{"Opening Balance": "1,000.00", "Payments In": "220.00", "Payments Out": "240.00"}))
+    result = read_statement(build(rows, layout), _balance_change(), default_currency="KES")
+    assert result.check.passed and result.opening_balance == 1000.0 and result.totals == (220.0, 240.0)
+    got = [(t["direction"], t["amount"]) for t in result.transactions]
+    assert got == [("in", 100.0), ("out", 110.0), ("in", 120.0), ("out", 130.0)]
+
+    wrong = Layout(labels=_labels(**{"Opening Balance": "1,000.00", "Payments In": "220.00", "Payments Out": "250.00"}))
+    assert read_statement(build(rows, wrong), _balance_change(), default_currency="KES").check.passed is False
+
+
+def test_without_its_opening_balance_a_balance_change_read_fails_its_check():
+    rows = _no_amounts(sample_rows(2))
+    layout = Layout(labels=_labels(**{"Payments In": "100.00", "Payments Out": "110.00"}))
+    result = read_statement(build(rows, layout), _balance_change(), default_currency="KES")
+    assert result.check.passed is False and result.transactions == []
+
+
+def test_rows_without_a_balance_are_skipped_when_amounts_come_from_it():
+    rows = _no_amounts(sample_rows(3))
+    rows.insert(1, ["02/10/2026", "Note with no balance", "", "", ""])
+    layout = Layout(labels=_labels(**{"Opening Balance": "1,000.00", "Payments In": "220.00", "Payments Out": "110.00"}))
+    result = read_statement(build(rows, layout), _balance_change(), default_currency="KES")
+    assert len(result.transactions) == 3 and result.check.passed
+
+
+def test_the_opening_balance_can_come_from_the_totals_row():
+    rows = _no_amounts(sample_rows(4))
+    layout = Layout(post_rows=[["", "Total", "220.00", "240.00", "980.00"]])
+    p = _balance_change(opening_balance={"source": "from_totals"}, totals={"source": "table_row", "label": "Total"})
+    result = read_statement(build(rows, layout), p, default_currency="KES")
+    assert result.opening_balance == 1000.0 and result.check.passed
+
+
+def test_the_currency_is_read_after_its_label():
+    layout = Layout(labels=_labels(Currency="USD"))
+    rows = read_transactions(build(sample_rows(2), layout), profile(currency_label="Currency"), default_currency="KES")
+    assert {r["currency"] for r in rows} == {"USD"}
+    fallback = read_transactions(build(sample_rows(2)), profile(currency_label="Currency"), default_currency="KES")
+    assert {r["currency"] for r in fallback} == {"KES"}
+
+
+def test_nearest_continuation_gives_a_line_above_the_first_row_to_it():
+    layout = Layout(pre_rows=[["", "Detail printed above", "", "", ""]])
+    nearest = read_transactions(build(sample_rows(2), layout), profile(table={"continuation": "nearest"}), default_currency="KES")
+    assert nearest[0]["description"] == "Detail printed above Payment from Shop A"
+    below = read_transactions(build(sample_rows(2), layout), profile(), default_currency="KES")
+    assert below[0]["description"] == "Payment from Shop A"
+
+
+def test_nearest_continuation_on_a_tie_goes_to_the_earlier_row():
+    pdf = build(sample_rows(3), continuation={0: "midway line"})
+    rows = read_transactions(pdf, profile(table={"continuation": "nearest"}), default_currency="KES")
+    assert rows[0]["description"].endswith("midway line") and "midway" not in rows[1]["description"]
+
+
+def test_the_description_amount_dedupe_key():
+    rows = read_transactions(build(sample_rows(2)), profile(dedupe="description_amount"), default_currency="KES")
+    expected = hashlib.sha256(f"{rows[0]['description']}|{rows[0]['amount']:.2f}".encode()).hexdigest()
+    assert rows[0]["dedupe_hash"] == expected
