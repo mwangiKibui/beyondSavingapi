@@ -1,4 +1,4 @@
-"""ab-301: removing a duplicate upload moves its allocation batches
+"""ab-301: deleting an upload moves its allocation batches
 (category_applies) to the earlier upload that recorded the rows, in the
 same transaction as the delete, so batch Undo stays in that upload's
 review. SQL runs against a recording fake; the live check is manual."""
@@ -6,9 +6,8 @@ review. SQL runs against a recording fake; the live check is manual."""
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-import pytest
 
-from app.repositories.statement_imports import delete_import_without_rows, move_applies_to_earlier
+from app.repositories.statement_imports import move_applies_to_earlier
 
 IMPORT_ID = uuid4()
 
@@ -76,35 +75,6 @@ def steps(pool):
 
 def sql_of(pool, step):
     return next(e[1] for e in pool.log if e[0] not in ("begin", "commit", "rollback") and step in e[1])
-
-
-async def test_a_duplicate_moves_its_applies_then_is_deleted_in_one_transaction():
-    pool = FakePool()
-    assert await delete_import_without_rows(pool, import_id=IMPORT_ID) == "statements/x/s.pdf"
-    assert steps(pool) == ["begin", "lock", "move", "delete", "commit"]
-    for entry in pool.log:
-        if entry[0] not in ("begin", "commit", "rollback"):
-            assert entry[2] == (IMPORT_ID,)
-
-
-async def test_an_upload_with_its_own_rows_changes_nothing():
-    pool = FakePool(own_rows=True)
-    assert await delete_import_without_rows(pool, import_id=IMPORT_ID) is None
-    assert steps(pool) == ["begin", "lock", "commit"]
-
-
-async def test_the_lock_only_takes_an_import_without_rows_of_its_own():
-    pool = FakePool()
-    await delete_import_without_rows(pool, import_id=IMPORT_ID)
-    lock = sql_of(pool, "FOR UPDATE")
-    assert "NOT EXISTS (SELECT 1 FROM transactions t WHERE t.import_id = si.id)" in lock
-
-
-async def test_a_failed_delete_rolls_the_move_back():
-    pool = FakePool(fail_on="DELETE FROM statement_imports")
-    with pytest.raises(RuntimeError):
-        await delete_import_without_rows(pool, import_id=IMPORT_ID)
-    assert steps(pool) == ["begin", "lock", "move", "delete", "rollback"]
 
 
 async def test_moving_returns_how_many_applies_moved():

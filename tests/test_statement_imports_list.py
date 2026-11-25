@@ -62,7 +62,7 @@ def test_list_statement_imports_defaults(client, fake_user, fake_pool, monkeypat
 
     assert response.status_code == 200
     body = response.json()
-    assert body == {"items": [{**SAMPLE_ITEM, "file_type": "pdf", "reviewed_at": None, "allocated_at": None, "added_count": None,
+    assert body == {"items": [{**SAMPLE_ITEM, "file_type": "pdf", "reviewed_at": None, "allocated_at": None, "added_count": None, "allocated_count": None,
                                "progress": None}],
                     "total": 1, "page": 1,
                     "page_size": 10}

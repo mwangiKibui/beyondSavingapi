@@ -14,7 +14,6 @@ DO_INFERENCE_KEY):  python scripts/eval_ai_layouts.py [--runs 2]
 
 import argparse
 import asyncio
-import json
 import sys
 import time
 from pathlib import Path
