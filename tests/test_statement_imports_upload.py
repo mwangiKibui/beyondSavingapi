@@ -382,36 +382,25 @@ def test_upload_statement_logs_and_returns_generic_500_on_unexpected_error(
     assert error_records[0].exc_info is not None
 
 
-def test_upload_statement_refused_for_a_provider_without_uploads(client, fake_user, fake_pool, monkeypatch):
-    # ab-294: e.g. a money market fund - the app has no reader for it yet.
+def test_every_provider_takes_uploads(client, fake_user, fake_pool, monkeypatch):
+    # ab-315: no reader and no recognised layout is no longer a refusal -
+    # the upload goes to the mapping wizard instead.
     monkeypatch.setattr(
         "app.api.statement_imports.get_account",
-        AsyncMock(return_value={**FAKE_ACCOUNT, "statements_uploadable": False}),
-    )
-    mock_create = AsyncMock()
-    monkeypatch.setattr("app.api.statement_imports.create_statement_import", mock_create)
-
-    response = _upload(client)
-
-    assert response.status_code == 422
-    assert response.json()["detail"] == "Statements can't be uploaded for this provider yet"
-    mock_create.assert_not_called()
-
-
-
-def test_upload_allowed_when_an_active_profile_recognises_the_layout(client, fake_user, fake_pool, monkeypatch):
-    # ab-312: a stored profile reads the provider's statements even though
-    # no bespoke parser marked it uploadable.
-    monkeypatch.setattr(
-        "app.api.statement_imports.get_account",
-        AsyncMock(return_value={**FAKE_ACCOUNT, "statements_uploadable": False, "recognised_layout": True}),
+        AsyncMock(return_value={**FAKE_ACCOUNT, "statements_uploadable": False, "recognised_layout": False}),
     )
     mock_create = AsyncMock(side_effect=RuntimeError("stop after the gate"))
     monkeypatch.setattr("app.api.statement_imports.create_statement_import", mock_create)
+    monkeypatch.setattr("app.api.statement_imports.get_storage_client", lambda: MagicMock())
+    monkeypatch.setattr("app.api.statement_imports.check_password", lambda **k: None)
+    monkeypatch.setattr("app.api.statement_imports.decrypt_if_needed", lambda **k: k["content"])
+    monkeypatch.setattr("app.api.statement_imports.check_file_contents", lambda *a: None)
+    monkeypatch.setattr("app.api.statement_imports.enforce_limit", AsyncMock())
+    monkeypatch.setattr("app.api.statement_imports.list_sub_ledgers", AsyncMock(return_value=[]))
 
-    response = _upload(client)
+    _upload(client)
 
-    assert response.json().get("detail") != "Statements can't be uploaded for this provider yet"
+    mock_create.assert_awaited_once()
 
 
 # --- ab-309: statement_imports_per_day ---------------------------------------

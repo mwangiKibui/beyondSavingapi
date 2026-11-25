@@ -60,7 +60,7 @@ async def test_process_job_logs_and_returns_on_malformed_import_id(fake_pool, mo
     assert any("malformed import id" in r.message for r in caplog.records)
 
 
-async def test_process_job_marks_failed_when_no_parser_registered(fake_pool, monkeypatch, caplog):
+async def test_process_job_fails_a_file_without_text(fake_pool, monkeypatch, caplog):
     import_id = uuid4()
     monkeypatch.setattr(
         "app.worker.get_import_for_processing",
@@ -78,16 +78,14 @@ async def test_process_job_marks_failed_when_no_parser_registered(fake_pool, mon
     monkeypatch.setattr("app.worker.mark_import_failed", mock_mark_failed)
     monkeypatch.setattr("app.worker.PARSERS", {})
     mock_storage_client = MagicMock()
+    mock_storage_client.get_object.return_value = {"Body": MagicMock(read=MagicMock(return_value=b"not a pdf"))}
     monkeypatch.setattr("app.worker.get_storage_client", lambda: mock_storage_client)
 
     with caplog.at_level(logging.INFO):
         await process_job(fake_pool, str(import_id))
 
-    mock_mark_failed.assert_called_once_with(
-        fake_pool, import_id=import_id, error_detail="No parser available yet for M-Pesa"
-    )
-    mock_storage_client.get_object.assert_not_called()
-    assert any("No parser registered" in r.message for r in caplog.records)
+    assert "couldn't find any text" in mock_mark_failed.call_args.kwargs["error_detail"]
+    assert any("not read" in r.message for r in caplog.records)
 
 
 async def test_process_job_fetches_content_and_calls_a_registered_parser(fake_pool, monkeypatch):

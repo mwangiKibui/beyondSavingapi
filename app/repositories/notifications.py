@@ -191,7 +191,7 @@ async def list_notifications(
 
     rows = await pool.fetch(
         f"""
-        SELECT id, type, state, title, body, budget_id, plan_id, read_at, created_at
+        SELECT id, type, state, title, body, budget_id, plan_id, import_id, read_at, created_at
         {base_query}
         ORDER BY created_at DESC
         LIMIT $5 OFFSET $6
@@ -224,9 +224,42 @@ async def mark_notification_read(
         UPDATE notifications
         SET read_at = COALESCE(read_at, now())
         WHERE id = $1 AND user_id = $2
-        RETURNING id, type, state, title, body, budget_id, plan_id, read_at, created_at
+        RETURNING id, type, state, title, body, budget_id, plan_id, import_id, read_at, created_at
         """,
         notification_id,
         user_id,
     )
     return dict(row) if row else None
+
+
+# --- ab-315: statement layouts ----------------------------------------------------
+
+
+async def notify_admins_layout_waiting(pool, *, import_id: UUID, provider: str) -> int:
+    """One in-app notification per admin: an upload is waiting for a layout.
+    Says only the provider - never the uploader or anything from the file."""
+    result = await pool.execute(
+        """
+        INSERT INTO notifications (user_id, type, title, body, import_id)
+        SELECT id, 'layout_waiting', 'A statement is waiting for a layout',
+               $2 || ' statement needs its layout set up.', $1
+        FROM users WHERE role IN ('admin', 'super_admin')
+        """,
+        import_id,
+        provider,
+    )
+    return int(result.split()[-1])
+
+
+async def notify_statement_ready(pool, *, user_id: UUID, import_id: UUID, provider: str) -> None:
+    """The uploader's waiting statement has now been read."""
+    await pool.execute(
+        """
+        INSERT INTO notifications (user_id, type, title, body, import_id)
+        VALUES ($1, 'statement_ready', 'Your statement is ready',
+                'Your ' || $2 || ' statement has been read and is ready to allocate.', $3)
+        """,
+        user_id,
+        provider,
+        import_id,
+    )

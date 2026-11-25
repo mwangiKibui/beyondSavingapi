@@ -75,7 +75,7 @@ router = APIRouter(prefix="/statement-imports", tags=["statement-imports"])
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10MB
 
 ALLOWED_PAGE_SIZES = (5, 10, 20, 30)
-ImportStatus = Literal["pending", "parsed", "failed"]
+ImportStatus = Literal["pending", "parsed", "failed", "needs_mapping", "awaiting_support"]
 SortDir = Literal["asc", "desc"]
 
 
@@ -354,14 +354,8 @@ async def upload_statement_endpoint(
         account = await get_account(pool, account_id=account_id, user_id=user_id)
         if account is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
-        # ab-294: the provider's institutions row says whether the app can
-        # read its statements (e.g. no money market fund reader yet);
-        # ab-312: or an active statement profile recognises its layout.
-        if not (account.get("statements_uploadable") or account.get("recognised_layout")):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Statements can't be uploaded for this provider yet",
-            )
+        # ab-315: every institution takes uploads - a layout no stored
+        # profile reads goes to the mapping wizard instead of being refused.
 
         account_sub_ledgers = await list_sub_ledgers(pool, account_id=account_id)
         if account_sub_ledgers:
@@ -837,7 +831,9 @@ async def confirm_statement_import_endpoint(
 # is deleted on confirm (reviewed_at records "finished") or on discard.
 
 # ab-296: Upload, Processing, Allocation, Review, Finish import ("done").
-ProgressStep = Literal["processing", "allocation", "review", "failed", "done"]
+# ab-315: "layout" while the uploader maps an unknown layout, then
+# "awaiting_support" if they asked for help with it.
+ProgressStep = Literal["processing", "layout", "awaiting_support", "allocation", "review", "failed", "done"]
 
 
 class ProgressResponse(BaseModel):
@@ -874,6 +870,10 @@ def _derived_step(statement_import: dict) -> str:
         return "processing"
     if statement_import["status"] == "failed":
         return "failed"
+    if statement_import["status"] == "needs_mapping":
+        return "layout"
+    if statement_import["status"] == "awaiting_support":
+        return "awaiting_support"
     if statement_import.get("reviewed_at"):
         return "done"
     return "review" if statement_import.get("allocated_at") else "allocation"
