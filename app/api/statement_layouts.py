@@ -56,6 +56,8 @@ class LayoutStartResponse(BaseModel):
     provider: str
     # Our first guess at the layout (a profile), or None if we found no table.
     guess: dict | None
+    # ab-325: one sample cell from the statement per guessed column.
+    examples: list[str] = []
     # PDF: page 1's lines with word positions.
     page: PageSnapshot | None = None
     page_count: int | None = None

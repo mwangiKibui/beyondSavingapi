@@ -35,6 +35,8 @@ import hmac
 import re
 from dataclasses import dataclass, replace
 
+from app.parsers.base import UNLISTED_CHARGE
+
 MPESA = "M-Pesa"
 NCBA = "NCBA Bank"
 MENTOR = "Mentor Sacco"
@@ -320,6 +322,8 @@ def _equity(text: str, secret: str) -> RowKey:
 
 # --- everything else ------------------------------------------------------
 
+_UNLISTED_CHARGE = normalize_text(UNLISTED_CHARGE)
+
 
 def _fallback(text: str) -> RowKey:
     words = _words_only(text)
@@ -334,6 +338,10 @@ def extract_key(*, provider: str, description: str | None, direction: str, secre
     text = normalize_text(description)
     if not text:
         return RowKey(kind=None, value=None)
+    if text == _UNLISTED_CHARGE:
+        # ab-325: a fee the reader added for a statement that takes it off
+        # the balance without a row of its own.
+        return replace(_fallback(text), is_charge=True)
     if provider == MPESA:
         key = _mpesa(text, secret)
         # Same key either way: a purchase is categorised by what it

@@ -202,6 +202,11 @@ class StatementProfile(_Strict):
     # Read the currency code (3 capital letters) after this label on the
     # first page (Equity's "Currency KES"); falls back to `currency`.
     currency_label: LayoutText | None = None
+    # ab-325: fees come off the balance without a row of their own (Airtel
+    # Money). A money-out row whose balance falls by more than its amount
+    # gets a "Transaction charge" row for the difference - accepted only
+    # when the statement's totals include those charges.
+    unlisted_charges: bool = False
 
     @model_validator(mode="after")
     def _readable_and_checkable(self):
@@ -247,6 +252,13 @@ class StatementProfile(_Strict):
             raise ValueError("a profile needs a balance column or a totals row to check against")
         if self.balance_check == "totals" and self.totals.source == "none":
             raise ValueError("a totals check needs a totals row to check against")
+        if self.unlisted_charges and (
+            count("balance") == 0
+            or self.totals.source == "none"
+            or self.amounts_from != "columns"
+            or self.balance_check != "running"
+        ):
+            raise ValueError("unlisted charges need a balance column, the running check and the statement's totals")
         return self
 
 

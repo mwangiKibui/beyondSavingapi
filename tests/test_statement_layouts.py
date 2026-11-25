@@ -100,7 +100,7 @@ def test_a_failing_mapping_shows_rows_around_the_first_failure():
 def test_a_mapping_that_doesnt_fit_says_why():
     wrong = {**PROFILE, "table": {**PROFILE["table"], "columns": [{"role": "date", "header": "Posted"}, *PROFILE["table"]["columns"][1:]]}}
     result = check_layout(GOOD, validate_profile(wrong), currency="KES")
-    assert not result.passed and result.row_count == 0 and "headings" in result.message
+    assert not result.passed and result.row_count == 0 and "\u201cPosted\u201d" in result.message
 
 
 def test_one_row_isnt_enough():
@@ -143,6 +143,7 @@ def test_the_wizard_starts_with_a_guess_and_page_one(client, api):
     body = response.json()
     assert body["file_type"] == "pdf" and body["provider"] == "Sample Bank"
     assert [c["role"] for c in body["guess"]["table"]["columns"]] == ["date", "description", "money_in", "money_out", "balance"]
+    assert len(body["examples"]) == 5 and body["examples"][1].startswith("Payment from Shop")
     assert body["page"]["lines"] and body["page_count"] == 1 and body["rows"] is None
 
 
