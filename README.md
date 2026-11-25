@@ -96,6 +96,16 @@ App settings (env vars on `app` and `worker`): `STORAGE_ENDPOINT`,
   parsed. Remove it with `docker volume rm beyondsavingapi_minio_data`
   when you're ready.
 
+## AI layout proposer (ab-314)
+
+When no stored layout reads an upload and our own guess doesn't pass the balance check, the worker asks a DigitalOcean-hosted model for the layout before the upload reaches Columns.
+
+- **What's sent:** page 1, masked (`app/parsers/profiles/masking.py`). Table headings and common statement words stay as they are. Every other value is reduced to its shape (`9` digit, `X`/`x` letter). No names, numbers or amounts leave the server.
+- **What comes back:** column roles, the date format and balance labels, never rows. Our reader extracts every row, and the balance check decides whether the proposal is used. A passing one shows on Columns as pending suggestions.
+- **Model:** `openai-gpt-oss-120b`. DigitalOcean hosts it itself: it doesn't store inputs or outputs, and doesn't train on them. See `docs/dynamic-statement-import/model-test.md` for why it was chosen.
+- **Setup:** create a model access key in the DigitalOcean control panel (Inference → Model Access Keys), limited to that model. Model access keys can only be made there, not through the API or Terraform. Put it in `.env` as `DO_INFERENCE_KEY=...` and restart the worker. With no key, the AI step is off and uploads go straight to Columns.
+- **Limits and usage:** `ai_layout_proposals_per_day` (plan limit, default 5) caps model calls per user. Every call is recorded in `ai_layout_proposals`, with its outcome and token counts.
+
 ## Shared payee list cache
 
 Each process builds the shared payee list (`merchant_directory`,
