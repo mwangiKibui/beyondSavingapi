@@ -107,6 +107,18 @@ When no stored layout reads an upload and our own guess doesn't pass the balance
 - **Model:** `openai-gpt-oss-120b`. DigitalOcean hosts it itself: it doesn't store inputs or outputs, and doesn't train on them. See `docs/dynamic-statement-import/model-test.md` for why it was chosen.
 - **Setup:** create a model access key in the DigitalOcean control panel (Inference → Model Access Keys), limited to that model. Model access keys can only be made there, not through the API or Terraform. Put it in `.env` as `DO_INFERENCE_KEY=...` and restart the worker. With no key, the AI step is off and uploads go straight to Columns.
 - **Limits and usage:** `ai_layout_proposals_per_day` (plan limit, default 5) caps model calls per user. Every call is recorded in `ai_layout_proposals`, with its outcome and token counts.
+- **Footers (ab-337):** the masked page keeps footer words ("Printed", "Generated"…) and the bottom lines of a long page, and the model may name `page_furniture`. A name becomes a skip rule only when it really starts a line at the top or bottom of a page.
+
+## AI category suggestions (ab-336)
+
+Business payees that nothing else recognises get a category from their name, shown in the review as "AI suggested" (`app/services/ai_categories.py`).
+
+- **What's sent:** business names only (`ai_name`: a business key, never a person, reference, bare number or row handled at import) and category names. Never amounts, dates, balances, numbers, people or user ids.
+- **Step 1, shared:** names go in batches of 25 with the default category names; the model answers a default, a new name, or "unknown". Answers are cached for everyone in `merchant_ai_answers` ("unknown" is asked again after 90 days).
+- **Step 2, per user:** the answer is mapped onto the user's own categories, first by name and synonyms (`local_match`), else by a small call with only category names, cached in `user_category_ai_map` per category list.
+- **When:** the worker queues a lookup after each import (`ai_category_jobs`), and the review queues one for an older upload with unanswered names. The review only reads the caches and shows `ai_pending` while a lookup runs. Any failure means no AI suggestion; nothing waits on it.
+- **Order:** the last source. For a business payee it also replaces a description keyword's guess it disagrees with, never the user's own choices, other users' picks, the shared list or own-account transfers.
+- **Model:** `DO_CATEGORY_MODEL`, default `glm-5.3-flash` (chosen in the ab-256 spike: `docs/research/do-inference-model-choice.md`). The same `DO_INFERENCE_KEY` must allow it as well as the layout model.
 
 ## Shared payee list cache
 

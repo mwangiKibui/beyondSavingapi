@@ -58,7 +58,7 @@ class GroupSuggestion(BaseModel):
     category_name: str
     is_new_category: bool
     # own_account (ab-285): money in sent by the user themselves.
-    source: Literal["your_rule", "this_statement", "others", "directory", "keyword", "own_account"]
+    source: Literal["your_rule", "this_statement", "others", "directory", "keyword", "own_account", "ai"]
     merchant_name: str | None = None
     # ab-290: the description keyword behind it ("salary"), if any.
     keyword: str | None = None

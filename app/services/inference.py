@@ -32,20 +32,28 @@ def inference_enabled() -> bool:
     return bool(get_settings().do_inference_key.strip())
 
 
-async def complete(prompt: str, *, max_tokens: int = 2000, client: httpx.AsyncClient | None = None) -> InferenceReply:
-    """One user message in, the reply's text out."""
+async def complete(
+    prompt: str,
+    *,
+    max_tokens: int = 2000,
+    client: httpx.AsyncClient | None = None,
+    model: str | None = None,
+    timeout: float | None = None,
+) -> InferenceReply:
+    """One user message in, the reply's text out. model: another model the
+    key allows (ab-336); the layout model by default."""
     settings = get_settings()
     key = settings.do_inference_key.strip()
     if not key:
         raise InferenceError("No inference key configured")
-    model = settings.do_inference_model
+    model = model or settings.do_inference_model
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_completion_tokens": max_tokens,
     }
     owned = client is None
-    client = client or httpx.AsyncClient(timeout=settings.do_inference_timeout_seconds)
+    client = client or httpx.AsyncClient(timeout=timeout or settings.do_inference_timeout_seconds)
     try:
         response = await client.post(
             f"{settings.do_inference_url.rstrip('/')}/chat/completions",

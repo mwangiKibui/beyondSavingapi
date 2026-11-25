@@ -579,3 +579,24 @@ async def test_a_handling_failure_never_fails_the_import(fake_pool, monkeypatch,
 
     mark_failed.assert_not_called()
     assert "will retry when its review opens" in caplog.text
+
+
+async def test_ab336_ai_lookups_run_beside_parse_jobs(fake_pool, monkeypatch):
+    import asyncio
+
+    mock_redis = MagicMock()
+    iid = uuid4()
+    mock_redis.brpop = AsyncMock(
+        side_effect=[("ai_category_jobs", str(iid)), ("parse_jobs", "job-1"), RuntimeError("stop the loop")]
+    )
+    monkeypatch.setattr("app.worker.get_redis", lambda: mock_redis)
+    monkeypatch.setattr("app.worker.process_job", AsyncMock())
+    lookup = AsyncMock()
+    monkeypatch.setattr("app.worker.run_lookup", lookup)
+
+    with pytest.raises(RuntimeError, match="stop the loop"):
+        await run_worker(fake_pool)
+    await asyncio.sleep(0)
+
+    assert mock_redis.brpop.await_args_list[0].args[0] == ["parse_jobs", "ai_category_jobs"]
+    lookup.assert_awaited_once_with(fake_pool, iid)

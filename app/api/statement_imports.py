@@ -40,6 +40,7 @@ from app.repositories.statement_imports import (
 )
 from app.repositories.notifications import generate_budget_alerts
 from app.repositories.sub_ledgers import list_sub_ledgers
+from app.services.ai_categories import load_ai_context, lookup_pending, queue_lookup
 from app.services.allocations import AllocationRejected, alert_groups
 from app.repositories.transfer_reasons import get_user_transfer_reasons
 from app.services.description_keywords import load_keyword_context
@@ -183,7 +184,7 @@ class PreviewSuggestion(BaseModel):
     # others = what most users chose (3+ voted, a clear leader); overrides
     # directory (the starter/admin list).
     # own_account (ab-285): money in sent by the user themselves.
-    source: Literal["your_rule", "this_statement", "others", "directory", "keyword", "own_account"]
+    source: Literal["your_rule", "this_statement", "others", "directory", "keyword", "own_account", "ai"]
     merchant_name: str | None = None
     # ab-290: the description keyword behind it ("salary"), if any.
     keyword: str | None = None
@@ -489,6 +490,10 @@ async def _load_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id: UUID) -
         keywords = await load_keyword_context(pool, user_id=user_id, rows=rows)
         reasons = await get_user_transfer_reasons(pool, user_id=user_id)
         owner = await get_owner(pool, user_id=user_id)
+        ai = await load_ai_context(pool, user_id=user_id, rows=rows, keys=keys, categories=categories)
+        # ab-336: an older import (or one whose lookup failed) is looked up once.
+        if ai.missing:
+            await queue_lookup(import_id)
     except HTTPException:
         raise
     except Exception:
@@ -502,7 +507,7 @@ async def _load_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id: UUID) -
 
     preview_rows = build_preview_rows(
         rows, keys=keys, rules=rules, directory=directory, categories=categories, shared_votes=shared_votes,
-        keywords=keywords, reasons=reasons, owner=owner,
+        keywords=keywords, reasons=reasons, owner=owner, ai=ai,
     )
     return {
         "import": statement_import,
@@ -587,6 +592,9 @@ class ReviewGroupsResponse(BaseModel):
     # Groups with rows to accept, whatever the filters - "Accept all N
     # suggestions" (ab-283; ab-335 adds rows handled at import).
     suggested: int
+    # ab-336: an AI lookup of this upload's business payees is queued or
+    # running - the review says so and fetches again shortly.
+    ai_pending: bool = False
 
 
 @router.get("/{import_id}/groups", response_model=ReviewGroupsResponse)
@@ -633,6 +641,7 @@ async def review_groups_endpoint(
         "counts": {t: sum(1 for g in all_groups if in_tab(g, t)) for t in REVIEW_TABS},
         "row_counts": {t: len(rows) for t, rows in by_tab.items()},
         "card_counts": card_counts(all_groups),
+        "ai_pending": await lookup_pending(import_id),
         "suggested": sum(1 for g in all_groups if "suggested" in group_cards(g)),
     }
 
