@@ -48,8 +48,16 @@ _ROLE_WORDS = [
         {"details", "description", "narration", "narrative", "particulars", "remarks", "memo", "transaction details",
          "transaction type and details", "transaction type"},
     ),
-    ("money_out", {"debit", "debits", "withdrawn", "withdrawal", "withdrawals", "paid out", "money out", "out", "dr"}),
-    ("money_in", {"credit", "credits", "paid in", "deposit", "deposits", "money in", "in", "cr"}),
+    (
+        "money_out",
+        {"debit", "debits", "withdrawn", "withdrawal", "withdrawals", "paid out", "money out", "out", "dr", "sent",
+         "spent", "outflow", "payments out"},
+    ),
+    (
+        "money_in",
+        {"credit", "credits", "paid in", "deposit", "deposits", "money in", "in", "cr", "received", "inflow",
+         "payments in"},
+    ),
     ("signed_amount", {"amount", "transaction amount"}),
 ]
 _SINGLE = {"date", "description", "balance", "reference", "status", "signed_amount", "money_in", "money_out"}
@@ -128,11 +136,15 @@ def _decimal_comma(samples: list[str]) -> bool:
                and "." in s.rsplit(",", 1)[0] for s in samples)
 
 
-def _finish(profile: dict) -> dict | None:
+def _finish(profile: dict) -> dict:
+    """The guess as a full profile when it already is one; otherwise the
+    draft as it stands (e.g. no amount column recognised) - the wizard
+    still gets the columns and fixes the roles, and nothing is stored
+    until a mapping passes the check."""
     try:
         return validate_profile(profile).model_dump(mode="json")
     except InvalidStatementProfile:
-        return None
+        return profile
 
 
 # --- PDF ----------------------------------------------------------------------

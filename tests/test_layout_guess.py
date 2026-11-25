@@ -97,3 +97,18 @@ def test_spreadsheets_are_guessed_from_their_heading_row(kind):
     assert [c["header"] for c in guess["table"]["columns"]] == HEADER
     assert start["header_row"] == len(PREAMBLE) and start["rows"][len(PREAMBLE)] == HEADER
     assert _passes(content, guess)
+
+
+def test_unfamiliar_headings_still_give_the_columns():
+    layout = Layout(headers=["Txn Date", "Narrative", "Takings", "Outgoings", "Running Balance"])
+    guess = layout_start(build(sample_rows(4), layout), "pdf")["guess"]
+    assert [c["role"] for c in guess["table"]["columns"]] == ["date", "description", "ignore", "ignore", "balance"]
+    assert all("x0" in c and "x1" in c for c in guess["table"]["columns"])
+
+
+def test_received_and_sent_are_amounts():
+    layout = Layout(headers=["Txn Date", "Narrative", "Received", "Sent", "Running Balance"])
+    pdf = build(sample_rows(6), layout)
+    guess = layout_start(pdf, "pdf")["guess"]
+    assert [c["role"] for c in guess["table"]["columns"]] == ["date", "description", "money_in", "money_out", "balance"]
+    assert _passes(pdf, guess)
