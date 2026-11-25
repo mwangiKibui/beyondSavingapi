@@ -33,6 +33,8 @@ class NotificationItem(BaseModel):
     body: str | None
     budget_id: UUID | None
     plan_id: UUID | None
+    # ab-315: the upload a statement notification is about.
+    import_id: UUID | None = None
     read_at: datetime | None
     created_at: datetime
 

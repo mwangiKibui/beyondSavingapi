@@ -18,8 +18,10 @@ from app.repositories.statement_imports import (
     mark_import_failed,
     mark_import_parsed,
     set_import_fingerprint,
+    set_import_status,
     set_sub_ledger_opening_balances,
 )
+from app.repositories.notifications import notify_statement_ready
 from app.repositories.statement_profiles import list_active_profiles, record_check_passed
 from app.repositories.transactions import insert_transactions
 from app.services.import_handling import handle_import_by_id
@@ -182,6 +184,24 @@ async def _load_profiles(pool: asyncpg.Pool, record: dict) -> list[dict]:
         return []
 
 
+def _can_be_mapped(record: dict, attempt: ProfileRead) -> bool:
+    """ab-315: the wizard can map a file with text we could fingerprint, for
+    an institution layouts can be saved for, that isn't another
+    institution's statement."""
+    return (
+        attempt.fingerprint is not None
+        and attempt.wrong_institution is None
+        and record.get("institution_id") is not None
+    )
+
+
+async def _tell_uploader(pool: asyncpg.Pool, record: dict) -> None:
+    try:
+        await notify_statement_ready(pool, user_id=record["user_id"], import_id=record["id"], provider=record["provider"])
+    except Exception:
+        logger.error("Telling the uploader import %s is ready failed", record["id"], exc_info=True)
+
+
 def _no_read_detail(record: dict, attempt: ProfileRead, file_type: str = "pdf") -> str:
     if attempt.wrong_institution:
         return (
@@ -190,10 +210,11 @@ def _no_read_detail(record: dict, attempt: ProfileRead, file_type: str = "pdf") 
         )
     if attempt.failure:
         return attempt.failure
-    if file_type != "pdf":
-        # ab-319: until the AI proposer and the mapping wizard (ab-314/315).
-        return "We can't read this file's layout yet"
-    return f"No parser available yet for {record['provider']}"
+    if record.get("provider") == MENTOR_SACCO:
+        return "Mentor Sacco statements can only be read as PDF files"
+    if attempt.fingerprint is None:
+        return "We couldn't find any text in this file. Download your statement again as a PDF, CSV or Excel file."
+    return "We can't read this file's layout yet"
 
 
 async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
@@ -218,23 +239,9 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
         if file_type != "pdf":
             parser = None
         profiles = [] if is_mentor_sacco else await _load_profiles(pool, record)
-        has_own_profile = any(
-            p["institution_id"] == record.get("institution_id")
-            and (p.get("profile") or {}).get("file_type", "pdf") == file_type
-            for p in profiles
-        )
-        if parser is None and not has_own_profile:
-            logger.info(
-                "No parser registered for provider %s (import %s) - marking failed",
-                record["provider"],
-                import_id,
-            )
-            await mark_import_failed(
-                pool,
-                import_id=parsed_import_id,
-                error_detail=_no_read_detail(record, ProfileRead(), file_type),
-            )
-            return
+        # ab-315: an upload waiting for support is re-read when a layout for
+        # its institution appears; it keeps waiting unless the read works.
+        was_waiting = record.get("status") == "awaiting_support"
 
         settings = get_settings()
         content = (
@@ -271,7 +278,7 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
                     import_id,
                     attempt.matched_profile_id,
                     attempt.failure,
-                    "bespoke parser" if parser else "failure message",
+                    "bespoke parser" if parser else "mapping wizard",
                 )
 
         try:
@@ -284,6 +291,8 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
                     profile_id=attempt.profile_id,
                 )
                 await record_check_passed(pool, profile_id=attempt.profile_id)
+                if was_waiting:
+                    await _tell_uploader(pool, record)
                 logger.info(
                     "Import %s (provider %s) read by profile %s v%s (%d rows)",
                     import_id,
@@ -293,6 +302,14 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
                     len(attempt.transactions),
                 )
             elif parser is None:
+                if was_waiting:
+                    logger.info("Import %s (provider %s) still waiting for a layout", import_id, record["provider"])
+                    return
+                if _can_be_mapped(record, attempt):
+                    # ab-315: no stored layout reads it - the uploader maps it.
+                    logger.info("Import %s (provider %s) needs mapping", import_id, record["provider"])
+                    await set_import_status(pool, import_id=parsed_import_id, status="needs_mapping")
+                    return
                 detail = _no_read_detail(record, attempt, file_type)
                 logger.info("Import %s (provider %s) not read: %s", import_id, record["provider"], detail)
                 await mark_import_failed(pool, import_id=parsed_import_id, error_detail=detail)

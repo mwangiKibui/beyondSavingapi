@@ -23,6 +23,7 @@ from app.api import (
     reports,
     search,
     statement_imports,
+    statement_layouts,
     sub_ledgers,
     transactions,
     transfer_reasons,
@@ -96,6 +97,7 @@ app.include_router(notifications.router)
 app.include_router(reports.router)
 app.include_router(search.router)
 app.include_router(statement_imports.router)
+app.include_router(statement_layouts.router)
 app.include_router(sub_ledgers.router)
 app.include_router(transactions.router)
 app.include_router(transfer_reasons.router)

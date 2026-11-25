@@ -1,5 +1,6 @@
 """ab-312: the worker reads with a stored profile first, falls back to the
-bespoke parser, and only fails when neither can read the file."""
+bespoke parser; ab-315: a file neither can read goes to the mapping wizard
+(needs_mapping) unless it can't be mapped at all."""
 
 import logging
 from unittest.mock import AsyncMock, MagicMock
@@ -61,6 +62,8 @@ def job(monkeypatch):
         "provider": "Sample Bank",
         "currency": "KES",
         "institution_id": INSTITUTION,
+        "status": "pending",
+        "user_id": uuid4(),
     }
     m = MagicMock()
     m.import_id, m.account_id, m.record = import_id, account_id, record
@@ -80,6 +83,10 @@ def job(monkeypatch):
     monkeypatch.setattr("app.worker.record_check_passed", m.checked)
     m.handle = AsyncMock()
     monkeypatch.setattr("app.worker._handle_rows", m.handle)
+    m.status = AsyncMock()
+    monkeypatch.setattr("app.worker.set_import_status", m.status)
+    m.ready = AsyncMock()
+    monkeypatch.setattr("app.worker.notify_statement_ready", m.ready)
     m.parsers = {}
     monkeypatch.setattr("app.worker.PARSERS", m.parsers)
     storage = MagicMock()
@@ -126,26 +133,66 @@ async def test_a_failing_check_falls_back_to_the_bespoke_parser(pool, job, caplo
     assert any("falling back" in r.message for r in caplog.records)
 
 
-async def test_a_failing_check_with_no_parser_fails_with_the_check_message(pool, job):
+async def test_a_failing_check_with_no_parser_goes_to_the_mapping_wizard(pool, job):
     job.content = BAD
     job.profiles.return_value = [candidate()]
     await process_job(pool, str(job.import_id))
-    detail = job.failed.call_args.kwargs["error_detail"]
-    assert "balance" in detail.lower()
+    job.status.assert_awaited_once_with(pool, import_id=job.import_id, status="needs_mapping")
+    job.failed.assert_not_called()
     job.insert.assert_not_called()
 
 
-async def test_no_parser_and_no_profile_fails_before_downloading(pool, job):
+async def test_an_unknown_layout_is_fingerprinted_then_needs_mapping(pool, job):
     await process_job(pool, str(job.import_id))
-    job.failed.assert_awaited_once_with(pool, import_id=job.import_id, error_detail="No parser available yet for Sample Bank")
-    job.storage.get_object.assert_not_called()
+    job.fingerprint.assert_awaited_once()
+    job.status.assert_awaited_once_with(pool, import_id=job.import_id, status="needs_mapping")
+    job.failed.assert_not_called()
 
 
 async def test_only_another_institutions_profile_fits_and_there_is_no_parser(pool, job):
     job.profiles.return_value = [candidate(institution=uuid4(), name="Other Bank")]
     await process_job(pool, str(job.import_id))
-    job.storage.get_object.assert_not_called()
-    job.failed.assert_awaited_once()
+    detail = job.failed.call_args.kwargs["error_detail"]
+    assert detail == "This looks like a Other Bank statement. Check you uploaded it to the right account."
+    job.status.assert_not_called()
+
+
+async def test_a_file_without_text_fails_clearly(pool, job):
+    job.content = b"%PDF-not really"
+    await process_job(pool, str(job.import_id))
+    assert "couldn't find any text" in job.failed.call_args.kwargs["error_detail"]
+    job.status.assert_not_called()
+
+
+async def test_an_account_without_an_institution_cant_be_mapped(pool, job):
+    job.record["institution_id"] = None
+    await process_job(pool, str(job.import_id))
+    assert job.failed.call_args.kwargs["error_detail"] == "We can't read this file's layout yet"
+    job.status.assert_not_called()
+
+
+async def test_a_waiting_upload_read_at_last_tells_its_uploader(pool, job):
+    job.record["status"] = "awaiting_support"
+    job.profiles.return_value = [candidate()]
+    await process_job(pool, str(job.import_id))
+    assert job.parsed.call_args.kwargs["row_count"] == 6
+    job.ready.assert_awaited_once_with(
+        pool, user_id=job.record["user_id"], import_id=job.import_id, provider="Sample Bank"
+    )
+
+
+async def test_a_waiting_upload_that_still_doesnt_fit_keeps_waiting(pool, job):
+    job.record["status"] = "awaiting_support"
+    await process_job(pool, str(job.import_id))
+    job.status.assert_not_called()
+    job.failed.assert_not_called()
+    job.ready.assert_not_called()
+
+
+async def test_a_new_upload_read_by_a_profile_tells_nobody(pool, job):
+    job.profiles.return_value = [candidate()]
+    await process_job(pool, str(job.import_id))
+    job.ready.assert_not_called()
 
 
 async def test_a_wrong_institution_match_is_named_when_nothing_reads_it(pool, job):
@@ -232,7 +279,7 @@ async def test_a_csv_is_read_by_a_csv_profile_and_never_reaches_the_pdf_parser(p
     assert any("read by profile" in r.message for r in caplog.records)
 
 
-async def test_a_csv_nothing_can_read_fails_clearly_without_trying_the_pdf_parser(pool, job):
+async def test_a_csv_nothing_can_read_needs_mapping_without_trying_the_pdf_parser(pool, job):
     from tests.statement_sheets import HEADER, csv_bytes, rows
 
     job.content, job.record["file_name"] = csv_bytes([HEADER, *rows(2)]), "export.csv"
@@ -240,8 +287,8 @@ async def test_a_csv_nothing_can_read_fails_clearly_without_trying_the_pdf_parse
     job.parsers["Sample Bank"] = parser
     await process_job(pool, str(job.import_id))
     parser.assert_not_called()
-    job.failed.assert_awaited_once_with(pool, import_id=job.import_id, error_detail="We can't read this file's layout yet")
-    job.storage.get_object.assert_not_called()
+    job.status.assert_awaited_once_with(pool, import_id=job.import_id, status="needs_mapping")
+    job.failed.assert_not_called()
 
 
 async def test_a_successful_profile_read_is_logged(pool, job, caplog):

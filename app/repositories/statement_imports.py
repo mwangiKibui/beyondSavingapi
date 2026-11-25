@@ -76,8 +76,8 @@ async def get_import_owned_by_user(pool: asyncpg.Pool, *, import_id: UUID, user_
 async def get_import_for_processing(pool: asyncpg.Pool, *, import_id: UUID) -> dict | None:
     row = await pool.fetchrow(
         """
-        SELECT si.id, si.account_id, si.storage_key, si.file_name, a.provider, a.currency,
-               i.id AS institution_id
+        SELECT si.id, si.account_id, si.storage_key, si.file_name, si.status, si.fingerprint,
+               a.provider, a.currency, a.user_id, i.id AS institution_id
         FROM statement_imports si
         JOIN accounts a ON a.id = si.account_id
         -- ab-312: the institution whose profiles may read this file
@@ -330,3 +330,48 @@ async def create_statement_import(
         storage_key,
     )
     return dict(row)
+
+
+# --- ab-315: the mapping wizard ---------------------------------------------------
+
+
+async def set_import_status(pool, *, import_id: UUID, status: str) -> None:
+    """needs_mapping / awaiting_support / pending - a state change that
+    carries no failure message."""
+    await pool.execute(
+        "UPDATE statement_imports SET status = $1, error_detail = NULL WHERE id = $2", status, import_id
+    )
+
+
+async def get_import_for_layout(pool, *, import_id: UUID, user_id: UUID) -> dict | None:
+    """The uploader's own import, with what the wizard needs."""
+    row = await pool.fetchrow(
+        """
+        SELECT si.id, si.status, si.storage_key, si.file_name, si.fingerprint,
+               a.provider, a.currency, i.id AS institution_id
+        FROM statement_imports si
+        JOIN accounts a ON a.id = si.account_id
+        LEFT JOIN institutions i ON i.name = a.provider AND i.type = a.account_type
+        WHERE si.id = $1 AND a.user_id = $2
+        """,
+        import_id,
+        user_id,
+    )
+    return dict(row) if row else None
+
+
+async def list_waiting_imports(pool, *, institution_id: UUID) -> list[UUID]:
+    """Uploads of this institution waiting for support - to re-read once a
+    layout for it becomes active."""
+    rows = await pool.fetch(
+        """
+        SELECT si.id
+        FROM statement_imports si
+        JOIN accounts a ON a.id = si.account_id
+        JOIN institutions i ON i.name = a.provider AND i.type = a.account_type
+        WHERE si.status = 'awaiting_support' AND i.id = $1
+        ORDER BY si.created_at
+        """,
+        institution_id,
+    )
+    return [r["id"] for r in rows]
