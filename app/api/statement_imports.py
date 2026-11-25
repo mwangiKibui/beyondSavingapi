@@ -850,6 +850,10 @@ class ProgressResponse(BaseModel):
     added_count: int | None = None
     already_count: int | None = None
     already_recorded_by: "RecordedBy | None" = None
+    # ab-329: where the upload's rows go, so the wizard can return there.
+    # sub_ledger_id only when the upload was for exactly one sub-ledger.
+    account_id: UUID | None = None
+    sub_ledger_id: UUID | None = None
 
 
 class RecordedBy(BaseModel):
@@ -886,6 +890,13 @@ async def _owned_import(pool: asyncpg.Pool, *, import_id: UUID, user_id: UUID) -
     return statement_import
 
 
+def _destination(statement_import: dict) -> dict:
+    return {
+        "account_id": statement_import.get("account_id"),
+        "sub_ledger_id": statement_import.get("sub_ledger_id"),
+    }
+
+
 @router.get("/{import_id}/progress", response_model=ProgressResponse)
 async def get_import_progress_endpoint(
     import_id: UUID,
@@ -907,6 +918,7 @@ async def get_import_progress_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
         ) from None
     counts = {
+        **_destination(statement_import),
         "added_count": overlap["added_count"] if overlap else None,
         "already_count": overlap["already_count"] if overlap else None,
         "already_recorded_by": overlap["earlier"] if overlap else None,
@@ -972,7 +984,7 @@ async def save_import_progress_endpoint(
             reviewed_count=reviewed_count,
             total_count=total_count,
         )
-        return {**saved, "step": _derived_step(statement_import)}
+        return {**saved, **_destination(statement_import), "step": _derived_step(statement_import)}
     except HTTPException:
         raise
     except Exception:

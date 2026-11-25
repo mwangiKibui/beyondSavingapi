@@ -18,7 +18,10 @@ async def get_import_for_preview(pool: asyncpg.Pool, *, import_id: UUID, user_id
         """
         SELECT si.id, si.account_id, a.nickname AS account_nickname, a.provider,
                si.file_name, si.status, si.period_start, si.period_end, si.row_count, si.created_at,
-               si.reviewed_at, si.allocated_at, si.error_detail, si.handled_at, a.user_id
+               si.reviewed_at, si.allocated_at, si.error_detail, si.handled_at, a.user_id,
+               -- ab-329: the sub-ledger the upload was for, when it was for exactly one.
+               (SELECT CASE WHEN count(*) = 1 THEN (array_agg(sis.sub_ledger_id))[1] END
+                FROM statement_import_sub_ledgers sis WHERE sis.import_id = si.id) AS sub_ledger_id
         FROM statement_imports si
         JOIN accounts a ON a.id = si.account_id
         WHERE si.id = $1 AND a.user_id = $2

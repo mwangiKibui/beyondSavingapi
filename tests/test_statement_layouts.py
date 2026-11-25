@@ -72,6 +72,10 @@ def api(monkeypatch):
     monkeypatch.setattr("app.api.statement_layouts.notify_admins_layout_waiting", a.notify)
     a.save = AsyncMock(return_value={"id": uuid4(), "version": 1})
     monkeypatch.setattr("app.api.statement_layouts.save_layout", a.save)
+    a.record_choices = AsyncMock()
+    monkeypatch.setattr("app.api.statement_layouts.record_choices", a.record_choices)
+    a.learned = AsyncMock(return_value={})
+    monkeypatch.setattr("app.api.statement_layouts.learned_roles", a.learned)
     yield a
     app.dependency_overrides.pop(get_pool, None)
     app.dependency_overrides.pop(get_current_user_id, None)
@@ -170,6 +174,43 @@ def test_an_unexpected_error_is_generic(client, api, monkeypatch):
     assert response.status_code == 500 and "s3" not in response.text
 
 
+def test_the_guess_says_its_roles_came_from_keywords(client, api):
+    body = client.get(url()).json()
+    assert body["suggestion_sources"] == ["keyword"] * 5
+    kwargs = api.learned.await_args.kwargs
+    assert kwargs["file_type"] == "pdf" and kwargs["headings"] == ["Date", "Details", "Money In", "Money Out", "Balance"]
+
+
+def test_roles_most_users_chose_replace_the_guess(client, api):
+    api.learned.return_value = {"Money In": "money_out", "Money Out": "money_in"}
+    body = client.get(url()).json()
+    assert [c["role"] for c in body["guess"]["table"]["columns"]] == ["date", "description", "money_out", "money_in", "balance"]
+    assert body["suggestion_sources"] == ["keyword", "keyword", "learned", "learned", "keyword"]
+
+
+def test_learned_roles_are_deduped_and_must_stay_valid(client, api):
+    api.learned.return_value = {"Details": "date"}  # a second date: deduped, then no description
+    body = client.get(url()).json()
+    assert [c["role"] for c in body["guess"]["table"]["columns"]] == ["date", "description", "money_in", "money_out", "balance"]
+    assert body["suggestion_sources"] == ["keyword"] * 5
+
+
+def test_a_failed_lookup_keeps_the_plain_guess(client, api):
+    api.learned.side_effect = RuntimeError("db down")
+    response = client.get(url())
+    assert response.status_code == 200 and response.json()["suggestion_sources"] == ["keyword"] * 5
+    assert "db down" not in response.text
+
+
+def test_no_guess_means_no_sources(client, api, monkeypatch):
+    monkeypatch.setattr(
+        "app.api.statement_layouts.layout_start", lambda content, file_type: {"guess": None, "examples": [], "rows": [], "header_row": None}
+    )
+    body = client.get(url()).json()
+    assert body["guess"] is None and body["suggestion_sources"] == []
+    api.learned.assert_not_called()
+
+
 # --- POST check -----------------------------------------------------------------
 
 
@@ -212,11 +253,48 @@ def test_saving_a_passing_mapping(client, api):
     assert api.save.call_args.kwargs["user_id"] == api.user_id
 
 
+def test_saving_records_each_headed_columns_role_and_suggestion(client, api):
+    headerless = {**PROFILE, "table": {**PROFILE["table"], "columns": [*PROFILE["table"]["columns"], {"role": "ignore"}]}}
+    suggested = ["date", None, "money_out", "money_out", "balance", None]
+    response = client.put(url(), json={"profile": headerless, "suggested_roles": suggested})
+    assert response.status_code == 200
+    kwargs = api.record_choices.await_args.kwargs
+    assert kwargs["user_id"] == api.user_id and kwargs["file_type"] == "pdf"
+    assert kwargs["choices"] == [
+        ("Date", "date", "date"),
+        ("Details", "description", None),
+        ("Money In", "money_in", "money_out"),
+        ("Money Out", "money_out", "money_out"),
+        ("Balance", "balance", "balance"),
+    ]
+
+
+@pytest.mark.parametrize("suggested", [None, ["date"], ["date", "description", "money_in", "money_out", "balance", "x"]])
+def test_suggestions_that_dont_line_up_are_recorded_as_none(client, api, suggested):
+    body = {"profile": PROFILE} if suggested is None else {"profile": PROFILE, "suggested_roles": suggested}
+    assert client.put(url(), json=body).status_code == 200
+    assert [c[2] for c in api.record_choices.await_args.kwargs["choices"]] == [None] * 5
+
+
+def test_an_unknown_suggested_role_is_recorded_as_none(client, api):
+    suggested = ["date", "nonsense", "money_in", "money_out", "balance"]
+    assert client.put(url(), json={"profile": PROFILE, "suggested_roles": suggested}).status_code == 200
+    assert [c[2] for c in api.record_choices.await_args.kwargs["choices"]][:2] == ["date", None]
+
+
+def test_recording_failing_never_fails_the_save(client, api):
+    api.record_choices.side_effect = RuntimeError("db down")
+    response = client.put(url(), json={"profile": PROFILE})
+    assert response.status_code == 200 and response.json()["status"] == "pending"
+    api.save.assert_awaited_once()
+
+
 def test_a_mapping_that_fails_is_never_saved(client, api):
     api.content = BAD
     response = client.put(url(), json={"profile": PROFILE})
     assert response.status_code == 422
     api.save.assert_not_called()
+    api.record_choices.assert_not_called()
 
 
 def test_a_mapping_that_proves_nothing_is_never_saved(client, api):

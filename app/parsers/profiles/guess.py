@@ -107,17 +107,22 @@ def _role_for(text: str) -> str:
     return "ignore"
 
 
-def _assign_roles(headings: list[str]) -> list[str]:
-    roles, used = [], set()
-    for heading in headings:
-        role = _role_for(heading)
+def dedupe_roles(roles: list[str]) -> list[str]:
+    """A single-use role keeps only its first column (later ones become
+    "ignore"), and a signed amount gives way to money in/out columns."""
+    out, used = [], set()
+    for role in roles:
         if role in _SINGLE and role in used:
             role = "ignore"  # e.g. "Value Date" after "Date"
         used.add(role)
-        roles.append(role)
+        out.append(role)
     if "signed_amount" in used and ({"money_in", "money_out"} & used):
-        roles = ["ignore" if r == "signed_amount" else r for r in roles]
-    return roles
+        out = ["ignore" if r == "signed_amount" else r for r in out]
+    return out
+
+
+def _assign_roles(headings: list[str]) -> list[str]:
+    return dedupe_roles([_role_for(heading) for heading in headings])
 
 
 def _layout_word(text: str) -> str | None:
