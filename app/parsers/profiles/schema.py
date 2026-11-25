@@ -70,6 +70,8 @@ def _date_format(value: str) -> str:
     return value
 
 
+# ab-337: for checking a text (an AI-named footer) before it goes into a profile.
+layout_text = _layout_text
 LayoutText = Annotated[str, AfterValidator(_layout_text)]
 DateFormat = Annotated[str, AfterValidator(_date_format)]
 CurrencyCode = Annotated[str, Field(pattern=r"^[A-Z]{3}$")]

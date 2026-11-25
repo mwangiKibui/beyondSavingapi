@@ -425,3 +425,11 @@ def test_telling_admins_failing_still_waits(client, api):
     api.notify.side_effect = RuntimeError("down")
     assert client.post(url("/support")).status_code == 200
     api.status.assert_awaited_once()
+
+
+def test_saving_adds_the_footer_the_file_repeats_as_a_skip_row(client, api):
+    # ab-337: so a later one-page file of this layout drops its footer too.
+    api.content = build(sample_rows(60), Layout(rows_per_page=20, page_footer="Printed On: Thu {page} Page {page} of {pages}"))
+    assert client.put(url(), json={"profile": PROFILE}).status_code == 200
+    saved = api.save.call_args.kwargs["profile"]
+    assert {"match": "starts_with", "text": "Printed On:"} in [r.model_dump() for r in saved.table.skip_rows]

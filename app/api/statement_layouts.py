@@ -26,6 +26,7 @@ from app.repositories.column_heading_choices import learned_roles, record_choice
 from app.repositories.notifications import notify_admins_layout_waiting
 from app.repositories.statement_imports import get_import_for_layout, set_import_status
 from app.services.statement_files import file_type_of
+from app.parsers.profiles.reader import with_learned_skip_rows
 from app.services.statement_layouts import (
     apply_learned_roles,
     check_layout,
@@ -297,11 +298,13 @@ async def save_layout_endpoint(
         fingerprint = await run_in_threadpool(
             fingerprint_file, content, statement_import.get("file_name") or "statement.pdf"
         )
+        # ab-337: plus the footers this file repeats, for later one-page files.
+        to_save = await run_in_threadpool(with_learned_skip_rows, content, result.profile or profile)
         created = await save_layout(
             pool,
             statement_import=statement_import,
             # ab-333: with the row grouping the check read it with.
-            profile=result.profile or profile,
+            profile=to_save,
             user_id=user_id,
             fingerprint=fingerprint.to_text() if fingerprint else None,
         )

@@ -125,3 +125,23 @@ def test_a_spreadsheet_keeps_its_heading_row_and_shapes_the_rest():
         assert secret not in masked, secret
     assert "9999-99-99" in masked and "99/99/9999" in masked and "9,999.99" in masked
     assert mask_grid([]) is None
+
+
+def test_page_footer_words_stay_readable_and_its_values_dont():
+    # ab-337: the model can name a footer ("Printed On:") to skip; the
+    # printer's name and the time it was printed stay shapes.
+    masked = mask_pdf(_statement(page_footer="Printed On: Thu,26 November 2026 10:41: Printed By: Wanjiru Page:{page} of {pages}"))
+    assert "Printed On:" in masked
+    assert "Printed By:" in masked
+    assert "Wanjiru" not in masked and "10:41" not in masked
+
+
+def test_the_bottom_of_a_long_page_is_kept(monkeypatch):
+    from app.parsers.profiles import masking
+
+    monkeypatch.setattr(masking, "MAX_LINES", 12)
+    rows = [[f"{d:02d}/10/2026", "Paid to Store", "", "1.00", f"{1000 - d}.00"] for d in range(1, 21)]
+    pdf = build(rows, Layout(page_footer="Printed On: Thu Page {page} of {pages}"))
+    masked = mask_pdf(pdf)
+    assert len(masked.splitlines()) <= masking.MAX_LINES + 1  # + the page marker
+    assert "Printed On:" in masked

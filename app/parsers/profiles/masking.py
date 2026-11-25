@@ -31,8 +31,9 @@ from app.parsers.profiles.layout import Line, is_body_line, page_lines
 
 # Characters per line the page width is scaled to.
 WIDTH = 120
-# Lines of a page sent at most.
+# Lines of a page sent at most, the last few of them from its bottom.
 MAX_LINES = 60
+_BOTTOM_LINES = 4
 
 # Statement words that carry layout meaning and no personal detail. Lower
 # case, compared with surrounding punctuation stripped.
@@ -43,6 +44,7 @@ VOCAB = frozenset(
     end fee fees for forward from in kes ksh money name narration narrative no number of opening out paid
     page period received reference ref sent start statement status summary tax to total totals
     transaction transactions txn type usd value withdrawal withdrawals
+    printed generated produced copy system computer electronic disclaimer continued on by at this is
     """.split()
 )
 
@@ -104,7 +106,11 @@ def mask_page(page) -> str:
     width = float(page.width)
     headings = _heading_lines(lines, width)
     out = []
-    for i, line in enumerate(lines[:MAX_LINES]):
+    # ab-337: a long page keeps its last lines, where footers sit.
+    kept = list(enumerate(lines))
+    if len(kept) > MAX_LINES:
+        kept = kept[: MAX_LINES - _BOTTOM_LINES] + kept[-_BOTTOM_LINES:]
+    for i, line in kept:
         words = [(w.x0, w.text if i in headings else _masked_word(w.text)) for w in line.words]
         out.append(f"{round(line.top):4d}| {_render(words, width)}")
     return "\n".join(out)

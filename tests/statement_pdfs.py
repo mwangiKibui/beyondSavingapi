@@ -37,6 +37,10 @@ class Layout:
     # ("on"), on the line above it ("above", text printed over the date like
     # a vertically centred cell) or split above and below ("around").
     text_position: str = "on"
+    # ab-337: a line printed at the very bottom of every page, under the
+    # description column and running across the money columns (like a
+    # bank's "Printed On ... Page 1 of 9"). {page} and {pages} are filled in.
+    page_footer: str | None = None
 
 
 def build(rows: list[list[str]], layout: Layout | None = None, *, continuation: dict[int, str] | None = None) -> bytes:
@@ -112,6 +116,8 @@ def build(rows: list[list[str]], layout: Layout | None = None, *, continuation: 
                 c.line(x, top_of_table, x, y + 8)
         if layout.footer:
             c.drawString(layout.xs[desc_col] + 2, y - 2, layout.footer)
+        if layout.page_footer:
+            c.drawString(layout.xs[0] + 2, 30, layout.page_footer.format(page=page_no, pages=len(chunks)))
         if page_no == len(chunks) and layout.end_marker:
             c.drawString(40, y - 10, layout.end_marker)
         c.showPage()
