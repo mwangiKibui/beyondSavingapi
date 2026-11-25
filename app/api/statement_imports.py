@@ -871,6 +871,13 @@ class SaveProgressRequest(BaseModel):
     draft: Draft
 
 
+def _shown_error(statement_import: dict) -> str | None:
+    """Why it failed, or why a saved layout sent it back to Columns."""
+    if statement_import["status"] in ("failed", "needs_mapping"):
+        return statement_import.get("error_detail")
+    return None
+
+
 def _derived_step(statement_import: dict) -> str:
     if statement_import["status"] == "pending":
         return "processing"
@@ -928,13 +935,13 @@ async def get_import_progress_endpoint(
     }
     if saved is not None:
         # The import says which step it's on (ab-296); an old draft only adds counts.
-        return {**saved, **counts, "step": _derived_step(statement_import), "error_detail": None}
+        return {**saved, **counts, "step": _derived_step(statement_import), "error_detail": _shown_error(statement_import)}
     return {
         "step": _derived_step(statement_import),
         "draft": Draft(),
         "reviewed_count": 0,
         "total_count": 0,
-        "error_detail": statement_import.get("error_detail") if statement_import["status"] == "failed" else None,
+        "error_detail": _shown_error(statement_import),
         **counts,
     }
 

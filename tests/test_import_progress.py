@@ -158,6 +158,18 @@ def test_a_failed_parse_says_why(client, fake_user, fake_pool, monkeypatch):
     assert (body["step"], body["error_detail"]) == ("failed", "This file doesn't look like an M-Pesa statement.")
 
 
+def test_a_saved_layout_that_sent_it_back_to_columns_says_why(client, fake_user, fake_pool, monkeypatch):
+    why = "We couldn't read the whole statement with these columns: The balance doesn't add up at row 2"
+    patch_repo(monkeypatch, imp=import_row("needs_mapping", error_detail=why))
+    body = client.get(url()).json()
+    assert (body["step"], body["error_detail"]) == ("layout", why)
+
+
+def test_an_old_reason_is_not_shown_once_it_is_read(client, fake_user, fake_pool, monkeypatch):
+    patch_repo(monkeypatch, imp=import_row("parsed", error_detail="stale"))
+    assert client.get(url()).json()["error_detail"] is None
+
+
 def test_saved_progress_is_returned(client, fake_user, fake_pool, monkeypatch):
     draft = {"rows": {str(NAIVAS["id"]): {"category_id": str(GROCERIES["id"])}}, "labels": {}, "paybills": {}}
     patch_repo(monkeypatch, imp=import_row(), progress={"step": "review", "draft": draft, "reviewed_count": 1,

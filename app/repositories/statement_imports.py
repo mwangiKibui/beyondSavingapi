@@ -77,7 +77,7 @@ async def get_import_for_processing(pool: asyncpg.Pool, *, import_id: UUID) -> d
     row = await pool.fetchrow(
         """
         SELECT si.id, si.account_id, si.storage_key, si.file_name, si.status, si.fingerprint,
-               a.provider, a.currency, a.user_id, i.id AS institution_id
+               si.profile_id, a.provider, a.currency, a.user_id, i.id AS institution_id
         FROM statement_imports si
         JOIN accounts a ON a.id = si.account_id
         -- ab-312: the institution whose profiles may read this file
@@ -375,3 +375,33 @@ async def list_waiting_imports(pool, *, institution_id: UUID) -> list[UUID]:
         institution_id,
     )
     return [r["id"] for r in rows]
+
+
+async def queue_with_layout(pool, *, import_id: UUID, profile_id: UUID, fingerprint: str | None) -> None:
+    """The uploader saved a layout for this upload: it is read next with that
+    exact layout (profile_id), and its fingerprint is the one the layout was
+    saved under, taken from the file by the current code."""
+    await pool.execute(
+        """
+        UPDATE statement_imports
+        SET status = 'pending', error_detail = NULL, profile_id = $2,
+            fingerprint = COALESCE($3, fingerprint)
+        WHERE id = $1
+        """,
+        import_id,
+        profile_id,
+        fingerprint,
+    )
+
+
+async def return_to_mapping(pool, *, import_id: UUID, error_detail: str) -> None:
+    """The saved layout didn't read the whole file: back to Columns, saying why."""
+    await pool.execute(
+        """
+        UPDATE statement_imports
+        SET status = 'needs_mapping', error_detail = $2, profile_id = NULL
+        WHERE id = $1
+        """,
+        import_id,
+        error_detail,
+    )

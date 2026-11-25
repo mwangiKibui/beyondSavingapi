@@ -42,7 +42,7 @@ from app.parsers.profiles.reader import _header_band, read_statement
 from app.parsers.profiles.schema import validate_profile
 from app.parsers.profiles.tabular import load_grid
 from app.parsers.profiles.text import normalise
-from app.repositories.ai_layout_proposals import insert_proposal
+from app.repositories.ai_layout_proposals import insert_proposal, latest_proposed_profile
 from app.services.inference import InferenceError, complete, inference_enabled
 from app.services.limits import AI_LAYOUT_PROPOSALS_PER_DAY, check_limit
 
@@ -288,6 +288,10 @@ async def _propose(pool, *, record: dict, content: bytes, file_type: str) -> Non
     if not inference_enabled():
         return
     import_id: UUID = record["id"]
+    if await latest_proposed_profile(pool, import_id=import_id) is not None:
+        # Re-read after a layout was saved: the proposal it already has stands.
+        logger.info("Import %s already has an AI layout proposal", import_id)
+        return
     start = await asyncio.to_thread(layout_start, content, file_type)
     guess = start.get("guess")
     if guess is not None and await asyncio.to_thread(_passes, content, guess):

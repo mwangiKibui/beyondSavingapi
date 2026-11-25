@@ -64,7 +64,17 @@ def read_with_profiles(
     if match.profile is None:
         return result
 
-    row = match.profile
+    return _read_into(result, content, match.profile, currency=currency)
+
+
+def read_with_chosen_profile(content: bytes, *, row: dict, currency: str) -> ProfileRead:
+    """The upload read with the layout its uploader just saved for it - no
+    fingerprint matching, which could miss it once the reader changes how
+    it fingerprints a page."""
+    return _read_into(ProfileRead(), content, row, currency=currency)
+
+
+def _read_into(result: ProfileRead, content: bytes, row: dict, *, currency: str) -> ProfileRead:
     result.matched_profile_id = row["id"]
     try:
         profile = validate_profile(row["profile"])
