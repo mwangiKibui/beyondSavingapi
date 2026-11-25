@@ -37,6 +37,8 @@ services:
       STORAGE_SECRET_KEY: ${STORAGE_SECRET_KEY:-storageadmin}
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
       SUGGESTION_KEY_SECRET: ${SUGGESTION_KEY_SECRET:-dev-suggestion-secret-change-me}
+      DO_INFERENCE_KEY: ${DO_INFERENCE_KEY:-}
+      DO_INFERENCE_MODEL: ${DO_INFERENCE_MODEL:-openai-gpt-oss-120b}
     volumes:
       - ./app:/srv/app
     restart: unless-stopped

@@ -20,6 +20,7 @@ from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.security import get_current_user_id
 from app.parsers.profiles.guess import layout_start
 from app.parsers.profiles.schema import InvalidStatementProfile, Role
+from app.repositories.ai_layout_proposals import latest_passed_profile
 from app.repositories.column_heading_choices import learned_roles, record_choices
 from app.repositories.notifications import notify_admins_layout_waiting
 from app.repositories.statement_imports import get_import_for_layout, set_import_status
@@ -74,8 +75,10 @@ class LayoutStartResponse(BaseModel):
     rows: list[list[str]] | None = None
     header_row: int | None = None
     # ab-329: per guessed column, whether its role came from the heading's
-    # words ("keyword") or from what most users chose for it ("learned").
-    suggestion_sources: list[Literal["keyword", "learned"]] = []
+    # words ("keyword") or from what most users chose for it ("learned");
+    # ab-314: "ai" when the AI's proposal for this upload passed the
+    # balance check and is the guess.
+    suggestion_sources: list[Literal["keyword", "learned", "ai"]] = []
 
 
 class LayoutRequest(BaseModel):
@@ -164,7 +167,10 @@ async def get_layout_endpoint(
     except Exception:
         raise _unexpected("starting the layout", import_id, user_id) from None
     guess, sources = start.get("guess"), []
-    if guess is not None:
+    proposed = await _passed_proposal(pool, import_id, guess)
+    if proposed is not None:
+        guess, sources = proposed, ["ai"] * len(proposed["table"]["columns"])
+    elif guess is not None:
         guess, sources = await _with_learned_roles(pool, guess, file_type=file_type)
     return {
         "file_type": file_type,
@@ -173,6 +179,26 @@ async def get_layout_endpoint(
         "guess": guess,
         "suggestion_sources": sources,
     }
+
+
+async def _passed_proposal(pool, import_id: UUID, guess: dict | None) -> dict | None:
+    """ab-314: the AI's proposal for this upload, when it passed the balance
+    check and has the same columns as today's guess (so the examples still
+    line up). It's proven on this file, so learned roles don't override it.
+    A failed lookup just means no proposal."""
+    if guess is None:
+        return None
+    try:
+        proposed = await latest_passed_profile(pool, import_id=import_id)
+    except Exception:
+        logger.error("Looking up the AI layout proposal for import %s failed", import_id, exc_info=True)
+        return None
+    if proposed is None:
+        return None
+    headers = [c.get("header") for c in guess["table"]["columns"]]
+    if [c.get("header") for c in proposed.get("table", {}).get("columns", [])] != headers:
+        return None
+    return proposed
 
 
 async def _with_learned_roles(pool, guess: dict, *, file_type: str) -> tuple[dict, list[str]]:

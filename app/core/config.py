@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     frontend_url: str = "http://localhost:3000"
     # Comma-separated list of origins allowed to call this API from a browser.
     cors_origins: str = "http://localhost:3000"
+    # ab-314: DigitalOcean Serverless Inference for the AI layout proposer.
+    # An empty key turns the AI step off (uploads go straight to Columns).
+    # The key is made in the DigitalOcean control panel, limited to the model.
+    do_inference_key: str = ""
+    do_inference_url: str = "https://inference.do-ai.run/v1"
+    do_inference_model: str = "openai-gpt-oss-120b"
+    do_inference_timeout_seconds: float = 60
 
 
 @lru_cache

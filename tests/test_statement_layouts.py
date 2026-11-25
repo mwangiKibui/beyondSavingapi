@@ -76,6 +76,8 @@ def api(monkeypatch):
     monkeypatch.setattr("app.api.statement_layouts.record_choices", a.record_choices)
     a.learned = AsyncMock(return_value={})
     monkeypatch.setattr("app.api.statement_layouts.learned_roles", a.learned)
+    a.proposal = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.api.statement_layouts.latest_passed_profile", a.proposal)
     yield a
     app.dependency_overrides.pop(get_pool, None)
     app.dependency_overrides.pop(get_current_user_id, None)
@@ -200,6 +202,34 @@ def test_a_failed_lookup_keeps_the_plain_guess(client, api):
     response = client.get(url())
     assert response.status_code == 200 and response.json()["suggestion_sources"] == ["keyword"] * 5
     assert "db down" not in response.text
+
+
+def _ai_profile(guess, roles):
+    return {**guess, "table": {**guess["table"], "columns": [{**c, "role": r} for c, r in zip(guess["table"]["columns"], roles)]}}
+
+
+def test_a_passing_ai_proposal_is_the_guess_and_beats_learned_roles(client, api):
+    plain = client.get(url()).json()["guess"]
+    api.proposal.return_value = _ai_profile(plain, ["date", "description", "money_in", "money_out", "balance"])
+    api.learned.return_value = {"Money In": "money_out", "Money Out": "money_in"}
+    body = client.get(url()).json()
+    assert body["suggestion_sources"] == ["ai"] * 5
+    assert [c["role"] for c in body["guess"]["table"]["columns"]] == ["date", "description", "money_in", "money_out", "balance"]
+    assert api.proposal.await_args.kwargs == {"import_id": IMPORT_ID}
+
+
+def test_an_ai_proposal_for_other_columns_is_ignored(client, api):
+    plain = client.get(url()).json()["guess"]
+    other = _ai_profile(plain, ["date", "description", "money_in", "money_out", "balance"])
+    other["table"]["columns"][1]["header"] = "Narrative"
+    api.proposal.return_value = other
+    assert client.get(url()).json()["suggestion_sources"] == ["keyword"] * 5
+
+
+def test_a_failed_proposal_lookup_falls_back_quietly(client, api):
+    api.proposal.side_effect = RuntimeError("db down")
+    response = client.get(url())
+    assert response.status_code == 200 and response.json()["suggestion_sources"] == ["keyword"] * 5
 
 
 def test_no_guess_means_no_sources(client, api, monkeypatch):
