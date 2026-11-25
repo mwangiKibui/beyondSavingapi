@@ -112,3 +112,16 @@ def test_received_and_sent_are_amounts():
     guess = layout_start(pdf, "pdf")["guess"]
     assert [c["role"] for c in guess["table"]["columns"]] == ["date", "description", "money_in", "money_out", "balance"]
     assert _passes(pdf, guess)
+
+
+def test_month_name_dates_are_found_and_guessed():
+    # ab-314: "05-Oct-26" dates used to hide the whole table.
+    rows = [
+        ["01-Oct-26", "Payment from Shop A", "100.00", "", "1,100.00"],
+        ["02-Oct-26", "Paid to Store B", "", "40.00", "1,060.00"],
+        ["03-Oct-26", "Payment from Shop C", "200.00", "", "1,260.00"],
+    ]
+    pdf = build(rows, Layout())
+    guess = layout_start(pdf, "pdf")["guess"]
+    assert guess is not None and guess["date_format"] == "%d-%b-%y"
+    assert read_statement(pdf, validate_profile(guess), default_currency="KES").check.passed

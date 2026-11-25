@@ -44,13 +44,15 @@ async def count_proposals(conn, *, user_id: UUID, start: datetime, end: datetime
     )
 
 
-async def latest_passed_profile(conn, *, import_id: UUID) -> dict | None:
-    """The upload's most recent proposal that passed the balance check."""
+async def latest_proposed_profile(conn, *, import_id: UUID) -> dict | None:
+    """The upload's proposal to suggest: the latest that passed the balance
+    check, else the latest that read but failed it (still a better start
+    than an empty Columns step)."""
     raw = await conn.fetchval(
         """
         SELECT profile FROM ai_layout_proposals
-        WHERE statement_import_id = $1 AND outcome = 'passed'
-        ORDER BY created_at DESC
+        WHERE statement_import_id = $1 AND outcome IN ('passed', 'failed_check')
+        ORDER BY (outcome = 'passed') DESC, created_at DESC
         LIMIT 1
         """,
         import_id,

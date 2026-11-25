@@ -182,3 +182,59 @@ async def test_a_failed_call_is_recorded_and_never_raises(ai_on, monkeypatch):
 async def test_anything_unexpected_never_raises(ai_on, monkeypatch):
     monkeypatch.setattr(layout_proposer, "layout_start", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
     await propose_layout(object(), record=record(), content=odd_pdf(), file_type="pdf")
+
+
+# --- no table found by our guess (ab-314 follow-up) ------------------------------
+
+DOTTED = [
+    ["01.Oct.2026", "Payment from Shop A", "100.00", "", "1,100.00"],
+    ["02.Oct.2026", "Paid to Store B", "", "40.00", "1,060.00"],
+    ["03.Oct.2026", "Payment from Shop C", "200.00", "", "1,260.00"],
+]
+
+
+def dotted_pdf() -> bytes:
+    # A date format we don't know, so our guess finds no table.
+    return build(DOTTED, Layout(headers=ODD))
+
+
+def test_with_no_guess_the_answer_builds_the_table_from_its_headings():
+    pdf = dotted_pdf()
+    assert odd_guess(pdf) is None
+    result = evaluate(pdf, None, json.dumps({**RIGHT, "date_format": "%d.%b.%Y"}))
+    assert result.outcome == "passed"
+    table = result.profile["table"]
+    assert table["column_bounds"] == "header_gaps"
+    assert [(c["header"], c["role"]) for c in table["columns"]] == [(c["heading"], c["role"]) for c in RIGHT["columns"]]
+
+
+def test_the_other_date_column_is_tried_when_the_answer_picks_the_wrong_one():
+    headers = ["Date", "Value Date", "Details", "Money In", "Money Out", "Balance"]
+    # The first date column holds codes on some rows; the value date is the real one.
+    rows = [
+        ["REF-0001", "01/10/2026", "Payment from Shop A", "100.00", "", "1,100.00"],
+        ["02/10/2026", "02/10/2026", "Paid to Store B", "", "40.00", "1,060.00"],
+        ["REF-0003", "03/10/2026", "Payment from Shop C", "200.00", "", "1,260.00"],
+    ]
+    pdf = build(rows, Layout(headers=headers, xs=[40, 105, 170, 330, 410, 490]))
+    answer = {
+        **RIGHT,
+        "columns": [{"heading": h, "role": r} for h, r in zip(headers, ["date", "ignore", "description", "money_in", "money_out", "balance"])],
+    }
+    result = evaluate(pdf, None, json.dumps(answer))
+    assert result.outcome == "passed"
+    assert [c["role"] for c in result.profile["table"]["columns"]][:2] == ["ignore", "date"]
+
+
+def test_a_failed_answer_with_no_guess_is_still_kept_as_a_suggestion():
+    pdf = dotted_pdf()
+    wrong = {**RIGHT, "date_format": "%d.%b.%Y", "columns": [{**c, "role": {"money_in": "money_out", "money_out": "money_in"}.get(c["role"], c["role"])} for c in RIGHT["columns"]]}
+    result = evaluate(pdf, None, json.dumps(wrong))
+    assert result.outcome == "failed_check"
+    assert [c["header"] for c in result.profile["table"]["columns"]] == ODD
+
+
+async def test_the_ai_runs_when_our_guess_finds_no_table(ai_on, monkeypatch):
+    monkeypatch.setattr(layout_proposer, "complete", AsyncMock(return_value=reply({**RIGHT, "date_format": "%d.%b.%Y"})))
+    await propose_layout(object(), record=record(), content=dotted_pdf(), file_type="pdf")
+    assert ai_on.await_args.kwargs["outcome"] == "passed"

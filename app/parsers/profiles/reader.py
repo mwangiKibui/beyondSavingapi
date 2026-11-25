@@ -126,25 +126,32 @@ def _header_band(lines: list[Line], profile: StatementProfile, start: int = 0):
         band = lines[top : top + span]
         words = sorted((w for line in band for w in line.words), key=lambda w: w.x0)
         tokens = [normalise(w.text) for w in words]
-        found, cursor = {}, -1
+        found, cursor, used = {}, -1, set()
         for col, parts in wanted:
             hit = None
             for j, token in enumerate(tokens):
-                if j > cursor and token == parts[0]:
-                    group = [words[j]]
+                if j > cursor and token == parts[0] and j not in used:
+                    group = [j]
                     ok = True
                     for part in parts[1:]:
-                        match = next(
-                            (w for k, w in enumerate(words) if normalise(w.text) == part and w not in group
-                             and abs(w.x0 - group[0].x0) < 160),
-                            None,
-                        )
-                        if match is None:
+                        # The heading's next word: unused, not left of the
+                        # word before it (a stacked heading may start a little
+                        # left), and the nearest such - so "Value Date" takes
+                        # its own "Date", not the Date column's (ab-314).
+                        prev = words[group[-1]]
+                        options = [
+                            k for k, w in enumerate(words)
+                            if tokens[k] == part and k not in group and k not in used
+                            and w.x0 >= prev.x0 - 40 and abs(w.x0 - words[group[0]].x0) < 160
+                        ]
+                        if not options:
                             ok = False
                             break
-                        group.append(match)
+                        group.append(min(options, key=lambda k: abs(words[k].x0 - prev.x1) + abs(words[k].top - prev.top)))
                     if ok:
-                        hit = (j, min(w.x0 for w in group), max(w.x1 for w in group))
+                        chosen = [words[k] for k in group]
+                        hit = (j, min(w.x0 for w in chosen), max(w.x1 for w in chosen))
+                        used.update(group)
                         break
             if hit is None:
                 break
