@@ -18,16 +18,17 @@ from app.repositories.statement_imports import (
     mark_import_failed,
     mark_import_parsed,
     set_import_fingerprint,
+    return_to_mapping,
     set_import_status,
     set_sub_ledger_opening_balances,
 )
 from app.repositories.notifications import notify_statement_ready
-from app.repositories.statement_profiles import list_active_profiles, record_check_passed
+from app.repositories.statement_profiles import get_profile, list_active_profiles, record_check_passed
 from app.repositories.transactions import insert_transactions
 from app.services.import_handling import handle_import_by_id
 from app.services.statement_files import file_type_of
 from app.services.layout_proposer import propose_layout
-from app.services.statement_profiles import ProfileRead, read_with_profiles
+from app.services.statement_profiles import ProfileRead, read_with_chosen_profile, read_with_profiles
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -185,6 +186,18 @@ async def _load_profiles(pool: asyncpg.Pool, record: dict) -> list[dict]:
         return []
 
 
+async def _chosen_profile(pool: asyncpg.Pool, record: dict) -> dict | None:
+    """The layout the uploader saved for this upload, while it waits to be
+    read with it (a pending upload with a profile_id)."""
+    if record.get("status") != "pending" or record.get("profile_id") is None:
+        return None
+    try:
+        return await get_profile(pool, profile_id=record["profile_id"])
+    except Exception:
+        logger.error("Loading the saved layout failed for import %s", record["id"], exc_info=True)
+        return None
+
+
 def _can_be_mapped(record: dict, attempt: ProfileRead) -> bool:
     """ab-315: the wizard can map a file with text we could fingerprint, for
     an institution layouts can be saved for, that isn't another
@@ -251,7 +264,17 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
             .read()
         )
         attempt = ProfileRead()
-        if not is_mentor_sacco:
+        chosen = await _chosen_profile(pool, record) if not is_mentor_sacco else None
+        if chosen is not None:
+            # The uploader just saved this layout for this upload (and it
+            # passed the check on this file): read with it, no matching.
+            attempt = read_with_chosen_profile(content, row=chosen, currency=record.get("currency") or "KES")
+            if attempt.transactions is None:
+                detail = f"We couldn't read the whole statement with these columns: {attempt.failure}"
+                logger.warning("Import %s: saved layout %s didn't read it (%s)", import_id, chosen["id"], attempt.failure)
+                await return_to_mapping(pool, import_id=parsed_import_id, error_detail=detail)
+                return
+        elif not is_mentor_sacco:
             # ab-312: fingerprint every upload; read it with a stored profile
             # when one of this institution's matches and passes its check.
             attempt = read_with_profiles(

@@ -121,6 +121,7 @@ def ai_on(monkeypatch):
     monkeypatch.setattr(layout_proposer, "inference_enabled", lambda: True)
     inserted = AsyncMock()
     monkeypatch.setattr(layout_proposer, "insert_proposal", inserted)
+    monkeypatch.setattr(layout_proposer, "latest_proposed_profile", AsyncMock(return_value=None))
     return inserted
 
 
@@ -238,3 +239,12 @@ async def test_the_ai_runs_when_our_guess_finds_no_table(ai_on, monkeypatch):
     monkeypatch.setattr(layout_proposer, "complete", AsyncMock(return_value=reply({**RIGHT, "date_format": "%d.%b.%Y"})))
     await propose_layout(object(), record=record(), content=dotted_pdf(), file_type="pdf")
     assert ai_on.await_args.kwargs["outcome"] == "passed"
+
+
+async def test_no_second_ai_call_when_the_upload_already_has_a_proposal(ai_on, monkeypatch):
+    monkeypatch.setattr(layout_proposer, "latest_proposed_profile", AsyncMock(return_value={"table": {}}))
+    called = AsyncMock()
+    monkeypatch.setattr(layout_proposer, "complete", called)
+    await propose_layout(object(), record=record(), content=odd_pdf(), file_type="pdf")
+    called.assert_not_awaited()
+    ai_on.assert_not_awaited()

@@ -26,7 +26,7 @@ from app.parsers.profiles.reader import read_statement
 from app.parsers.profiles.tabular import load_grid
 from app.parsers.profiles.text import normalise
 from app.parsers.profiles.schema import StatementProfile, validate_profile
-from app.repositories.statement_imports import list_waiting_imports, set_import_status
+from app.repositories.statement_imports import list_waiting_imports, queue_with_layout
 from app.repositories.statement_profiles import create_profile
 
 logger = logging.getLogger(__name__)
@@ -141,20 +141,25 @@ async def requeue_waiting(pool, *, institution_id: UUID) -> int:
 
 
 async def save_layout(
-    pool, *, statement_import: dict, profile: StatementProfile, user_id: UUID
+    pool, *, statement_import: dict, profile: StatementProfile, user_id: UUID, fingerprint: str | None = None
 ) -> dict:
     """Stores a usable mapping as an active, shared profile and re-reads the
-    upload (and any others of its institution waiting for support)."""
+    upload with it (and any others of its institution waiting for support).
+    fingerprint is the file's, taken now: the one stored at upload may come
+    from older code that fingerprinted the page differently."""
+    fingerprint = fingerprint or statement_import["fingerprint"]
     created = await create_profile(
         pool,
         institution_id=statement_import["institution_id"],
-        fingerprint=statement_import["fingerprint"],
+        fingerprint=fingerprint,
         profile=profile.model_dump(mode="json"),
         source="user",
         status="active",
         created_by=user_id,
     )
-    await set_import_status(pool, import_id=statement_import["id"], status="pending")
+    await queue_with_layout(
+        pool, import_id=statement_import["id"], profile_id=created["id"], fingerprint=fingerprint
+    )
     await enqueue(statement_import["id"])
     try:
         await requeue_waiting(pool, institution_id=statement_import["institution_id"])

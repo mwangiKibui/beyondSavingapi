@@ -18,6 +18,7 @@ from starlette.concurrency import run_in_threadpool
 from app.core.db import get_pool
 from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.security import get_current_user_id
+from app.parsers.profiles.fingerprint import fingerprint_file
 from app.parsers.profiles.guess import layout_start
 from app.parsers.profiles.schema import InvalidStatementProfile, Role
 from app.repositories.ai_layout_proposals import latest_proposed_profile
@@ -275,7 +276,16 @@ async def save_layout_endpoint(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=result.message or "This mapping doesn't pass the balance check yet",
             )
-        created = await save_layout(pool, statement_import=statement_import, profile=profile, user_id=user_id)
+        fingerprint = await run_in_threadpool(
+            fingerprint_file, content, statement_import.get("file_name") or "statement.pdf"
+        )
+        created = await save_layout(
+            pool,
+            statement_import=statement_import,
+            profile=profile,
+            user_id=user_id,
+            fingerprint=fingerprint.to_text() if fingerprint else None,
+        )
     except HTTPException:
         raise
     except Exception:

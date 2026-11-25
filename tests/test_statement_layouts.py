@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.core.db import get_pool
 from app.core.security import get_current_user_id
 from app.main import app
+from app.parsers.profiles.fingerprint import fingerprint_pdf
 from app.parsers.profiles.schema import validate_profile
 from app.services import statement_layouts
 from app.services.statement_layouts import check_layout
@@ -122,7 +123,7 @@ async def test_saving_stores_an_active_shared_layout_and_rereads(monkeypatch):
     create = AsyncMock(return_value=created)
     monkeypatch.setattr(statement_layouts, "create_profile", create)
     status = AsyncMock()
-    monkeypatch.setattr(statement_layouts, "set_import_status", status)
+    monkeypatch.setattr(statement_layouts, "queue_with_layout", status)
     queued = []
     monkeypatch.setattr(statement_layouts, "enqueue", AsyncMock(side_effect=lambda i: queued.append(i)))
     waiting = [uuid4(), uuid4()]
@@ -130,14 +131,30 @@ async def test_saving_stores_an_active_shared_layout_and_rereads(monkeypatch):
     institution, user = uuid4(), uuid4()
     record = {"id": IMPORT_ID, "institution_id": institution, "fingerprint": "fp"}
 
-    out = await statement_layouts.save_layout(object(), statement_import=record, profile=validate_profile(PROFILE), user_id=user)
+    out = await statement_layouts.save_layout(
+        object(), statement_import=record, profile=validate_profile(PROFILE), user_id=user, fingerprint="fresh"
+    )
 
     assert out == created
     kwargs = create.call_args.kwargs
     assert (kwargs["source"], kwargs["status"], kwargs["created_by"]) == ("user", "active", user)
-    assert (kwargs["institution_id"], kwargs["fingerprint"]) == (institution, "fp")
-    assert status.call_args.kwargs == {"import_id": IMPORT_ID, "status": "pending"}
+    assert (kwargs["institution_id"], kwargs["fingerprint"]) == (institution, "fresh")
+    # The upload is read next with exactly this layout, under the fresh fingerprint.
+    assert status.call_args.kwargs == {"import_id": IMPORT_ID, "profile_id": created["id"], "fingerprint": "fresh"}
     assert queued == [IMPORT_ID, *waiting]
+
+
+async def test_saving_without_a_fresh_fingerprint_keeps_the_stored_one(monkeypatch):
+    create = AsyncMock(return_value={"id": uuid4(), "version": 1})
+    monkeypatch.setattr(statement_layouts, "create_profile", create)
+    monkeypatch.setattr(statement_layouts, "queue_with_layout", AsyncMock())
+    monkeypatch.setattr(statement_layouts, "enqueue", AsyncMock())
+    monkeypatch.setattr(statement_layouts, "list_waiting_imports", AsyncMock(return_value=[]))
+    record = {"id": IMPORT_ID, "institution_id": uuid4(), "fingerprint": "fp"}
+
+    await statement_layouts.save_layout(object(), statement_import=record, profile=validate_profile(PROFILE), user_id=uuid4())
+
+    assert create.call_args.kwargs["fingerprint"] == "fp"
 
 
 # --- GET layout -----------------------------------------------------------------
@@ -295,6 +312,12 @@ def test_saving_a_passing_mapping(client, api):
     response = client.put(url(), json={"profile": PROFILE})
     assert response.status_code == 200 and response.json()["status"] == "pending"
     assert api.save.call_args.kwargs["user_id"] == api.user_id
+
+
+def test_saving_fingerprints_the_file_with_the_current_code(client, api):
+    client.put(url(), json={"profile": PROFILE})
+    assert api.save.call_args.kwargs["fingerprint"] == fingerprint_pdf(GOOD).to_text()
+    assert api.save.call_args.kwargs["fingerprint"] != api.record["fingerprint"]
 
 
 def test_saving_records_each_headed_columns_role_and_suggestion(client, api):

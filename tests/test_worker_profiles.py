@@ -296,3 +296,62 @@ async def test_a_successful_profile_read_is_logged(pool, job, caplog):
     with caplog.at_level(logging.INFO):
         await process_job(pool, str(job.import_id))
     assert any("read by profile" in r.message and "6 rows" in r.message for r in caplog.records)
+
+
+# --- a layout the uploader just saved --------------------------------------------
+
+
+@pytest.fixture
+def chosen(job, monkeypatch):
+    """The upload waits to be read with the layout its uploader saved, whose
+    fingerprint no longer matches the file (older code took it)."""
+    c = {**candidate(), "fingerprint": '{"v":0}'}
+    job.record["profile_id"] = c["id"]
+    job.profiles.return_value = [c]
+    job.get_profile = AsyncMock(return_value=c)
+    monkeypatch.setattr("app.worker.get_profile", job.get_profile)
+    job.back = AsyncMock()
+    monkeypatch.setattr("app.worker.return_to_mapping", job.back)
+    job.propose = AsyncMock()
+    monkeypatch.setattr("app.worker.propose_layout", job.propose)
+    return c
+
+
+async def test_a_saved_layout_reads_its_upload_even_when_fingerprints_differ(pool, job, chosen):
+    await process_job(pool, str(job.import_id))
+
+    job.get_profile.assert_awaited_once_with(pool, profile_id=chosen["id"])
+    assert len(job.insert.call_args.kwargs["transactions"]) == 6
+    assert job.parsed.call_args.kwargs["profile_id"] == chosen["id"]
+    job.checked.assert_awaited_once_with(pool, profile_id=chosen["id"])
+    job.back.assert_not_called()
+    job.status.assert_not_called()
+
+
+async def test_a_saved_layout_that_fails_goes_back_to_columns_saying_why(pool, job, chosen):
+    job.content = BAD
+    job.parsers["Sample Bank"] = MagicMock(return_value=[])
+    await process_job(pool, str(job.import_id))
+
+    detail = job.back.call_args.kwargs["error_detail"]
+    assert job.back.call_args.kwargs["import_id"] == job.import_id
+    assert detail.startswith("We couldn't read the whole statement with these columns: ")
+    assert "balance" in detail.lower()
+    job.parsers["Sample Bank"].assert_not_called()
+    job.propose.assert_not_called()
+    job.insert.assert_not_called()
+
+
+async def test_only_a_pending_upload_uses_its_saved_layout(pool, job, chosen):
+    job.record["status"] = "awaiting_support"
+    job.profiles.return_value = []
+    await process_job(pool, str(job.import_id))
+    job.get_profile.assert_not_called()
+
+
+async def test_a_saved_layout_that_cant_be_loaded_falls_back_to_matching(pool, job, chosen):
+    job.get_profile.side_effect = RuntimeError("db down")
+    job.profiles.return_value = [candidate()]
+    await process_job(pool, str(job.import_id))
+    assert len(job.insert.call_args.kwargs["transactions"]) == 6
+    job.back.assert_not_called()
