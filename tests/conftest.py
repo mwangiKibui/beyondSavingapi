@@ -72,7 +72,7 @@ def limits(monkeypatch):
 
     def set_limit(value, used=0):
         monkeypatch.setattr("app.services.limits.get_plan_limit", AsyncMock(return_value=value))
-        for name in ("count_imports_reached_allocation", "count_active_accounts"):
+        for name in ("count_imports_reached_allocation", "count_active_accounts", "count_proposals"):
             monkeypatch.setattr(f"app.services.limits.{name}", AsyncMock(return_value=used))
 
     return set_limit

@@ -26,6 +26,7 @@ from app.repositories.statement_profiles import list_active_profiles, record_che
 from app.repositories.transactions import insert_transactions
 from app.services.import_handling import handle_import_by_id
 from app.services.statement_files import file_type_of
+from app.services.layout_proposer import propose_layout
 from app.services.statement_profiles import ProfileRead, read_with_profiles
 
 logging.basicConfig(level=logging.INFO)
@@ -308,6 +309,9 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
                 if _can_be_mapped(record, attempt):
                     # ab-315: no stored layout reads it - the uploader maps it.
                     logger.info("Import %s (provider %s) needs mapping", import_id, record["provider"])
+                    # ab-314: a masked page to the AI first, when our own guess
+                    # doesn't pass; a passing proposal opens Columns pre-filled.
+                    await propose_layout(pool, record=record, content=content, file_type=file_type)
                     await set_import_status(pool, import_id=parsed_import_id, status="needs_mapping")
                     return
                 detail = _no_read_detail(record, attempt, file_type)

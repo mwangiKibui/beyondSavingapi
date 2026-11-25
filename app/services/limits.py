@@ -15,6 +15,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 
+from app.repositories.ai_layout_proposals import count_proposals
 from app.repositories.plans import count_active_accounts, count_imports_reached_allocation, get_plan_limit
 
 STATEMENT_IMPORTS_PER_DAY = "statement_imports_per_day"
@@ -67,9 +68,8 @@ async def _count(conn, user_id: UUID, key: str, day: tuple[datetime, datetime]) 
         return await count_imports_reached_allocation(conn, user_id=user_id, start=day[0], end=day[1])
     if key == ACCOUNTS_MAX:
         return await count_active_accounts(conn, user_id=user_id)
-    # AI_LAYOUT_PROPOSALS_PER_DAY: nothing records proposals yet - ab-314
-    # adds the usage table and the count; until then none have been used.
-    return 0
+    # AI_LAYOUT_PROPOSALS_PER_DAY (ab-314): every model call made that day.
+    return await count_proposals(conn, user_id=user_id, start=day[0], end=day[1])
 
 
 async def check_limit(conn, user_id: UUID, key: str, *, now: datetime | None = None) -> LimitStatus:

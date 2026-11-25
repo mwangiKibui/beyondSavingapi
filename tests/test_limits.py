@@ -21,6 +21,7 @@ def repo(monkeypatch):
         "get_plan_limit": AsyncMock(return_value=None),
         "count_imports_reached_allocation": AsyncMock(return_value=0),
         "count_active_accounts": AsyncMock(return_value=0),
+        "count_proposals": AsyncMock(return_value=0),
     }
     for name, mock in mocks.items():
         monkeypatch.setattr(svc, name, mock)
@@ -87,12 +88,15 @@ async def test_below_the_limit_is_not_reached(repo):
     repo["count_active_accounts"].assert_awaited_once()
 
 
-async def test_ai_proposals_count_zero_until_usage_is_recorded(repo):
-    # ab-314 adds the usage table; until then nothing has been used.
+async def test_ai_proposals_count_the_days_model_calls(repo):
+    # ab-314: every model call recorded in ai_layout_proposals that EAT day.
     repo["get_plan_limit"].return_value = 5
+    repo["count_proposals"].return_value = 5
     status = await check_limit(object(), USER, "ai_layout_proposals_per_day")
-    assert (status.used, status.limit, status.reached) == (0, 5, False)
+    assert (status.used, status.limit, status.reached) == (5, 5, True)
     assert status.resets_at is not None
+    start, end = repo["count_proposals"].await_args.kwargs["start"], repo["count_proposals"].await_args.kwargs["end"]
+    assert end - start == timedelta(days=1)
 
 
 async def test_an_unknown_key_is_a_programming_error(repo):
