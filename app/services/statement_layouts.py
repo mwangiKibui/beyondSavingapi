@@ -20,6 +20,7 @@ from app.core.queues import PARSE_JOBS_QUEUE
 from app.core.redis import get_redis
 from app.core.storage import get_storage_client
 from app.parsers.base import StatementParseError
+from app.parsers.profiles.guess import dedupe_roles
 from app.parsers.profiles.layout import page_lines
 from app.parsers.profiles.reader import read_statement
 from app.parsers.profiles.tabular import load_grid
@@ -165,3 +166,30 @@ async def save_layout(
 def parse_profile(raw: dict) -> StatementProfile:
     """validate_profile, kept here so the API has one import."""
     return validate_profile(raw)
+
+
+def apply_learned_roles(guess: dict, learned: dict[str, str]) -> tuple[dict, list[str]]:
+    """ab-329: the guess with each column's role replaced by the one most
+    users chose for its heading ({header: role}), single-use roles deduped
+    again, and where each role came from ("learned" or "keyword"). The
+    guess comes back unchanged if the learned roles don't make a valid
+    profile."""
+    columns = guess["table"]["columns"]
+    keyword = ["keyword"] * len(columns)
+    if not learned:
+        return guess, keyword
+    roles = dedupe_roles([learned.get(c.get("header") or "", c["role"]) for c in columns])
+    candidate = {
+        **guess,
+        "table": {**guess["table"], "columns": [{**c, "role": r} for c, r in zip(columns, roles)]},
+    }
+    try:
+        learned_guess = validate_profile(candidate).model_dump(mode="json")
+    except Exception:
+        logger.info("Learned column roles didn't make a valid layout; keeping the guess")
+        return guess, keyword
+    sources = [
+        "learned" if c.get("header") in learned and r == learned[c["header"]] else "keyword"
+        for c, r in zip(columns, roles)
+    ]
+    return learned_guess, sources

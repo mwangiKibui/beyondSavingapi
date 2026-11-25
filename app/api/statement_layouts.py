@@ -7,7 +7,7 @@ Only the uploader ever sees the page words and rows returned here.
 
 import logging
 from datetime import date
-from typing import Literal
+from typing import Literal, get_args
 from uuid import UUID
 
 import asyncpg
@@ -19,11 +19,18 @@ from app.core.db import get_pool
 from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.security import get_current_user_id
 from app.parsers.profiles.guess import layout_start
-from app.parsers.profiles.schema import InvalidStatementProfile
+from app.parsers.profiles.schema import InvalidStatementProfile, Role
+from app.repositories.column_heading_choices import learned_roles, record_choices
 from app.repositories.notifications import notify_admins_layout_waiting
 from app.repositories.statement_imports import get_import_for_layout, set_import_status
 from app.services.statement_files import file_type_of
-from app.services.statement_layouts import check_layout, load_content, parse_profile, save_layout
+from app.services.statement_layouts import (
+    apply_learned_roles,
+    check_layout,
+    load_content,
+    parse_profile,
+    save_layout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +38,8 @@ router = APIRouter(prefix="/statement-imports", tags=["statement-layouts"])
 
 # Imports whose layout the uploader can still map.
 _MAPPABLE = ("needs_mapping", "awaiting_support")
+
+_ROLES = set(get_args(Role))
 
 
 class PageWord(BaseModel):
@@ -64,10 +73,16 @@ class LayoutStartResponse(BaseModel):
     # CSV/XLSX: the first rows as text, and the heading row we think it is.
     rows: list[list[str]] | None = None
     header_row: int | None = None
+    # ab-329: per guessed column, whether its role came from the heading's
+    # words ("keyword") or from what most users chose for it ("learned").
+    suggestion_sources: list[Literal["keyword", "learned"]] = []
 
 
 class LayoutRequest(BaseModel):
     profile: dict
+    # ab-329: the role the wizard suggested per column of profile.table.columns
+    # (None where it suggested nothing). Only recorded, never trusted.
+    suggested_roles: list[str | None] | None = None
 
 
 class PreviewRow(BaseModel):
@@ -148,7 +163,43 @@ async def get_layout_endpoint(
         raise
     except Exception:
         raise _unexpected("starting the layout", import_id, user_id) from None
-    return {"file_type": file_type, "provider": statement_import["provider"], **start}
+    guess, sources = start.get("guess"), []
+    if guess is not None:
+        guess, sources = await _with_learned_roles(pool, guess, file_type=file_type)
+    return {
+        "file_type": file_type,
+        "provider": statement_import["provider"],
+        **start,
+        "guess": guess,
+        "suggestion_sources": sources,
+    }
+
+
+async def _with_learned_roles(pool, guess: dict, *, file_type: str) -> tuple[dict, list[str]]:
+    """The guess with the roles most users chose for its headings. A failed
+    lookup just leaves the guess as it is."""
+    columns = guess["table"]["columns"]
+    try:
+        learned = await learned_roles(pool, file_type=file_type, headings=[c.get("header") for c in columns])
+        return apply_learned_roles(guess, learned)
+    except Exception:
+        logger.error("Looking up learned column roles failed", exc_info=True)
+        return guess, ["keyword"] * len(columns)
+
+
+async def _record_choices(pool, body: LayoutRequest, profile, *, user_id: UUID, file_type: str) -> None:
+    """Remembers the role this user gave each heading. Never fails the save."""
+    columns = profile.table.columns
+    suggested = body.suggested_roles if body.suggested_roles and len(body.suggested_roles) == len(columns) else None
+    choices = [
+        (c.header, c.role, suggested[i] if suggested and suggested[i] in _ROLES else None)
+        for i, c in enumerate(columns)
+        if c.header
+    ]
+    try:
+        await record_choices(pool, user_id=user_id, file_type=file_type, choices=choices)
+    except Exception:
+        logger.error("Recording column heading choices failed for user %s", user_id, exc_info=True)
 
 
 @router.post("/{import_id}/layout/check", response_model=LayoutCheckResponse)
@@ -205,6 +256,7 @@ async def save_layout_endpoint(
         raise
     except Exception:
         raise _unexpected("saving a layout", import_id, user_id) from None
+    await _record_choices(pool, body, profile, user_id=user_id, file_type=_file_type(statement_import))
     logger.info(
         "Import %s: layout saved as profile %s v%s", import_id, created["id"], created.get("version")
     )

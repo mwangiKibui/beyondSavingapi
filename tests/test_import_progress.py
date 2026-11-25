@@ -125,13 +125,30 @@ def test_another_users_import_is_not_found(client, fake_user, fake_pool, monkeyp
 ])
 def test_without_saved_progress_the_step_comes_from_the_import(client, fake_user, fake_pool, monkeypatch,
                                                                status, reviewed_at, allocated_at, step):
-    patch_repo(monkeypatch, imp=import_row(status, reviewed_at, allocated_at=allocated_at))
+    imp = import_row(status, reviewed_at, allocated_at=allocated_at)
+    patch_repo(monkeypatch, imp=imp)
     body = client.get(url()).json()
     parsed = status == "parsed"
     assert body == {"step": step, "draft": {"rows": {}, "labels": {}, "paybills": {}},
                     "reviewed_count": 0, "total_count": 0, "updated_at": None, "error_detail": None,
                     "added_count": 3 if parsed else None, "already_count": 0 if parsed else None,
-                    "already_recorded_by": None}
+                    "already_recorded_by": None, "account_id": str(imp["account_id"]), "sub_ledger_id": None,
+                    "file_name": "statement.pdf"}
+
+
+def test_progress_says_which_account_and_sub_ledger_the_upload_is_for(client, fake_user, fake_pool, monkeypatch):
+    """ab-329: the wizard goes back there after a mapping."""
+    sub_ledger_id = uuid4()
+    imp = {**import_row(), "sub_ledger_id": sub_ledger_id}
+    patch_repo(monkeypatch, imp=imp)
+    body = client.get(url()).json()
+    assert (body["account_id"], body["sub_ledger_id"]) == (str(imp["account_id"]), str(sub_ledger_id))
+    patch_repo(monkeypatch, imp=imp, progress={"step": "review", "draft": {}, "reviewed_count": 0,
+                                               "total_count": 0, "updated_at": UPDATED})
+    body = client.get(url()).json()
+    assert (body["account_id"], body["sub_ledger_id"]) == (str(imp["account_id"]), str(sub_ledger_id))
+    saved = client.put(url(), json={"step": "review", "draft": {}}).json()
+    assert (saved["account_id"], saved["sub_ledger_id"]) == (str(imp["account_id"]), str(sub_ledger_id))
 
 
 def test_a_failed_parse_says_why(client, fake_user, fake_pool, monkeypatch):
