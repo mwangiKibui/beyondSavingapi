@@ -38,7 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from app.parsers.profiles.guess import _passes, dedupe_roles, layout_start
 from app.parsers.profiles.layout import page_lines
 from app.parsers.profiles.masking import mask_grid, mask_pdf
-from app.parsers.profiles.reader import _header_band, read_statement
+from app.parsers.profiles.reader import _header_band, read_best_grouping
 from app.parsers.profiles.schema import validate_profile
 from app.parsers.profiles.tabular import load_grid
 from app.parsers.profiles.text import normalise
@@ -73,10 +73,19 @@ Also give:
 balance (e.g. "Opening Balance"), or null
 - totals_in_label and totals_out_label: the exact words of summary lines giving total money \
 in and total money out (e.g. "Total Credit", "Total Debit"), or null
+- row_grouping: each line starts with its vertical position on the page. A transaction may \
+take several lines; say where its OTHER lines (wrapped description text) sit relative to the \
+line holding its date:
+  "below": the date line comes first and the extra text follows under it
+  "above": the extra text comes first, just above the date line
+  "nearest": the extra text sits around the date line, some above and some below (text \
+centred on the row)
+  Look at the gaps: a row's own lines are closer to its date line than to the next row's.
 
 Reply with ONLY this JSON, no other text:
 {"columns": [{"heading": "<heading exactly as shown>", "role": "<role>"}], "date_format": "...", \
-"opening_balance_label": null, "totals_in_label": null, "totals_out_label": null}
+"opening_balance_label": null, "totals_in_label": null, "totals_out_label": null, \
+"row_grouping": "below"}
 
 Masked page:
 """
@@ -97,6 +106,8 @@ class LayoutAnswer(BaseModel):
     opening_balance_label: str | None = Field(default=None, max_length=40)
     totals_in_label: str | None = Field(default=None, max_length=40)
     totals_out_label: str | None = Field(default=None, max_length=40)
+    # ab-333: how a row's other lines sit around its date line.
+    row_grouping: Literal["below", "above", "nearest"] | None = None
 
 
 def parse_answer(text: str) -> LayoutAnswer | None:
@@ -171,6 +182,8 @@ def candidates(guess: dict | None, answer: LayoutAnswer, *, content: bytes = b""
         base = _from_headings(answer, content=content, file_type=file_type)
     else:
         base = _merged(guess, answer)
+    if answer.row_grouping and file_type == "pdf":
+        base = {**base, "table": {**base["table"], "continuation": answer.row_grouping}}
     tries = [base]
     if answer.opening_balance_label and answer.totals_in_label and answer.totals_out_label:
         tries.append(
@@ -251,22 +264,25 @@ def evaluate(content: bytes, guess: dict | None, reply_text: str, file_type: str
     # column can pass by reading only the rows it can date.
     best, most = None, 0
     for profile in tried:
-        rows = _passing_rows(content, profile)
+        resolved, rows = _passing_rows(content, profile)
         if rows > most:
-            best, most = profile, rows
+            best, most = resolved, rows
     if best is not None:
         return Evaluation("passed", best)
     return Evaluation("failed_check", tried[0])
 
 
-def _passing_rows(content: bytes, profile: dict) -> int:
-    """How many rows the profile reads with the balances adding up; 0 when
-    they don't or it can't read the file."""
+def _passing_rows(content: bytes, profile: dict) -> tuple[dict, int]:
+    """The profile with the row grouping that reads it (ab-333: its own,
+    else the best of the others) and how many rows pass both checks; 0
+    when none does or it can't read the file."""
     try:
-        result = read_statement(content, validate_profile(profile), default_currency="KES")
+        resolved, result = read_best_grouping(content, validate_profile(profile), default_currency="KES")
     except Exception:
-        return 0
-    return len(result.transactions) if result.check.passed else 0
+        return profile, 0
+    if not result.check.passed:
+        return profile, 0
+    return resolved.model_dump(mode="json"), len(result.transactions)
 
 
 def masked_page(content: bytes, file_type: str) -> str | None:

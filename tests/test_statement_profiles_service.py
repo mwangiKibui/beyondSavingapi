@@ -81,7 +81,7 @@ def test_a_reader_crash_is_a_failure_not_an_exception(monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("bug")
 
-    monkeypatch.setattr("app.services.statement_profiles.read_statement", boom)
+    monkeypatch.setattr("app.services.statement_profiles.read_best_grouping", boom)
     result = read_with_profiles(GOOD, institution_id=OWN, currency="KES", candidates=[candidate()])
     assert result.transactions is None and result.failure is not None
 
@@ -90,3 +90,13 @@ def test_another_layout_of_the_same_bank_doesnt_match():
     other = build(sample_rows(4), Layout(headers=["Posted", "Narrative", "Credit", "Debit", "Running"]))
     result = read_with_profiles(other, institution_id=OWN, currency="KES", candidates=[candidate()])
     assert result.matched_profile_id is None and result.transactions is None
+
+
+def test_a_stored_layout_reads_text_printed_above_each_date():
+    """ab-333: the layout matched, but its rows' text sits above each date
+    line - read with the grouping that gives every row its own text."""
+    rows = sample_rows(30)
+    pdf = build(rows, Layout(text_position="above"))
+    result = read_with_profiles(pdf, institution_id=OWN, currency="KES", candidates=[candidate(pdf)])
+    assert result.transactions is not None and len(result.transactions) == 30
+    assert [t["description"] for t in result.transactions] == [r[1] for r in rows]

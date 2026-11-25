@@ -33,6 +33,10 @@ class Layout:
     repeat_header: bool = True
     # Text under the description column just below the table (a footer).
     footer: str | None = None
+    # ab-333: where a row's description sits around its date line - on it
+    # ("on"), on the line above it ("above", text printed over the date like
+    # a vertically centred cell) or split above and below ("around").
+    text_position: str = "on"
 
 
 def build(rows: list[list[str]], layout: Layout | None = None, *, continuation: dict[int, str] | None = None) -> bytes:
@@ -79,6 +83,21 @@ def build(rows: list[list[str]], layout: Layout | None = None, *, continuation: 
             top_of_table = y + 12
         c.setFont("Helvetica", 9)
         for kind, cells in chunk:
+            if kind == "row" and layout.text_position != "on":
+                words = cells[desc_col].split()
+                above = words if layout.text_position == "above" else words[: len(words) // 2 or 1]
+                below = [] if layout.text_position == "above" else words[len(above) :]
+                c.drawString(layout.xs[desc_col] + 2, y, " ".join(above))
+                y -= 7
+                for col, (x, text) in enumerate(zip(layout.xs, cells, strict=True)):
+                    if text and col != desc_col:
+                        c.drawString(x + 2, y, text)
+                if below:
+                    y -= 7
+                    c.drawString(layout.xs[desc_col] + 2, y, " ".join(below))
+                y -= 16
+                row_index += 1
+                continue
             for x, text in zip(layout.xs, cells, strict=True):
                 if text:
                     c.drawString(x + 2, y, text)

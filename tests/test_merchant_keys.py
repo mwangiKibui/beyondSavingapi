@@ -284,3 +284,20 @@ def test_equity_business_and_charge_rows_keep_name_keys(description, expected):
     assert k.kind == "name"
     assert k.is_person is False
     assert k.value == expected
+
+
+def test_a_packed_row_keeps_its_words_and_stays_private():
+    """ab-333: details joined by ~ (a bank's M-Pesa deposit) - the codes,
+    numbers and date go, the name is kept as a private key."""
+    key = extract_key(
+        provider="Sample Bank",
+        description="MPS2ABCDEF~0712345~254700000000~ALEXSA~2026-01-31",
+        direction="in",
+        secret="s",
+    )
+    assert (key.kind, key.value, key.is_business) == ("name", "ALEXSA", False)
+
+
+def test_pipes_split_too():
+    key = extract_key(provider="Sample Bank", description="POS|NAIVAS SUPERMARKET|0042", direction="out", secret="s")
+    assert key.value == "POS NAIVAS SUPERMARKET" and key.is_business

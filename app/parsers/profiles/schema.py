@@ -129,8 +129,10 @@ class Table(_Strict):
     # A line with no date continues a row's description: the row above
     # ("below"), or the nearest row on the page, above or below, the
     # earlier on a tie ("nearest" - Equity prints details around its
-    # amounts line, ab-320).
-    continuation: Literal["below", "nearest"] = "below"
+    # amounts line, ab-320), or the row below ("above" - the text sits
+    # over its date line). ab-333: tried automatically when a read's
+    # descriptions don't add up.
+    continuation: Literal["below", "nearest", "above"] = "below"
     y_tolerance: float = Field(default=3, ge=1, le=6)
     row_order: Literal["oldest_first", "newest_first"] = "oldest_first"
     # newest_first statements: rows with the same date/time either reverse
