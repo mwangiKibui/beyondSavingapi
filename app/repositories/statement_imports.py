@@ -264,6 +264,19 @@ async def soft_delete_import(pool: asyncpg.Pool, *, import_id: UUID) -> int | No
         return int(removed.split()[-1])
 
 
+async def accept_handled_rows(pool: asyncpg.Pool, *, transaction_ids: list[UUID]) -> int:
+    """ab-335: accepts rows handled at import. Callers pass only the
+    upload's own handled rows (checked against its review)."""
+    status = await pool.execute(
+        """
+        UPDATE transactions SET handling_accepted_at = now()
+        WHERE id = ANY($1::uuid[]) AND handled_as IS NOT NULL AND handling_accepted_at IS NULL
+        """,
+        transaction_ids,
+    )
+    return int(status.split()[-1])
+
+
 async def set_import_allocated(pool: asyncpg.Pool, *, import_id: UUID, allocated: bool):
     """ab-296: the user moved on from Allocation to Review (or back).
     Callers check the import is the user's first."""

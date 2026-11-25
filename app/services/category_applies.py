@@ -33,7 +33,7 @@ from app.repositories.category_suggestions import (
 )
 from app.repositories.accounts import DuplicateAccount, create_account, get_account
 from app.services.limits import ACCOUNTS_MAX, enforce_limit
-from app.repositories.row_handling import get_or_create_transfer_reason
+from app.repositories.row_handling import delete_allocations, get_or_create_transfer_reason
 from app.repositories.transfer_reasons import get_user_transfer_reasons
 from app.repositories.description_keywords import (
     delete_keyword_choices,
@@ -118,6 +118,9 @@ class ApplyGroup:
     # ab-288: the user's own words for the rows (mainly for "Other"), saved
     # on each allocation. Private: never learned, voted or sent anywhere.
     note: str | None = None
+    # ab-335: the rows were already allocated some other way (an earlier
+    # statement, the Transactions page): their allocations are replaced.
+    replace: bool = False
     # Internal: the suggestion use_suggestion resolved to for these rows.
     suggestion: dict | None = None
 
@@ -289,6 +292,13 @@ async def apply_groups(
     by_id = {r["id"]: r for r in rows}
     if set(all_ids) - by_id.keys():
         raise AllocationRejected(404, "Transaction not found")
+    # ab-335: editing rows already allocated - their allocations go first.
+    # Rows handled at import or paired as a transfer leg keep their own
+    # ways back ("Not a charge…", Undo).
+    replacing = [tid for g in groups if g.replace for tid in g.transaction_ids]
+    if replacing:
+        if any(by_id[t]["handled_as"] or by_id[t]["is_transfer"] for t in replacing):
+            raise AllocationRejected(409, "One or more rows can't be changed here")
     if statement_import is not None:
         in_scope = {
             r["id"]
@@ -302,6 +312,10 @@ async def apply_groups(
         }
         if set(all_ids) - in_scope:
             raise AllocationRejected(422, "One or more rows aren't part of this statement")
+    if replacing:
+        await delete_allocations(conn, transaction_ids=replacing)
+        rows = await lock_rows_for_apply(conn, user_id=user_id, transaction_ids=all_ids)
+        by_id = {r["id"]: r for r in rows}
     if not all(_is_open(r) for r in rows):
         raise AllocationRejected(409, "One or more rows are already categorised")
 

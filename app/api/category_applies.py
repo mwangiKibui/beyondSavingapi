@@ -80,6 +80,9 @@ class ApplyGroupRequest(BaseModel):
     # Saved on each allocation (shown on the Transaction statement and
     # Funds transfers reports); private, never learned or shared.
     note: str | None = None
+    # ab-335: edit rows already allocated some other way - their current
+    # allocations are replaced (not for rows handled at import).
+    replace: bool = False
 
     @field_validator("new_category_name", "someone_else_name", "note", mode="before")
     @classmethod

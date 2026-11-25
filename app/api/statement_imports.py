@@ -36,6 +36,7 @@ from app.repositories.statement_imports import (
     get_import_overlap,
     list_statement_imports,
     set_import_allocated,
+    accept_handled_rows,
 )
 from app.repositories.notifications import generate_budget_alerts
 from app.repositories.sub_ledgers import list_sub_ledgers
@@ -57,7 +58,15 @@ from app.services.import_confirm import ConfirmItem, confirm_import
 from app.services.import_handling import handle_import_by_id
 from app.services.import_progress import Draft, payee_keys, progress_counts
 from app.services.limits import STATEMENT_IMPORTS_PER_DAY, enforce_limit
-from app.services.payee_groups import REVIEW_TABS, build_groups, review_tab, select_groups
+from app.services.payee_groups import (
+    CARDS,
+    REVIEW_TABS,
+    build_groups,
+    card_counts,
+    group_cards,
+    review_tab,
+    select_groups,
+)
 from app.services.preview_csv import build_preview_csv
 from app.services.statement_files import (
     UNSUPPORTED_FILE_MESSAGE,
@@ -553,6 +562,15 @@ class ReviewTabCounts(BaseModel):
     decided: int
     sorted: int
     handled: int
+    # ab-335: handled at import and accepted.
+    accepted: int = 0
+
+
+class CardCounts(BaseModel):
+    """ab-335: statement rows per Allocation card."""
+    pending: int
+    suggested: int
+    approved: int
 
 
 class ReviewGroupsResponse(BaseModel):
@@ -564,15 +582,19 @@ class ReviewGroupsResponse(BaseModel):
     counts: ReviewTabCounts
     # Statement rows per tab - the review's stat cards and progress (ab-283).
     row_counts: ReviewTabCounts
-    # To-decide groups that have a suggestion, whatever the filters - "Use
-    # all N suggestions" (ab-283).
+    # ab-335: statement rows per card - Pending / Suggested / Approved.
+    card_counts: CardCounts
+    # Groups with rows to accept, whatever the filters - "Accept all N
+    # suggestions" (ab-283; ab-335 adds rows handled at import).
     suggested: int
 
 
 @router.get("/{import_id}/groups", response_model=ReviewGroupsResponse)
 async def review_groups_endpoint(
     import_id: UUID,
-    tab: Literal["all", "approved", "decide", "decided", "sorted", "handled"] = Query(default="decide"),
+    tab: Literal[
+        "all", "approved", "decide", "decided", "sorted", "handled", "accepted", "pending", "suggested"
+    ] = Query(default="decide"),
     handled_as: Literal["charge", "loan", "transfer", "saving"] | None = Query(default=None),
     params: ListParams = Depends(list_params),
     user_id: UUID = Depends(get_current_user_id),
@@ -583,7 +605,9 @@ async def review_groups_endpoint(
     filed from this review (each group's apply_id undoes it); sorted =
     categorised some other way; handled = handled at import (ab-281);
     all = every group, each carrying its status, Pending first; approved =
-    decided + sorted (ab-289).
+    decided + sorted + accepted (ab-289, ab-335); pending / suggested = the
+    ab-335 cards (open rows without / with a suggestion; suggested also takes
+    rows handled at import not accepted yet).
     handled_as narrows to rows handled that way."""
     check_page_size(params)
     _require_pool(pool)
@@ -593,8 +617,8 @@ async def review_groups_endpoint(
     def in_tab(g: dict, t: str) -> bool:
         if t == "all":
             return True
-        if t == "approved":
-            return bool(g["statuses"] & {"decided", "sorted"})
+        if t in CARDS:
+            return t in group_cards(g)
         return t in g["statuses"]
 
     items, total = select_groups(
@@ -608,9 +632,8 @@ async def review_groups_endpoint(
         "page_size": params.page_size,
         "counts": {t: sum(1 for g in all_groups if in_tab(g, t)) for t in REVIEW_TABS},
         "row_counts": {t: len(rows) for t, rows in by_tab.items()},
-        "suggested": sum(
-            1 for g in all_groups if any(r["status"] == "decide" and r["suggestion"] for r in g["rows"])
-        ),
+        "card_counts": card_counts(all_groups),
+        "suggested": sum(1 for g in all_groups if "suggested" in group_cards(g)),
     }
 
 
@@ -651,7 +674,7 @@ def _review_groups(loaded: dict) -> tuple[list[dict], dict[str, list[dict]]]:
     all_groups = build_groups(
         not_handled, keys=loaded["keys"], preview=preview, category_names=names, with_status=True,
         category_types=types, category_entry_types=entry_types,
-    ) + build_groups(by_tab["handled"], keys=loaded["keys"], category_names=names, with_status=True,
+    ) + build_groups(by_tab["handled"] + by_tab["accepted"], keys=loaded["keys"], category_names=names, with_status=True,
                      category_types=types, category_entry_types=entry_types)
     return all_groups, by_tab
 
@@ -1040,6 +1063,13 @@ class StepResponse(BaseModel):
     step: Literal["allocation", "review"]
 
 
+async def _rows_left(pool: asyncpg.Pool, *, import_id: UUID, user_id: UUID) -> int:
+    """ab-335: the upload's rows still Pending or Suggested."""
+    loaded = await _load_preview(pool, import_id=import_id, user_id=user_id)
+    cards = card_counts(_review_groups(loaded)[0])
+    return cards["pending"] + cards["suggested"]
+
+
 @router.put("/{import_id}/step", response_model=StepResponse)
 async def set_import_step_endpoint(
     import_id: UUID,
@@ -1056,6 +1086,14 @@ async def set_import_step_endpoint(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail="This statement hasn't finished processing yet"
             )
+        if body.step == "review":
+            # ab-335: every row Approved first - none Pending or Suggested.
+            left = await _rows_left(pool, import_id=import_id, user_id=user_id)
+            if left:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Accept or allocate the {left} remaining row{'s' if left != 1 else ''} first",
+                )
         await set_import_allocated(pool, import_id=import_id, allocated=body.step == "review")
     except HTTPException:
         raise
@@ -1065,6 +1103,48 @@ async def set_import_step_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
         ) from None
     return {"step": body.step}
+
+
+# --- ab-335: accepting rows handled at import ------------------------------------
+
+
+class AcceptHandledRequest(BaseModel):
+    # The rows to accept; all of the upload's handled rows when left out.
+    transaction_ids: list[UUID] | None = Field(default=None, max_length=5000)
+
+
+class AcceptHandledResponse(BaseModel):
+    accepted: int
+
+
+@router.post("/{import_id}/handled/accept", response_model=AcceptHandledResponse)
+async def accept_handled_endpoint(
+    import_id: UUID,
+    body: AcceptHandledRequest,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """ab-335: the user agrees with how rows were handled at import (a
+    charge, an own transfer, a loan, saving): they move from Suggested to
+    Approved. Only this upload's own handled rows; others are skipped."""
+    _require_pool(pool)
+    try:
+        await _owned_import(pool, import_id=import_id, user_id=user_id)
+        loaded = await _load_preview(pool, import_id=import_id, user_id=user_id)
+        handled = [r["id"] for r in loaded["rows"] if review_tab(r) == "handled"]
+        if body.transaction_ids is not None:
+            wanted = set(body.transaction_ids)
+            handled = [i for i in handled if i in wanted]
+        accepted = await accept_handled_rows(pool, transaction_ids=handled) if handled else 0
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Unexpected error accepting handled rows of import %s, user %s", import_id, user_id,
+                     exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
+        ) from None
+    return {"accepted": accepted}
 
 
 # --- ab-297 / ab-334: deleting an upload ----------------------------------------

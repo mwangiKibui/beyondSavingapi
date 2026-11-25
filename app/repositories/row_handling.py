@@ -40,7 +40,7 @@ async def set_handled(
 ) -> None:
     await conn.execute(
         """
-        UPDATE transactions t SET handled_as = h.kind, handled_reason = h.reason
+        UPDATE transactions t SET handled_as = h.kind, handled_reason = h.reason, handling_accepted_at = NULL
         FROM UNNEST($1::uuid[], $2::text[], $3::text[]) AS h(id, kind, reason)
         WHERE t.id = h.id
         """,
@@ -189,7 +189,8 @@ async def dismiss_handling(conn: asyncpg.Connection, *, transaction_id: UUID) ->
     await conn.execute(
         """
         UPDATE transactions
-        SET handled_as = NULL, handled_reason = NULL, handling_dismissed = TRUE, transfer_group_id = NULL
+        SET handled_as = NULL, handled_reason = NULL, handling_dismissed = TRUE, transfer_group_id = NULL,
+            handling_accepted_at = NULL
         WHERE id = $1
         """,
         transaction_id,
