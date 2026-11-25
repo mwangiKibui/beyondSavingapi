@@ -18,7 +18,9 @@ from app.services.merchant_keys import RowKey, extract_key
 ALLOWED_PAGE_SIZES = (5, 10, 20, 30)
 DEFAULT_PAGE_SIZE = 30
 SORTS = ("rows", "amount", "payee", "recent")
-REVIEW_TABS = ("decide", "decided", "sorted", "handled")
+REVIEW_TABS = ("decide", "decided", "sorted", "handled", "accepted")
+# ab-335: the Allocation step's cards, by row.
+CARDS = ("pending", "suggested", "approved")
 
 
 def extract_row_keys(rows: list[dict], *, secret: str) -> dict[UUID, RowKey]:
@@ -43,9 +45,10 @@ def review_tab(row: dict) -> str:
     sorted   categorised (or reconciled) some other way, e.g. on an
              earlier, overlapping statement
     handled  handled at import (ab-281) - not Saving / Borrowed the user
-             filed in the review (ab-288), which carry an apply"""
+             filed in the review (ab-288), which carry an apply
+    accepted handled at import, and the user accepted it (ab-335)"""
     if _handled_at_import(row):
-        return "handled"
+        return "accepted" if row.get("handling_accepted_at") else "handled"
     if _is_open(row):
         return "decide"
     return "decided" if row.get("applied_here") else "sorted"
@@ -235,14 +238,45 @@ def _group_status(statuses: list[str]) -> dict:
     """A group is Pending while any line is (ab-292); otherwise its lines'
     shared status, or Approved (decided before sorted)."""
     pending = statuses.count("decide")
-    approved = statuses.count("decided") + statuses.count("sorted")
+    approved = statuses.count("decided") + statuses.count("sorted") + statuses.count("accepted")
     if pending:
         status = "decide"
     elif "handled" in statuses:
         status = "handled"
+    elif "accepted" in statuses:
+        status = "accepted"
     else:
         status = "decided" if "decided" in statuses else "sorted"
     return {"status": status, "statuses": set(statuses), "pending_count": pending, "approved_count": approved}
+
+
+def row_card(group: dict, row: dict) -> str:
+    """ab-335: which Allocation card a group's row counts under.
+    pending    open, nothing suggested
+    suggested  open with a suggestion (the row's own or its payee group's,
+               as the Approve button uses), or handled at import and not
+               accepted yet
+    approved   allocated (here or elsewhere) or an accepted handled row"""
+    status = row.get("status")
+    if status == "decide":
+        return "suggested" if row.get("suggestion") or group.get("suggestion") else "pending"
+    if status == "handled":
+        return "suggested"
+    return "approved"
+
+
+def group_cards(group: dict) -> set[str]:
+    """The cards a payee group has rows under (a group can span two)."""
+    return {row_card(group, r) for r in group.get("rows") or []}
+
+
+def card_counts(groups: list[dict]) -> dict[str, int]:
+    """Rows per card, across every group."""
+    counts = dict.fromkeys(CARDS, 0)
+    for g in groups:
+        for r in g.get("rows") or []:
+            counts[row_card(g, r)] += 1
+    return counts
 
 
 def _matches(group: dict, needle: str) -> bool:

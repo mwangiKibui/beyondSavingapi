@@ -58,7 +58,7 @@ async def get_import_rows(
         SELECT t.id, t.txn_date, t.amount, t.currency, t.direction, t.description,
                (t.transfer_group_id IS NOT NULL) AS is_transfer,
                t.balance_after,
-               t.account_id, t.handled_as, t.handled_reason, t.handling_dismissed,
+               t.account_id, t.handled_as, t.handled_reason, t.handling_dismissed, t.handling_accepted_at,
                t.sub_ledger_id, sl.name AS sub_ledger_name, sl.role AS sub_ledger_role,
                t.import_id, si.file_name, si.created_at AS import_created_at, acct.nickname AS account_nickname,
                alloc.apply_id, COALESCE(alloc.applied_here, false) AS applied_here,

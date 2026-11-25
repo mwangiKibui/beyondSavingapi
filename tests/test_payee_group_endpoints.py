@@ -179,9 +179,11 @@ def test_review_groups_split_rows_into_tabs(client, fake_user, fake_pool, review
     ], rules=[rule])
 
     decide = client.get(f"/statement-imports/{IMPORT_ID}/groups").json()
-    assert decide["counts"] == {"decide": 1, "decided": 1, "sorted": 1, "handled": 1}
-    assert decide["row_counts"] == {"decide": 2, "decided": 1, "sorted": 1, "handled": 1}
-    assert decide["suggested"] == 1
+    assert decide["counts"] == {"decide": 1, "decided": 1, "sorted": 1, "handled": 1, "accepted": 0}
+    assert decide["row_counts"] == {"decide": 2, "decided": 1, "sorted": 1, "handled": 1, "accepted": 0}
+    # ab-335: the handled charge waits to be accepted too.
+    assert decide["suggested"] == 2
+    assert decide["card_counts"] == {"pending": 0, "suggested": 3, "approved": 2}
     g = decide["items"][0]
     assert g["row_count"] == 2 and g["label"] == "Corner shop"
     assert g["suggestion"]["category_id"] == str(GROCERIES["id"]) and g["suggestion"]["source"] == "your_rule"
@@ -292,7 +294,7 @@ def test_review_groups_filter_by_handled_as(client, fake_user, fake_pool, review
     body = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=all&handled_as=charge").json()
     assert [(g["status"], g["handled_as"]) for g in body["items"]] == [("handled", "charge")]
     # Counts stay whatever the filters.
-    assert body["counts"] == {"decide": 1, "decided": 1, "sorted": 1, "handled": 2}
+    assert body["counts"] == {"decide": 1, "decided": 1, "sorted": 1, "handled": 2, "accepted": 0}
 
 
 def test_review_groups_rejects_an_unknown_handled_as(client, fake_user, fake_pool, review):
@@ -319,7 +321,7 @@ def test_review_groups_keep_one_payee_in_one_row_across_pending_and_approved(cli
     assert lines[400.0]["status"] == "decided" and lines[400.0]["category_name"] == "Groceries"
     assert lines[400.0]["apply_id"] == str(apply_id)
     # Row counts stay per line.
-    assert body["row_counts"] == {"decide": 1, "decided": 1, "sorted": 0, "handled": 1}
+    assert body["row_counts"] == {"decide": 1, "decided": 1, "sorted": 0, "handled": 1, "accepted": 0}
     # A mixed group shows under Pending and under Approved.
     for tab in ("decide", "approved"):
         items = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab={tab}").json()["items"]
@@ -669,3 +671,84 @@ def test_apply_passes_the_accounts_max_429_through(client, fake_user, fake_pool,
     assert response.status_code == 429
     assert response.json() == {"detail": {"code": "limit_reached", "limit_key": "accounts_max", "used": 2,
                                           "limit": 2, "resets_at": None}}
+
+
+# --- ab-335: Pending / Suggested / Approved cards -------------------------------
+
+
+def test_ab335_cards_split_rows_by_suggestion_and_acceptance(client, fake_user, fake_pool, review):
+    rule = {"key_kind": "till", "key_value": "5555555", "provider": None, "account_hash": None,
+            "direction": "out", "category_id": GROCERIES["id"], "label": "Corner shop", "times_used": 2,
+            "avg_amount": None}
+    review([
+        txn(GROCER),  # suggested by the user's rule
+        txn("Merchant Payment to 7777777 - OTHER SHOP"),  # nothing suggested
+        txn("Pay Bill Charge", allocated=10, handled_as="charge", handled_reason="M-Pesa charge"),
+        txn("Withdrawal Charge", allocated=10, handled_as="charge", handled_reason="M-Pesa charge",
+            handling_accepted_at="2026-11-26T10:00:00Z"),
+    ], rules=[rule])
+
+    body = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=all").json()
+    assert body["card_counts"] == {"pending": 1, "suggested": 2, "approved": 1}
+    assert body["row_counts"]["handled"] == 1 and body["row_counts"]["accepted"] == 1
+
+    pending = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=pending").json()["items"]
+    assert [g["row_count"] for g in pending] == [1] and pending[0]["suggestion"] is None
+
+    suggested = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=suggested").json()["items"]
+    assert sorted(bool(g.get("handled_as")) for g in suggested) == [False, True]
+
+    approved = client.get(f"/statement-imports/{IMPORT_ID}/groups?tab=approved").json()["items"]
+    assert len(approved) == 1 and approved[0]["handled_as"] == "charge"
+    assert {r["status"] for r in approved[0]["rows"]} == {"accepted"}
+
+
+
+def test_ab335_accepting_handled_rows_only_takes_this_uploads_handled_rows(client, fake_user, fake_pool, review,
+                                                                           monkeypatch):
+    charge = txn("Pay Bill Charge", allocated=10, handled_as="charge", handled_reason="M-Pesa charge")
+    done = txn("Withdrawal Charge", allocated=10, handled_as="charge", handled_reason="M-Pesa charge",
+               handling_accepted_at="2026-11-26T10:00:00Z")
+    open_row = txn(GROCER)
+    review([charge, done, open_row])
+    monkeypatch.setattr(f"{SI}._owned_import", AsyncMock(return_value=import_row()))
+    accept = AsyncMock(return_value=1)
+    monkeypatch.setattr(f"{SI}.accept_handled_rows", accept)
+
+    # Everything: only the handled row not accepted yet.
+    response = client.post(f"/statement-imports/{IMPORT_ID}/handled/accept", json={})
+    assert response.status_code == 200 and response.json() == {"accepted": 1}
+    assert accept.await_args.kwargs == {"transaction_ids": [charge["id"]]}
+
+    # Named rows: anything that isn't a waiting handled row is skipped.
+    accept.reset_mock()
+    response = client.post(f"/statement-imports/{IMPORT_ID}/handled/accept",
+                           json={"transaction_ids": [str(open_row["id"]), str(done["id"])]})
+    assert response.json() == {"accepted": 0}
+    accept.assert_not_awaited()
+
+
+def test_ab335_accept_failure_is_a_generic_500(client, fake_user, fake_pool, review, monkeypatch):
+    review([txn("Pay Bill Charge", allocated=10, handled_as="charge", handled_reason="M-Pesa charge")])
+    monkeypatch.setattr(f"{SI}._owned_import", AsyncMock(return_value=import_row()))
+    monkeypatch.setattr(f"{SI}.accept_handled_rows", AsyncMock(side_effect=RuntimeError("db down")))
+    response = client.post(f"/statement-imports/{IMPORT_ID}/handled/accept", json={})
+    assert response.status_code == 500 and "db down" not in response.text
+
+
+def test_ab335_accept_requires_auth(client):
+    assert client.post(f"/statement-imports/{IMPORT_ID}/handled/accept", json={}).status_code == 401
+
+
+def test_ab335_changing_the_handling_clears_the_acceptance():
+    import inspect
+
+    from app.repositories import row_handling, statement_imports
+
+    dismiss = " ".join(inspect.getsource(row_handling.dismiss_handling).split())
+    assert "handling_accepted_at = NULL" in dismiss
+    rehandle = " ".join(inspect.getsource(row_handling.set_handled).split())
+    assert "handling_accepted_at = NULL" in rehandle
+    accept = " ".join(inspect.getsource(statement_imports.accept_handled_rows).split())
+    assert "SET handling_accepted_at = now()" in accept
+    assert "handled_as IS NOT NULL AND handling_accepted_at IS NULL" in accept

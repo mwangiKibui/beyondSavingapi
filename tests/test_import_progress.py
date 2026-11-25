@@ -302,6 +302,7 @@ def test_step_requires_auth(client):
 @pytest.mark.parametrize("step,allocated", [("review", True), ("allocation", False)])
 def test_step_moves_between_allocation_and_review(client, fake_user, fake_pool, monkeypatch, step, allocated):
     patch_repo(monkeypatch, imp=import_row())
+    monkeypatch.setattr(f"{API}._rows_left", AsyncMock(return_value=0))
     set_allocated = AsyncMock(return_value=UPDATED if allocated else None)
     monkeypatch.setattr(f"{API}.set_import_allocated", set_allocated)
     response = client.put(step_url(), json={"step": step})
@@ -313,8 +314,29 @@ def test_step_moves_between_allocation_and_review(client, fake_user, fake_pool, 
 def test_step_on_a_finished_import_reads_done(client, fake_user, fake_pool, monkeypatch):
     # "Review again" moves around freely; the import stays finished.
     patch_repo(monkeypatch, imp=import_row(reviewed_at=UPDATED))
+    monkeypatch.setattr(f"{API}._rows_left", AsyncMock(return_value=0))
     monkeypatch.setattr(f"{API}.set_import_allocated", AsyncMock(return_value=UPDATED))
     assert client.put(step_url(), json={"step": "review"}).json() == {"step": "review"}
+
+
+def test_ab335_review_waits_until_nothing_is_pending_or_suggested(client, fake_user, fake_pool, monkeypatch):
+    patch_repo(monkeypatch, imp=import_row())
+    monkeypatch.setattr(f"{API}._rows_left", AsyncMock(return_value=12))
+    set_allocated = AsyncMock()
+    monkeypatch.setattr(f"{API}.set_import_allocated", set_allocated)
+    response = client.put(step_url(), json={"step": "review"})
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Accept or allocate the 12 remaining rows first"
+    set_allocated.assert_not_awaited()
+
+
+def test_ab335_going_back_to_allocation_never_waits(client, fake_user, fake_pool, monkeypatch):
+    patch_repo(monkeypatch, imp=import_row())
+    left = AsyncMock(return_value=12)
+    monkeypatch.setattr(f"{API}._rows_left", left)
+    monkeypatch.setattr(f"{API}.set_import_allocated", AsyncMock(return_value=None))
+    assert client.put(step_url(), json={"step": "allocation"}).status_code == 200
+    left.assert_not_awaited()
 
 
 def test_step_before_processing_finishes_is_a_conflict(client, fake_user, fake_pool, monkeypatch):

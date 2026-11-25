@@ -30,7 +30,7 @@ class GroupRow(BaseModel):
     imported_at: datetime | None = None
     # An import's review (ab-292): this line's own status, category, apply
     # and suggestion.
-    status: Literal["decide", "decided", "sorted", "handled"] | None = None
+    status: Literal["decide", "decided", "sorted", "handled", "accepted"] | None = None
     category_id: UUID | None = None
     category_name: str | None = None
     transfer_reason_id: UUID | None = None
@@ -112,7 +112,7 @@ class PayeeGroup(BaseModel):
     handled_reason: str | None = None
     # An import's review only (ab-289): decide = Pending, handled =
     # Auto-suggested, decided/sorted = Approved (here / some other way).
-    status: Literal["decide", "decided", "sorted", "handled"] | None = None
+    status: Literal["decide", "decided", "sorted", "handled", "accepted"] | None = None
     pending_count: int | None = None
     approved_count: int | None = None
     rows: list[GroupRow]
