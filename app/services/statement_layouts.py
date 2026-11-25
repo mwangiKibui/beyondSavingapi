@@ -22,7 +22,7 @@ from app.core.storage import get_storage_client
 from app.parsers.base import StatementParseError
 from app.parsers.profiles.guess import dedupe_roles
 from app.parsers.profiles.layout import page_lines
-from app.parsers.profiles.reader import read_statement
+from app.parsers.profiles.reader import read_best_grouping, read_statement
 from app.parsers.profiles.tabular import load_grid
 from app.parsers.profiles.text import normalise
 from app.parsers.profiles.schema import StatementProfile, validate_profile
@@ -47,11 +47,21 @@ class LayoutCheck:
     # ~10 rows around the first failure (or the first 10), with their index.
     rows: list[dict] = field(default_factory=list)
     opening_balance: float | None = None
+    # ab-333: the row grouping the read used, and the mapping with it (what
+    # gets saved). Tried automatically unless the user chose one.
+    row_grouping: str | None = None
+    profile: StatementProfile | None = None
+    # Which check failed: "running"/"totals" (balances) or "descriptions".
+    failed_check: str | None = None
 
 
-def check_layout(content: bytes, profile: StatementProfile, *, currency: str) -> LayoutCheck:
-    """Runs the reader and its balance check; never saves anything. A layout
-    that doesn't fit the file at all comes back as not passed, with why."""
+def check_layout(
+    content: bytes, profile: StatementProfile, *, currency: str, grouping_chosen: bool = False
+) -> LayoutCheck:
+    """Runs the reader and its balance and description checks; never saves
+    anything. A layout that doesn't fit the file at all comes back as not
+    passed, with why. Unless the user chose the row grouping, the one that
+    reads the file best is used."""
     try:
         missing = missing_heading(content, profile)
     except Exception:
@@ -65,7 +75,10 @@ def check_layout(content: bytes, profile: StatementProfile, *, currency: str) ->
             row_count=0,
         )
     try:
-        result = read_statement(content, profile, default_currency=currency)
+        if grouping_chosen:
+            result = read_statement(content, profile, default_currency=currency)
+        else:
+            profile, result = read_best_grouping(content, profile, default_currency=currency)
     except StatementParseError as e:
         return LayoutCheck(passed=False, usable=False, message=str(e), row_count=0)
     except Exception:
@@ -98,6 +111,9 @@ def check_layout(content: bytes, profile: StatementProfile, *, currency: str) ->
         failing_rows=failing,
         rows=window,
         opening_balance=result.opening_balance,
+        row_grouping=profile.table.continuation if profile.file_type == "pdf" else None,
+        profile=profile,
+        failed_check=None if result.check.passed else result.check.kind,
     )
 
 

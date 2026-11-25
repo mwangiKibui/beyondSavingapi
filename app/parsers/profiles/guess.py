@@ -15,7 +15,7 @@ import pdfplumber
 
 from app.parsers.profiles.fingerprint import _date_like, _header_clusters, _header_index, _money_like
 from app.parsers.profiles.layout import DATE_TOKEN, MONEY_TOKEN, Line, is_body_line, page_lines
-from app.parsers.profiles.reader import read_statement
+from app.parsers.profiles.reader import read_best_grouping, read_statement
 from app.parsers.profiles.schema import InvalidStatementProfile, validate_profile
 from app.parsers.profiles.tabular import load_grid
 from app.parsers.profiles.text import normalise
@@ -364,6 +364,16 @@ def _passes(content: bytes, profile: dict) -> bool:
     return result.check.passed
 
 
+def _with_best_grouping(content: bytes, profile: dict) -> dict:
+    """ab-333: a guess that doesn't read gets the row grouping that does
+    (text above or around each date line). Unchanged when none reads."""
+    try:
+        resolved, result = read_best_grouping(content, validate_profile(profile), default_currency="KES")
+    except Exception:
+        return profile
+    return resolved.model_dump(mode="json") if result.check.passed else profile
+
+
 def _with_unlisted_charges(content: bytes, profile: dict, lines: list[Line]) -> dict:
     """A guess whose balances don't add up gets one more try: the statement's
     printed opening balance and totals, with fees that have no row of their
@@ -418,6 +428,7 @@ def layout_start(content: bytes, file_type: str) -> dict:
                 found = (_with_unlisted_charges(content, found[0], first_page), found[1])
             except Exception:
                 pass
+            found = (_with_best_grouping(content, found[0]), found[1])
         return {"guess": found[0] if found else None, "examples": found[1] if found else [], **snapshot}
     grid = load_grid(content, file_type)
     try:

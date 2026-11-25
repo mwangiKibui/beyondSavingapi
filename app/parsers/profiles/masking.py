@@ -16,7 +16,9 @@ lower case -> x, punctuation kept ("03-09-26" -> "99-99-99",
 nor in the list, so it can only ever leave as "Xxxx Xxxxx".
 
 Words keep their horizontal position (scaled to a fixed width) so the
-columns still line up for the model.
+columns still line up for the model, and each line starts with its
+vertical position ("  59| ...") so the model can see how a row's lines
+sit around its date line (ab-333).
 """
 
 import io
@@ -104,7 +106,7 @@ def mask_page(page) -> str:
     out = []
     for i, line in enumerate(lines[:MAX_LINES]):
         words = [(w.x0, w.text if i in headings else _masked_word(w.text)) for w in line.words]
-        out.append(_render(words, width))
+        out.append(f"{round(line.top):4d}| {_render(words, width)}")
     return "\n".join(out)
 
 

@@ -61,10 +61,16 @@ class Cluster:
 def page_lines(page, *, y_tolerance: float = 3.0) -> list[Line]:
     """pdfplumber words, faux-bold undone, grouped into lines top to bottom
     (words whose tops are within y_tolerance of the line's first word)."""
-    words = [
-        Word(text=w["text"], x0=w["x0"], x1=w["x1"], top=w["top"])
-        for w in page.extract_words(keep_blank_chars=False, use_text_flow=False)
-    ]
+    return lines_from_words(
+        [(w["text"], w["x0"], w["x1"], w["top"]) for w in page.extract_words(keep_blank_chars=False, use_text_flow=False)],
+        y_tolerance=y_tolerance,
+    )
+
+
+def lines_from_words(raw: list[tuple[str, float, float, float]], *, y_tolerance: float = 3.0) -> list[Line]:
+    """page_lines() from words already taken off a page as (text, x0, x1,
+    top) - so a page is extracted once however many times it is read."""
+    words = [Word(text=t, x0=x0, x1=x1, top=top) for t, x0, x1, top in raw]
     words.sort(key=lambda w: (w.top, w.x0))
     lines: list[Line] = []
     for word in words:

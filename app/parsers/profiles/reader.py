@@ -16,6 +16,8 @@ when the check fails.
 import hashlib
 import io
 import re
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -32,7 +34,7 @@ from app.parsers.base import (
     resolve_leading_tie,
     totals_failures,
 )
-from app.parsers.profiles.layout import MONEY_TOKEN, Line, page_lines
+from app.parsers.profiles.layout import MONEY_TOKEN, Line, lines_from_words
 from app.parsers.profiles.schema import StatementProfile
 from app.parsers.profiles.tabular import cell_text, find_header_row, load_grid
 from app.parsers.profiles.text import normalise
@@ -47,6 +49,48 @@ class ReadResult:
     opening_balance: float | None
     totals: tuple[float, float] | None
     check: BalanceCheck
+    # Rows with no words in their description (ab-333).
+    description_gaps: int = 0
+    # Pages whose text above the first row went to no row (ab-333).
+    orphan_pages: int = 0
+
+
+# ab-333: the balance check proves the amounts, not the text. A read whose
+# rows mostly lack a description has grouped the statement's lines wrongly
+# (e.g. text printed above each date line given to the row before).
+_WORD = re.compile(r"[^\W\d_]{2,}")
+_GAP_SHARE = 0.05
+_GAP_ALLOWANCE = 2
+
+
+def description_gap_rows(transactions: list[ParsedTransaction]) -> list[int]:
+    """Indexes of rows whose description has no word of two letters or more."""
+    return [i for i, t in enumerate(transactions) if not _WORD.search(t.get("description") or "")]
+
+
+def _description_check(
+    transactions: list[ParsedTransaction], gaps: list[int], *, orphan_pages: int = 0, pages: int = 0
+) -> BalanceCheck | None:
+    if orphan_pages > max(1, pages // 2):
+        # Most pages start with text that belongs to no row: each row's text
+        # sits above (or around) its date line, so it landed on the row before.
+        return BalanceCheck(
+            kind="descriptions",
+            passed=False,
+            failing_rows=[0],
+            message="The statement's descriptions may be on the wrong rows: text sits above each date",
+        )
+    if len(gaps) <= max(_GAP_ALLOWANCE, int(len(transactions) * _GAP_SHARE)):
+        return None
+    return BalanceCheck(
+        kind="descriptions",
+        passed=False,
+        failing_rows=gaps,
+        message=(
+            f"{len(gaps)} of {len(transactions)} rows have no description, "
+            "so the statement's text may be on the wrong rows"
+        ),
+    )
 
 
 @dataclass
@@ -345,14 +389,23 @@ class _Collected:
     # continuation "nearest": lines waiting for the next row to decide.
     pending: list[tuple[float, str]] = field(default_factory=list)
     ended: bool = False
+    # ab-333: pages with rows, and those with description text above their
+    # first row that no row took (it belonged to that row: wrong grouping).
+    pages_with_rows: int = 0
+    pages_with_orphans: int = 0
+    page_rows: int = 0
+    page_orphans: bool = False
 
 
-def _flush_pending(state: _Collected, new_row: _Row | None) -> None:
+def _flush_pending(state: _Collected, new_row: _Row | None, *, mode: str = "nearest") -> None:
     """Gives each waiting line to the nearer of the row above it on this
-    page and `new_row` (the earlier one on a tie)."""
+    page and `new_row` (the earlier one on a tie) - or, for "above", to
+    `new_row` whenever there is one."""
     for y, text in state.pending:
         above, below = state.current, new_row
-        if above is not None and (below is None or abs(y - above.y) <= abs(y - below.y)):
+        if mode == "above" and below is not None:
+            below.continuation.append((y, text))
+        elif above is not None and (below is None or abs(y - above.y) <= abs(y - below.y)):
             above.continuation.append((y, text))
         elif below is not None:
             below.continuation.append((y, text))
@@ -366,6 +419,7 @@ def _take_line(
     table, is skipped, is an opening/totals row, starts a transaction, or
     continues a row's description."""
     if any(_starts(text, m) for m in profile.table.end_markers):
+        _note_trailing(state, profile)
         _end_page(state)
         state.ended = True
         return
@@ -381,25 +435,46 @@ def _take_line(
         total_out = _amount(cells.get("money_out", ""), profile) or 0.0
         state.totals = (abs(total_in), abs(total_out))
         state.closing = _amount(cells.get("balance", ""), profile)
+        _note_trailing(state, profile)
         _end_page(state)
         return
     if _date(cells.get("date", ""), profile) is not None:
         row = _Row(cells=cells, continuation=[], y=y)
-        _flush_pending(state, row)
+        _flush_pending(state, row, mode=profile.table.continuation)
         state.current = row
         if _status_kept(cells, profile):
             state.rows.append(row)
+            state.page_rows += 1
     elif cells.get("description"):
-        if profile.table.continuation == "nearest":
+        if profile.table.continuation in ("nearest", "above"):
             state.pending.append((y, cells["description"]))
         elif state.current is not None:
             state.current.continuation.append((y, cells["description"]))
+        else:
+            state.page_orphans = True
 
 
 def _end_page(state: _Collected) -> None:
     """Waiting lines go to the last row; nothing continues past here."""
     _flush_pending(state, None)
     state.current = None
+
+
+def _note_trailing(state: _Collected, profile: StatementProfile) -> None:
+    """Text after the table's last row on this page: with "above" it has no
+    row of its own below it - each row's text sits below its date after all."""
+    if profile.table.continuation == "above" and state.pending and state.current is not None:
+        state.page_orphans = True
+
+
+def _close_page(state: _Collected, profile: StatementProfile) -> None:
+    """The page's tally for the description check."""
+    _note_trailing(state, profile)
+    _end_page(state)
+    if state.page_rows:
+        state.pages_with_rows += 1
+        state.pages_with_orphans += state.page_orphans
+    state.page_rows, state.page_orphans = 0, False
 
 
 def _labelled(lines: list[Line], label: str | None, pattern: re.Pattern) -> str | None:
@@ -437,50 +512,95 @@ def _above_table(state: _Collected, lines: list[Line], profile: StatementProfile
         state.currency = _labelled(lines, profile.currency_label, _CURRENCY)
 
 
-def _collect_pdf(content: bytes, profile: StatementProfile) -> _Collected:
-    state = _Collected()
-    bounds = None
+@dataclass(frozen=True)
+class _Page:
+    """What the reader needs from a PDF page, taken off it once."""
+
+    width: float
+    edges: list[dict]
+    words: list[tuple[str, float, float, float]]
+
+
+_PAGE_CACHE: "OrderedDict[str, list[_Page]]" = OrderedDict()
+_PAGE_CACHE_SIZE = 4
+_PAGE_CACHE_LOCK = threading.Lock()
+
+
+def _pdf_pages(content: bytes) -> list[_Page]:
+    """Every page's words and rules. Kept for the last few files, because
+    one upload is read many times: each layout, row grouping and AI answer
+    tried is a read of the same file, and extraction is the slow part."""
+    key = hashlib.sha256(content).hexdigest()
+    with _PAGE_CACHE_LOCK:
+        if key in _PAGE_CACHE:
+            _PAGE_CACHE.move_to_end(key)
+            return _PAGE_CACHE[key]
     try:
         pdf = pdfplumber.open(io.BytesIO(content))
     except Exception:
         raise StatementParseError("This file couldn't be opened as a PDF") from None
     with pdf:
-        for page_no, page in enumerate(pdf.pages):
+        pages = [
+            _Page(
+                width=float(page.width),
+                edges=[
+                    {k: e[k] for k in ("orientation", "x0", "x1", "top", "bottom")}
+                    for e in page.edges
+                    if e.get("orientation") in ("v", "h")
+                ],
+                words=[
+                    (w["text"], w["x0"], w["x1"], w["top"])
+                    for w in page.extract_words(keep_blank_chars=False, use_text_flow=False)
+                ],
+            )
+            for page in pdf.pages
+        ]
+    with _PAGE_CACHE_LOCK:
+        _PAGE_CACHE[key] = pages
+        while len(_PAGE_CACHE) > _PAGE_CACHE_SIZE:
+            _PAGE_CACHE.popitem(last=False)
+    return pages
+
+
+def _collect_pdf(content: bytes, profile: StatementProfile) -> _Collected:
+    state = _Collected()
+    bounds = None
+    for page_no, page in enumerate(_pdf_pages(content)):
+        if state.ended:
+            break
+        lines = lines_from_words(page.words, y_tolerance=profile.table.y_tolerance)
+        band = _header_band(lines, profile)
+        table_bottom = None
+        if band is not None:
+            top, last, header = band
+            bounds = _bounds(page, profile, header, lines[top].top - 2, lines[last].top + 12)
+            start = last + 1
+            if profile.table.column_bounds == "ruled":
+                table_bottom = _ruled_bottom(page, lines[top].top - 2, lines[last].top + 12)
+            _above_table(state, lines[:top], profile)
+        elif (profile.table.column_bounds == "explicit" and not any(c.header for c in profile.table.columns)) or (
+            page_no > 0 and not profile.table.header_repeats_each_page and bounds is not None
+        ):
+            if bounds is None:
+                width = float(page.width)
+                bounds = {i: (c.x0 * width, c.x1 * width) for i, c in enumerate(profile.table.columns)}
+            start = 0
+        elif page_no == 0:
+            raise StatementParseError("The statement's table headings weren't found for this layout")
+        else:
+            continue  # a page without the table (notes, disclaimers)
+        state.current = None
+        for line in lines[start:]:
+            if table_bottom is not None and line.top > table_bottom:
+                break  # below the ruled table: footers, disclaimers
+            _take_line(state, line.text, _cells(line, bounds, profile), profile, line.top)
             if state.ended:
                 break
-            lines = page_lines(page, y_tolerance=profile.table.y_tolerance)
-            band = _header_band(lines, profile)
-            table_bottom = None
-            if band is not None:
-                top, last, header = band
-                bounds = _bounds(page, profile, header, lines[top].top - 2, lines[last].top + 12)
-                start = last + 1
-                if profile.table.column_bounds == "ruled":
-                    table_bottom = _ruled_bottom(page, lines[top].top - 2, lines[last].top + 12)
-                _above_table(state, lines[:top], profile)
-            elif (profile.table.column_bounds == "explicit" and not any(c.header for c in profile.table.columns)) or (
-                page_no > 0 and not profile.table.header_repeats_each_page and bounds is not None
-            ):
-                if bounds is None:
-                    width = float(page.width)
-                    bounds = {i: (c.x0 * width, c.x1 * width) for i, c in enumerate(profile.table.columns)}
-                start = 0
-            elif page_no == 0:
-                raise StatementParseError("The statement's table headings weren't found for this layout")
-            else:
-                continue  # a page without the table (notes, disclaimers)
-            state.current = None
-            for line in lines[start:]:
-                if table_bottom is not None and line.top > table_bottom:
-                    break  # below the ruled table: footers, disclaimers
-                _take_line(state, line.text, _cells(line, bounds, profile), profile, line.top)
-                if state.ended:
-                    break
-            _end_page(state)
-            # With a heading on every page, an end marker (a per-page
-            # footer such as NCBA's notice) ends only this page's table.
-            if state.ended and profile.table.header_repeats_each_page:
-                state.ended = False
+        _close_page(state, profile)
+        # With a heading on every page, an end marker (a per-page
+        # footer such as NCBA's notice) ends only this page's table.
+        if state.ended and profile.table.header_repeats_each_page:
+            state.ended = False
     return state
 
 
@@ -581,7 +701,22 @@ def read_statement(content: bytes, profile: StatementProfile, *, default_currenc
     check = check_balances(transactions, opening_balance=opening, totals=totals, mode=profile.balance_check)
     if added and check.passed:
         check = _charges_proved(transactions, totals)
-    return ReadResult(transactions=transactions, opening_balance=opening, totals=totals, check=check)
+    gaps = description_gap_rows(transactions)
+    if check.passed:
+        check = (
+            _description_check(
+                transactions, gaps, orphan_pages=state.pages_with_orphans, pages=state.pages_with_rows
+            )
+            or check
+        )
+    return ReadResult(
+        transactions=transactions,
+        opening_balance=opening,
+        totals=totals,
+        check=check,
+        description_gaps=len(gaps),
+        orphan_pages=state.pages_with_orphans,
+    )
 
 
 def _with_unlisted_charges(transactions: list[ParsedTransaction], opening: float) -> tuple[list, int]:
@@ -639,3 +774,45 @@ def read_transactions(content: bytes, profile: StatementProfile, *, default_curr
             raise RunningBalanceMismatch(result.check.message)
         raise StatementParseError(result.check.message or "The statement's balances don't add up")
     return result.transactions
+
+
+# ab-333: how a row's other lines sit around its date line. A layout keeps
+# its own grouping while it reads; when it doesn't, the others are tried.
+ROW_GROUPINGS = ("below", "nearest", "above")
+
+
+def with_grouping(profile: StatementProfile, grouping: str) -> StatementProfile:
+    return profile.model_copy(update={"table": profile.table.model_copy(update={"continuation": grouping})})
+
+
+def _better(a: ReadResult, b: ReadResult) -> bool:
+    """a reads the statement better than b: it passes, then fewer rows
+    without a description, then more rows."""
+    if a.check.passed != b.check.passed:
+        return a.check.passed
+    return (a.orphan_pages, a.description_gaps, -len(a.transactions)) < (
+        b.orphan_pages, b.description_gaps, -len(b.transactions)
+    )
+
+
+def read_best_grouping(
+    content: bytes, profile: StatementProfile, *, default_currency: str
+) -> tuple[StatementProfile, ReadResult]:
+    """The read with the profile as it is when that passes; otherwise the
+    best of every row grouping (a PDF's pages are extracted once, so each
+    extra try is cheap). Raises like read_statement when the profile's own
+    grouping can't read the file at all."""
+    best = (profile, read_statement(content, profile, default_currency=default_currency))
+    if best[1].check.passed or profile.file_type != "pdf":
+        return best
+    for grouping in ROW_GROUPINGS:
+        if grouping == profile.table.continuation:
+            continue
+        variant = with_grouping(profile, grouping)
+        try:
+            result = read_statement(content, variant, default_currency=default_currency)
+        except StatementParseError:
+            continue
+        if _better(result, best[1]):
+            best = (variant, result)
+    return best

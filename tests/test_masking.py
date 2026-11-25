@@ -42,7 +42,8 @@ def test_no_name_number_or_amount_survives():
     for secret in ["wanjiru", "kiprotich", "otieno", "baraka", "zeta", SECRET_PHONE, "77441209"]:
         assert secret.lower() not in lowered, secret
     # No real amount, date or any digit other than the page marker's.
-    body = "\n".join(line for line in masked.splitlines() if not line.startswith("--- page"))
+    # Each line's vertical position (ab-333) is layout, not a value: left out here.
+    body = "\n".join(_text(line) for line in masked.splitlines() if not line.startswith("--- page"))
     assert not re.search(r"[0-8]", body), "only 9s may stand for digits"
     for amount in ["1,500.00", "11,500.00", "250.00", "3,000.00"]:
         assert amount not in masked
@@ -66,9 +67,19 @@ def test_columns_keep_their_positions():
     masked = mask_pdf(_statement())
     lines = masked.splitlines()
     header = next(line for line in lines if "Money In" in line)
-    row = next(line for line in lines if line.lstrip().startswith("99/99/9999") and "9,999.99" in line)
+    row = next(line for line in lines if _text(line).lstrip().startswith("99/99/9999") and "9,999.99" in line)
     # The money-in amount sits under its heading (within a few characters).
     assert abs(row.index("9,999.99") - header.index("Money In")) <= 6
+
+
+def test_each_line_says_where_it_sits_on_the_page():
+    lines = [line for line in mask_pdf(_statement()).splitlines() if not line.startswith("--- page")]
+    tops = [int(line.split("|", 1)[0]) for line in lines]
+    assert tops == sorted(tops) and len(set(tops)) == len(tops)
+
+
+def _text(line: str) -> str:
+    return re.sub(r"^\s*\d+\| ", "", line)
 
 
 def test_a_wrapped_heading_stays_verbatim():

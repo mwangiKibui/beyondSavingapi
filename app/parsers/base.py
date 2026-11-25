@@ -131,7 +131,9 @@ def totals_failures(transactions: list[ParsedTransaction], *, total_in: float, t
 
 @dataclass(frozen=True)
 class BalanceCheck:
-    kind: Literal["running", "totals"]
+    # "descriptions" (ab-333): the balances add up but too many rows have
+    # no description - the read put the rows' text in the wrong place.
+    kind: Literal["running", "totals", "descriptions"]
     passed: bool
     failing_rows: list[int] = field(default_factory=list)
     message: str | None = None

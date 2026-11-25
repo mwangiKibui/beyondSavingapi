@@ -91,10 +91,16 @@ def normalize_text(text: str | None) -> str:
     return re.sub(r"\s+", " ", (text or "").upper()).strip()
 
 
+# ab-333: some banks pack a row's details into one token joined by these
+# ("MPS2ABCD~0712345~254700000000~NAME~2026-01-31"); split them first so
+# the words survive.
+_PACKED = re.compile(r"[~|]")
+
+
 def strip_reference_codes(text: str) -> str:
     """Drops every token containing a digit (reference codes, phone and
     meter numbers, card masks, amounts) - what's left is the words."""
-    return " ".join(t for t in text.split() if not re.search(r"\d", t))
+    return " ".join(t for t in _PACKED.sub(" ", text).split() if not re.search(r"\d", t))
 
 
 def hash_value(provider: str, value: str, *, secret: str) -> str:

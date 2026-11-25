@@ -13,7 +13,7 @@ from app.parsers.profiles.fingerprint import fingerprint_pdf
 from app.parsers.profiles.schema import validate_profile
 from app.services import statement_layouts
 from app.services.statement_layouts import check_layout
-from tests.statement_pdfs import build, sample_rows
+from tests.statement_pdfs import Layout, build, sample_rows
 from tests.statement_sheets import HEADER, csv_bytes, rows
 
 IMPORT_ID = uuid4()
@@ -312,6 +312,26 @@ def test_saving_a_passing_mapping(client, api):
     response = client.put(url(), json={"profile": PROFILE})
     assert response.status_code == 200 and response.json()["status"] == "pending"
     assert api.save.call_args.kwargs["user_id"] == api.user_id
+
+
+def test_the_check_says_which_row_grouping_read_it(client, api):
+    api.content = build(sample_rows(30), Layout(text_position="above"))
+    body = client.post(url("/check"), json={"profile": PROFILE}).json()
+    assert body["usable"] and body["row_grouping"] in ("nearest", "above")
+    assert "profile" not in body
+
+
+def test_a_chosen_row_grouping_is_kept(client, api):
+    api.content = build(sample_rows(30), Layout(text_position="above"))
+    body = client.post(url("/check"), json={"profile": PROFILE, "row_grouping_chosen": True}).json()
+    assert not body["usable"] and body["row_grouping"] == "below"
+    assert body["failed_check"] == "descriptions"
+
+
+def test_saving_stores_the_row_grouping_that_read_it(client, api):
+    api.content = build(sample_rows(30), Layout(text_position="above"))
+    assert client.put(url(), json={"profile": PROFILE}).status_code == 200
+    assert api.save.call_args.kwargs["profile"].table.continuation in ("nearest", "above")
 
 
 def test_saving_fingerprints_the_file_with_the_current_code(client, api):

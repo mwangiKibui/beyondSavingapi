@@ -86,6 +86,9 @@ class LayoutRequest(BaseModel):
     # ab-329: the role the wizard suggested per column of profile.table.columns
     # (None where it suggested nothing). Only recorded, never trusted.
     suggested_roles: list[str | None] | None = None
+    # ab-333: the user picked profile.table.continuation themselves; read
+    # with exactly that instead of the grouping that reads the file best.
+    row_grouping_chosen: bool = False
 
 
 class PreviewRow(BaseModel):
@@ -106,6 +109,11 @@ class LayoutCheckResponse(BaseModel):
     failing_rows: list[int]
     rows: list[PreviewRow]
     opening_balance: float | None = None
+    # ab-333: the row grouping the read used (PDFs) - what Save will store.
+    row_grouping: Literal["below", "nearest", "above"] | None = None
+    # Which check failed: the balances ("running"/"totals") or "descriptions"
+    # (the rows' text looks to be on the wrong rows).
+    failed_check: Literal["running", "totals", "descriptions"] | None = None
 
 
 class LayoutSavedResponse(BaseModel):
@@ -241,13 +249,18 @@ async def check_layout_endpoint(
         profile = _profile_for(statement_import, body.profile)
         content = await run_in_threadpool(load_content, statement_import["storage_key"])
         result = await run_in_threadpool(
-            lambda: check_layout(content, profile, currency=statement_import.get("currency") or "KES")
+            lambda: check_layout(
+                content,
+                profile,
+                currency=statement_import.get("currency") or "KES",
+                grouping_chosen=body.row_grouping_chosen,
+            )
         )
     except HTTPException:
         raise
     except Exception:
         raise _unexpected("checking a layout", import_id, user_id) from None
-    return result.__dict__
+    return {k: v for k, v in result.__dict__.items() if k != "profile"}
 
 
 @router.put("/{import_id}/layout", response_model=LayoutSavedResponse)
@@ -269,7 +282,12 @@ async def save_layout_endpoint(
         profile = _profile_for(statement_import, body.profile)
         content = await run_in_threadpool(load_content, statement_import["storage_key"])
         result = await run_in_threadpool(
-            lambda: check_layout(content, profile, currency=statement_import.get("currency") or "KES")
+            lambda: check_layout(
+                content,
+                profile,
+                currency=statement_import.get("currency") or "KES",
+                grouping_chosen=body.row_grouping_chosen,
+            )
         )
         if not result.usable:
             raise HTTPException(
@@ -282,7 +300,8 @@ async def save_layout_endpoint(
         created = await save_layout(
             pool,
             statement_import=statement_import,
-            profile=profile,
+            # ab-333: with the row grouping the check read it with.
+            profile=result.profile or profile,
             user_id=user_id,
             fingerprint=fingerprint.to_text() if fingerprint else None,
         )

@@ -15,7 +15,7 @@ from app.parsers.base import ParsedTransaction
 from app.parsers.profiles.builtin import load_builtin_profiles
 from app.parsers.profiles.fingerprint import fingerprint_file
 from app.parsers.profiles.matching import match_profile
-from app.parsers.profiles.reader import read_statement
+from app.parsers.profiles.reader import read_best_grouping
 from app.parsers.profiles.schema import validate_profile
 from app.repositories.statement_profiles import (
     create_profile,
@@ -78,7 +78,12 @@ def _read_into(result: ProfileRead, content: bytes, row: dict, *, currency: str)
     result.matched_profile_id = row["id"]
     try:
         profile = validate_profile(row["profile"])
-        read = read_statement(content, profile, default_currency=currency)
+        # ab-333: a stored layout whose rows' text lands on the wrong rows
+        # (or whose grouping no longer fits) is read with the one that does.
+        used, read = read_best_grouping(content, profile, default_currency=currency)
+        if used is not profile and read.check.passed:
+            logger.info("Profile %s read with row grouping %r instead of %r", row["id"],
+                        used.table.continuation, profile.table.continuation)
     except Exception as e:
         # A stored profile that no longer validates, a layout it doesn't fit
         # after all, or a reader bug - never fail the import over it here.
