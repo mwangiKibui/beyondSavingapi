@@ -23,12 +23,14 @@ from decimal import Decimal, InvalidOperation
 import pdfplumber
 
 from app.parsers.base import (
+    UNLISTED_CHARGE,
     BalanceCheck,
     ParsedTransaction,
     RunningBalanceMismatch,
     StatementParseError,
     check_balances,
     resolve_leading_tie,
+    totals_failures,
 )
 from app.parsers.profiles.layout import MONEY_TOKEN, Line, page_lines
 from app.parsers.profiles.schema import StatementProfile
@@ -566,8 +568,59 @@ def read_statement(content: bytes, profile: StatementProfile, *, default_currenc
         if first["balance_after"] is not None:
             delta = first["amount"] if first["direction"] == "in" else -first["amount"]
             opening = round(first["balance_after"] - delta, 2)
+    added = 0
+    if profile.unlisted_charges and opening is not None:
+        transactions, added = _with_unlisted_charges(transactions, opening)
     check = check_balances(transactions, opening_balance=opening, totals=totals, mode=profile.balance_check)
+    if added and check.passed:
+        check = _charges_proved(transactions, totals)
     return ReadResult(transactions=transactions, opening_balance=opening, totals=totals, check=check)
+
+
+def _with_unlisted_charges(transactions: list[ParsedTransaction], opening: float) -> tuple[list, int]:
+    """ab-325: after each money-out row whose balance fell by more than its
+    amount, a charge row for the difference. Only a fee smaller than the
+    payment counts; any other gap is left for the balance check to fail."""
+    out, previous, added = [], opening, 0
+    for txn in transactions:
+        balance = txn["balance_after"]
+        sign = 1 if txn["direction"] == "in" else -1
+        expected = round(previous + sign * txn["amount"], 2)
+        fee = round(expected - balance, 2) if balance is not None else 0.0
+        if txn["direction"] == "out" and 0.01 < fee < txn["amount"]:
+            out.append({**txn, "balance_after": expected})
+            out.append(
+                {
+                    "txn_date": txn["txn_date"],
+                    "amount": fee,
+                    "currency": txn["currency"],
+                    "direction": "out",
+                    "counterparty": None,
+                    "description": UNLISTED_CHARGE,
+                    "balance_after": balance,
+                    "dedupe_hash": hashlib.sha256(f"{txn['dedupe_hash']}|charge".encode()).hexdigest(),
+                }
+            )
+            added += 1
+        else:
+            out.append(txn)
+        previous = balance if balance is not None else expected
+    return out, added
+
+
+def _charges_proved(transactions: list[ParsedTransaction], totals: tuple[float, float] | None) -> BalanceCheck:
+    """Added charges stand only if the statement's own totals include them."""
+    if totals is None:
+        return BalanceCheck(
+            kind="totals", passed=False, message="The statement's totals weren't found, so its charges can't be checked"
+        )
+    if totals_failures(transactions, total_in=totals[0], total_out=totals[1]):
+        return BalanceCheck(
+            kind="totals",
+            passed=False,
+            message="The charges taken from the balance don't match the statement's total money out",
+        )
+    return BalanceCheck(kind="running", passed=True)
 
 
 def read_transactions(content: bytes, profile: StatementProfile, *, default_currency: str) -> list[ParsedTransaction]:

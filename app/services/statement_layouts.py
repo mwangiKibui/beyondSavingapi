@@ -8,8 +8,11 @@ it must prove itself on this file first - and, like every profile, again
 on each new file.
 """
 
+import io
 import logging
 from dataclasses import dataclass, field
+
+import pdfplumber
 from uuid import UUID
 
 from app.core.config import get_settings
@@ -17,7 +20,10 @@ from app.core.queues import PARSE_JOBS_QUEUE
 from app.core.redis import get_redis
 from app.core.storage import get_storage_client
 from app.parsers.base import StatementParseError
+from app.parsers.profiles.layout import page_lines
 from app.parsers.profiles.reader import read_statement
+from app.parsers.profiles.tabular import load_grid
+from app.parsers.profiles.text import normalise
 from app.parsers.profiles.schema import StatementProfile, validate_profile
 from app.repositories.statement_imports import list_waiting_imports, set_import_status
 from app.repositories.statement_profiles import create_profile
@@ -45,6 +51,18 @@ class LayoutCheck:
 def check_layout(content: bytes, profile: StatementProfile, *, currency: str) -> LayoutCheck:
     """Runs the reader and its balance check; never saves anything. A layout
     that doesn't fit the file at all comes back as not passed, with why."""
+    try:
+        missing = missing_heading(content, profile)
+    except Exception:
+        logger.warning("A mapping's headings couldn't be looked for", exc_info=True)
+        missing = None
+    if missing:
+        return LayoutCheck(
+            passed=False,
+            usable=False,
+            message=f"We couldn't find \u201c{missing}\u201d on your statement. Check the spelling.",
+            row_count=0,
+        )
     try:
         result = read_statement(content, profile, default_currency=currency)
     except StatementParseError as e:
@@ -80,6 +98,26 @@ def check_layout(content: bytes, profile: StatementProfile, *, currency: str) ->
         rows=window,
         opening_balance=result.opening_balance,
     )
+
+
+def missing_heading(content: bytes, profile: StatementProfile) -> str | None:
+    """ab-325: the first column heading (as the user typed it) that isn't on
+    the statement - page 1 of a PDF, or the first rows of a spreadsheet.
+    Every word of the heading must be there; a heading over two lines
+    still counts."""
+    headers = [c.header for c in profile.table.columns if c.header]
+    if not headers:
+        return None
+    if profile.file_type == "pdf":
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            words = {normalise(w.text) for line in page_lines(pdf.pages[0]) for w in line.words}
+    else:
+        grid = load_grid(content, profile.file_type)
+        words = {word for row in grid[:60] for value in row if isinstance(value, str) for word in normalise(value).split()}
+    for header in headers:
+        if not all(word in words for word in normalise(header).split()):
+            return header
+    return None
 
 
 def load_content(storage_key: str) -> bytes:

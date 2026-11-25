@@ -18,6 +18,9 @@ class Layout:
     headers: list[str] = field(default_factory=lambda: ["Date", "Details", "Money In", "Money Out", "Balance"])
     # Left edge of each column (points) - must match headers.
     xs: list[float] = field(default_factory=lambda: [40, 110, 330, 410, 490])
+    # Where each heading starts, when not over its values' left edge
+    # (headings centred over left-aligned values - ab-325).
+    header_xs: list[float] | None = None
     ruled: bool = False
     # Second header line under some columns: {column index: text}.
     header_second_line: dict[int, str] = field(default_factory=dict)
@@ -64,7 +67,7 @@ def build(rows: list[list[str]], layout: Layout | None = None, *, continuation: 
                 y -= 16
         if page_no == 1 or layout.repeat_header:
             c.setFont("Helvetica-Bold", 9)
-            for x, header in zip(layout.xs, layout.headers, strict=True):
+            for x, header in zip(layout.header_xs or layout.xs, layout.headers, strict=True):
                 c.drawString(x + 2, y, header)
             if layout.header_second_line:
                 for col, text in layout.header_second_line.items():

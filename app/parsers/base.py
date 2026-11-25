@@ -4,6 +4,11 @@ from itertools import permutations
 from typing import Literal, Protocol, TypedDict
 
 
+# ab-325: the description of a fee a statement takes off the balance with
+# no row of its own; the reader adds a row with it.
+UNLISTED_CHARGE = "Transaction charge"
+
+
 class ParsedTransaction(TypedDict):
     """One row a parser extracts from a statement file.
 
