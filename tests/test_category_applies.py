@@ -70,6 +70,7 @@ def db(monkeypatch):
         "get_apply_source": AsyncMock(return_value={"source_account_id": None, "source_description": None}),
         "pair_hand_filed_transfers": AsyncMock(return_value=0),
         "unpair_hand_filed": AsyncMock(return_value=[]),
+        "delete_allocations": AsyncMock(),
     }
     for name, mock in mocks.items():
         monkeypatch.setattr(svc, name, mock)
@@ -512,3 +513,36 @@ async def test_rows_without_a_keyword_touch_no_keyword_choices(keywords):
     await run(keywords, [r], [ApplyGroup(transaction_ids=[r["id"]], category_id=GROCERIES["id"], remember=True)])
     assert keywords["save_keyword_choices"].await_args.kwargs["keyword_ids"] == []
     assert keywords["insert_apply"].await_args.kwargs["snapshot"]["keyword_ids"] == []
+
+
+# --- ab-335: editing rows already allocated ----------------------------------
+
+
+async def test_ab335_replace_clears_the_rows_allocations_then_files_them(db):
+    filed = row(GROCER, allocated=100, category_id=SALARY["id"])
+    reopened = {**filed, "allocated": 0, "category_id": None}
+    db["lock_rows_for_apply"].side_effect = [[filed], [reopened]]
+    result = await apply_groups(object(), user_id=USER, secret=SECRET, groups=[
+        ApplyGroup(transaction_ids=[filed["id"]], category_id=GROCERIES["id"], replace=True),
+    ])
+    assert db["delete_allocations"].await_args.kwargs == {"transaction_ids": [filed["id"]]}
+    assert result.groups[0]["category_name"] == "Groceries"
+
+
+async def test_ab335_without_replace_an_allocated_row_is_refused(db):
+    filed = row(GROCER, allocated=100, category_id=SALARY["id"])
+    with pytest.raises(AllocationRejected) as caught:
+        await run(db, [filed], [ApplyGroup(transaction_ids=[filed["id"]], category_id=GROCERIES["id"])])
+    assert caught.value.status_code == 409
+    db["delete_allocations"].assert_not_awaited()
+
+
+@pytest.mark.parametrize("extra", [{"handled_as": "charge"}, {"is_transfer": True}])
+async def test_ab335_replace_never_touches_handled_rows_or_transfer_legs(db, extra):
+    filed = row(GROCER, allocated=100, **extra)
+    with pytest.raises(AllocationRejected) as caught:
+        await run(db, [filed], [
+            ApplyGroup(transaction_ids=[filed["id"]], category_id=GROCERIES["id"], replace=True),
+        ])
+    assert caught.value.status_code == 409
+    db["delete_allocations"].assert_not_awaited()
