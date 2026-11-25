@@ -77,7 +77,7 @@ def api(monkeypatch):
     a.learned = AsyncMock(return_value={})
     monkeypatch.setattr("app.api.statement_layouts.learned_roles", a.learned)
     a.proposal = AsyncMock(return_value=None)
-    monkeypatch.setattr("app.api.statement_layouts.latest_passed_profile", a.proposal)
+    monkeypatch.setattr("app.api.statement_layouts.latest_proposed_profile", a.proposal)
     yield a
     app.dependency_overrides.pop(get_pool, None)
     app.dependency_overrides.pop(get_current_user_id, None)
@@ -230,6 +230,20 @@ def test_a_failed_proposal_lookup_falls_back_quietly(client, api):
     api.proposal.side_effect = RuntimeError("db down")
     response = client.get(url())
     assert response.status_code == 200 and response.json()["suggestion_sources"] == ["keyword"] * 5
+
+
+def test_with_no_guess_the_ai_proposal_is_the_guess(client, api, monkeypatch):
+    monkeypatch.setattr(
+        "app.api.statement_layouts.layout_start", lambda content, file_type: {"guess": None, "examples": [], "rows": [], "header_row": None}
+    )
+    proposed = {
+        "file_type": "pdf",
+        "date_format": "%d-%b-%y",
+        "table": {"columns": [{"header": "Date", "role": "date"}, {"header": "Amount", "role": "signed_amount"}], "column_bounds": "header_gaps"},
+    }
+    api.proposal.return_value = proposed
+    body = client.get(url()).json()
+    assert body["guess"] == proposed and body["suggestion_sources"] == ["ai", "ai"]
 
 
 def test_no_guess_means_no_sources(client, api, monkeypatch):

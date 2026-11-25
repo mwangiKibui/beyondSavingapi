@@ -6,7 +6,11 @@ from dataclasses import dataclass
 
 from app.parsers.profiles.text import dedouble_line
 
-DATE_TOKEN = re.compile(r"^\d{1,4}[-/.]\d{1,2}[-/.]\d{2,4}$")
+# 05/10/2026, 2026-10-05, and (ab-314) month names: 05-Oct-26, 05.Oct.2026, 05Oct2026.
+_MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"
+DATE_TOKEN = re.compile(
+    rf"^(?:\d{{1,4}}[-/.]\d{{1,2}}[-/.]\d{{2,4}}|\d{{1,2}}[-/.]?{_MONTH}[-/.]?\d{{2,4}})$", re.IGNORECASE
+)
 MONEY_TOKEN = re.compile(r"^[-(]?[\d,]+\.\d{2}\)?(?:DR|CR)?$", re.IGNORECASE)
 # A gap wider than this between two words starts a new cluster (column).
 CLUSTER_GAP = 6.0

@@ -433,3 +433,26 @@ def test_the_description_amount_dedupe_key():
     rows = read_transactions(build(sample_rows(2)), profile(dedupe="description_amount"), default_currency="KES")
     expected = hashlib.sha256(f"{rows[0]['description']}|{rows[0]['amount']:.2f}".encode()).hexdigest()
     assert rows[0]["dedupe_hash"] == expected
+
+
+def test_a_two_word_heading_takes_its_own_words_not_another_columns():
+    # ab-314: "Value Date" used to borrow the Date column's "Date", putting
+    # two columns in one place and losing every row.
+    headers = ["Date", "Value Date", "Details", "Money In", "Money Out", "Balance"]
+    rows = [
+        ["01/10/2026", "02/10/2026", "Payment from Shop A", "100.00", "", "1,100.00"],
+        ["02/10/2026", "03/10/2026", "Paid to Store B", "", "40.00", "1,060.00"],
+        ["03/10/2026", "04/10/2026", "Payment from Shop C", "200.00", "", "1,260.00"],
+    ]
+    pdf = build(rows, Layout(headers=headers, xs=[40, 105, 170, 330, 410, 490]))
+    roles = ["date", "ignore", "description", "money_in", "money_out", "balance"]
+    profile = validate_profile(
+        {
+            "file_type": "pdf",
+            "date_format": "%d/%m/%Y",
+            "table": {"columns": [{"header": h, "role": r} for h, r in zip(headers, roles)], "column_bounds": "header_gaps"},
+        }
+    )
+    result = read_statement(pdf, profile, default_currency="KES")
+    assert len(result.transactions) == 3 and result.check.passed
+    assert result.transactions[0]["txn_date"] == date(2026, 10, 1)
