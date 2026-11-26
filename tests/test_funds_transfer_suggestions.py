@@ -27,7 +27,9 @@ KEYWORDS = KeywordList.from_rows([
     *(kw(p, "Between my accounts", d, "transfer") for p in ("PESALINK", "RTGS", "FUNDS TRANSFER")
       for d in ("in", "out")),
 ])
-OWNER = {"first_name": "Wanjiru", "last_name": "Kamau", "account_numbers": ["0123456789"]}
+SAVINGS_ACCOUNT = uuid4()
+# account_numbers: {account id: digits}.
+OWNER = {"first_name": "Wanjiru", "last_name": "Kamau", "account_numbers": {SAVINGS_ACCOUNT: "0123456789"}}
 
 
 def txn(description, *, direction="in", amount=5000.0):
@@ -118,6 +120,19 @@ def test_money_in_from_the_user_is_suggested_as_own_account(text):
 def test_own_account_needs_both_names_or_a_full_number_on_money_in(text, direction):
     s = suggest(txn(text, direction=direction), owner=OWNER, provider="M-Pesa")
     assert s is None or s["source"] != "own_account"
+
+
+def test_ab339_the_statements_own_account_number_on_its_rows_is_not_a_transfer():
+    """Co-op card lines print the account's own number: a card refund on
+    that account is not money from another of the user's accounts."""
+    row = txn("REV:DIGITALOCEAN.COM>+31000000 NL 123456 0123456789 K 1234567890")
+    row["account_id"] = SAVINGS_ACCOUNT
+    s = suggest(row, owner=OWNER, provider="Co-operative Bank")
+    assert s is None or s["source"] != "own_account"
+    # The same number on another account's statement is still the user's money.
+    row["account_id"] = uuid4()
+    s = suggest(row, owner=OWNER, provider="Co-operative Bank")
+    assert (s["kind"], s["source"]) == ("transfer", "own_account")
 
 
 # --- grouping ---------------------------------------------------------------------
