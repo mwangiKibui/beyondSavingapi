@@ -1,6 +1,6 @@
 import logging
 from unittest.mock import AsyncMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -63,7 +63,7 @@ def test_list_statement_imports_defaults(client, fake_user, fake_pool, monkeypat
     assert response.status_code == 200
     body = response.json()
     assert body == {"items": [{**SAMPLE_ITEM, "file_type": "pdf", "reviewed_at": None, "allocated_at": None, "added_count": None, "allocated_count": None,
-                               "progress": None}],
+                               "progress": None, "ai_lookup": None}],
                     "total": 1, "page": 1,
                     "page_size": 10}
 
@@ -176,3 +176,19 @@ def test_list_says_how_many_rows_each_upload_added(client, fake_user, fake_pool,
            "progress_updated_at": None}
     monkeypatch.setattr("app.api.statement_imports.list_statement_imports", AsyncMock(return_value=([dup], 1)))
     assert client.get("/statement-imports").json()["items"][0]["added_count"] == 0
+
+
+def test_ab338_the_list_marks_uploads_whose_ai_lookup_is_running(client, fake_user, fake_pool, monkeypatch):
+    looking = {**SAMPLE_ITEM, "id": str(uuid4()), "status": "parsed", "reviewed_at": None,
+               "progress_step": None, "progress_reviewed_count": None, "progress_total_count": None,
+               "progress_updated_at": None}
+    quiet = {**looking, "id": str(uuid4())}
+    reading = {**looking, "id": str(uuid4()), "status": "pending"}
+    monkeypatch.setattr("app.api.statement_imports.list_statement_imports",
+                        AsyncMock(return_value=([looking, quiet, reading], 3)))
+    running = AsyncMock(return_value={UUID(looking["id"])})
+    monkeypatch.setattr("app.api.statement_imports.running_lookups", running)
+    items = client.get("/statement-imports").json()["items"]
+    assert [i["ai_lookup"] for i in items] == ["running", None, None]
+    # Only parsed uploads can have one.
+    assert running.await_args.args[0] == [UUID(looking["id"]), UUID(quiet["id"])]

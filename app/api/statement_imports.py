@@ -40,7 +40,7 @@ from app.repositories.statement_imports import (
 )
 from app.repositories.notifications import generate_budget_alerts
 from app.repositories.sub_ledgers import list_sub_ledgers
-from app.services.ai_categories import load_ai_context, lookup_pending, queue_lookup
+from app.services.ai_categories import load_ai_context, lookup_status, queue_lookup, running_lookups
 from app.services.allocations import AllocationRejected, alert_groups
 from app.repositories.transfer_reasons import get_user_transfer_reasons
 from app.services.description_keywords import load_keyword_context
@@ -141,6 +141,8 @@ class StatementImportListItem(_FileTyped):
     allocated_count: int | None = None
     # ab-265: an unfinished review's saved progress; null when none.
     progress: ListProgress | None = None
+    # ab-338: "running" while the AI suggests categories for its payees.
+    ai_lookup: Literal["running"] | None = None
 
 
 def _list_item(row: dict) -> dict:
@@ -311,7 +313,11 @@ async def list_statement_imports_endpoint(
             detail=GENERIC_ERROR_MESSAGE,
         ) from None
 
-    return {"items": [_list_item(dict(item)) for item in items], "total": total, "page": page, "page_size": page_size}
+    rows = [_list_item(dict(item)) for item in items]
+    running = await running_lookups([UUID(str(r["id"])) for r in rows if r["status"] == "parsed"])
+    for r in rows:
+        r["ai_lookup"] = "running" if UUID(str(r["id"])) in running else None
+    return {"items": rows, "total": total, "page": page, "page_size": page_size}
 
 
 @router.post("", response_model=StatementImportResponse, status_code=status.HTTP_201_CREATED)
@@ -595,6 +601,12 @@ class ReviewGroupsResponse(BaseModel):
     # ab-336: an AI lookup of this upload's business payees is queued or
     # running - the review says so and fetches again shortly.
     ai_pending: bool = False
+    # ab-338: the last lookup got no answers - suggestions unavailable for now.
+    ai_failed: bool = False
+
+
+def _ai_flags(lookup: dict) -> dict:
+    return {"ai_pending": lookup["state"] == "running", "ai_failed": lookup["state"] == "failed"}
 
 
 @router.get("/{import_id}/groups", response_model=ReviewGroupsResponse)
@@ -641,7 +653,7 @@ async def review_groups_endpoint(
         "counts": {t: sum(1 for g in all_groups if in_tab(g, t)) for t in REVIEW_TABS},
         "row_counts": {t: len(rows) for t, rows in by_tab.items()},
         "card_counts": card_counts(all_groups),
-        "ai_pending": await lookup_pending(import_id),
+        **_ai_flags(await lookup_status(import_id)),
         "suggested": sum(1 for g in all_groups if "suggested" in group_cards(g)),
     }
 
@@ -891,6 +903,10 @@ class ProgressResponse(BaseModel):
     sub_ledger_id: UUID | None = None
     # ab-330: the uploaded file's name, shown when going Back to Upload.
     file_name: str | None = None
+    # ab-338, once parsed: the AI category lookup ("running" or "failed",
+    # null when done or none) and how many payees it asks about, once known.
+    ai_lookup: Literal["running", "failed"] | None = None
+    ai_lookup_payees: int | None = None
 
 
 class RecordedBy(BaseModel):
@@ -962,8 +978,11 @@ async def get_import_progress_endpoint(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
         ) from None
+    lookup = await lookup_status(import_id) if statement_import["status"] == "parsed" else None
     counts = {
         **_destination(statement_import),
+        "ai_lookup": lookup["state"] if lookup else None,
+        "ai_lookup_payees": lookup["payees"] if lookup else None,
         "added_count": overlap["added_count"] if overlap else None,
         "already_count": overlap["already_count"] if overlap else None,
         "already_recorded_by": overlap["earlier"] if overlap else None,

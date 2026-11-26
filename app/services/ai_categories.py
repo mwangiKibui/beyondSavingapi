@@ -320,23 +320,53 @@ def with_ai(suggestion: dict | None, ai_suggestion: dict | None) -> dict | None:
 # --- the lookup job ----------------------------------------------------------
 
 
-async def queue_lookup(import_id: UUID, *, fresh: bool = False) -> bool:
-    """Queues the lookup for an import unless one is queued or running, or
-    (unless fresh: a new upload) one finished in the last few hours.
-    Never raises."""
+async def begin_lookup(import_id: UUID) -> bool:
+    """ab-338: flags a new upload's lookup as running before its rows are
+    written and it is marked parsed, so a page polling it can't see it
+    parsed without the lookup. The worker queues it once the rows are in
+    (queue_lookup(begun=True)) or drops the flag (cancel_lookup). Never
+    raises."""
     if not inference_enabled():
         return False
     try:
         from app.core.redis import get_redis
 
         redis = get_redis()
-        done = AI_DONE_KEY.format(import_id=import_id)
-        if fresh:
-            await redis.delete(done)
-        elif await redis.exists(done):
-            return False
-        if not await redis.set(AI_PENDING_KEY.format(import_id=import_id), "1", nx=True, ex=AI_PENDING_TTL_SECONDS):
-            return False
+        await redis.delete(AI_DONE_KEY.format(import_id=import_id))
+        await redis.set(AI_PENDING_KEY.format(import_id=import_id), "", ex=AI_PENDING_TTL_SECONDS)
+        return True
+    except Exception:
+        logger.error("Flagging the AI category lookup for import %s failed", import_id, exc_info=True)
+        return False
+
+
+async def cancel_lookup(import_id: UUID) -> None:
+    try:
+        from app.core.redis import get_redis
+
+        await get_redis().delete(AI_PENDING_KEY.format(import_id=import_id))
+    except Exception:
+        logger.warning("Dropping the AI lookup flag for import %s failed", import_id)
+
+
+async def queue_lookup(import_id: UUID, *, fresh: bool = False, begun: bool = False) -> bool:
+    """Queues the lookup for an import unless one is queued or running, or
+    (unless fresh: a new upload) one finished in the last few hours. begun:
+    begin_lookup already flagged it. Never raises."""
+    if not inference_enabled():
+        return False
+    try:
+        from app.core.redis import get_redis
+
+        redis = get_redis()
+        if not begun:
+            done = AI_DONE_KEY.format(import_id=import_id)
+            if fresh:
+                await redis.delete(done)
+            elif await redis.exists(done):
+                return False
+            if not await redis.set(AI_PENDING_KEY.format(import_id=import_id), "", nx=True, ex=AI_PENDING_TTL_SECONDS):
+                return False
         await redis.lpush(AI_CATEGORY_JOBS_QUEUE, str(import_id))
         return True
     except Exception:
@@ -344,23 +374,63 @@ async def queue_lookup(import_id: UUID, *, fresh: bool = False) -> bool:
         return False
 
 
-async def lookup_pending(import_id: UUID) -> bool:
-    if not inference_enabled():
-        return False
+async def set_lookup_payees(import_id: UUID, count: int) -> None:
+    """ab-338: how many payees the running lookup asks about, for the
+    Processing step. Only while the flag is up - never revives it."""
     try:
         from app.core.redis import get_redis
 
-        return bool(await get_redis().exists(AI_PENDING_KEY.format(import_id=import_id)))
+        await get_redis().set(AI_PENDING_KEY.format(import_id=import_id), str(count), xx=True, keepttl=True)
     except Exception:
-        return False
+        logger.warning("Saving the AI lookup's payee count for import %s failed", import_id)
 
 
-async def _clear_pending(import_id: UUID) -> None:
+_NO_STATUS = {"state": None, "payees": None}
+
+
+async def lookup_status(import_id: UUID) -> dict:
+    """ab-338: {"state": "running" | "failed" | None, "payees": int | None}.
+    failed = the last lookup (within a few hours) got no answers."""
+    if not inference_enabled():
+        return dict(_NO_STATUS)
     try:
         from app.core.redis import get_redis
 
         redis = get_redis()
-        await redis.set(AI_DONE_KEY.format(import_id=import_id), "1", ex=AI_DONE_TTL_SECONDS)
+        pending = await redis.get(AI_PENDING_KEY.format(import_id=import_id))
+        if pending is not None:
+            text = pending.decode() if isinstance(pending, bytes) else str(pending)
+            return {"state": "running", "payees": int(text) if text.isdigit() else None}
+        done = await redis.get(AI_DONE_KEY.format(import_id=import_id))
+        failed = (done.decode() if isinstance(done, bytes) else done) == "failed"
+        return {"state": "failed" if failed else None, "payees": None}
+    except Exception:
+        return dict(_NO_STATUS)
+
+
+async def lookup_pending(import_id: UUID) -> bool:
+    return (await lookup_status(import_id))["state"] == "running"
+
+
+async def running_lookups(import_ids: list[UUID]) -> set[UUID]:
+    """ab-338: which of a page of uploads have a lookup running."""
+    if not import_ids or not inference_enabled():
+        return set()
+    try:
+        from app.core.redis import get_redis
+
+        flags = await get_redis().mget([AI_PENDING_KEY.format(import_id=i) for i in import_ids])
+        return {i for i, flag in zip(import_ids, flags, strict=True) if flag is not None}
+    except Exception:
+        return set()
+
+
+async def _clear_pending(import_id: UUID, *, failed: bool = False) -> None:
+    try:
+        from app.core.redis import get_redis
+
+        redis = get_redis()
+        await redis.set(AI_DONE_KEY.format(import_id=import_id), "failed" if failed else "1", ex=AI_DONE_TTL_SECONDS)
         await redis.delete(AI_PENDING_KEY.format(import_id=import_id))
     except Exception:
         logger.warning("Clearing the AI lookup flag for import %s failed", import_id)

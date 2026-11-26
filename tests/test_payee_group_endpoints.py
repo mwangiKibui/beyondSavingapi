@@ -765,9 +765,9 @@ def test_ab336_a_cached_ai_answer_is_suggested_and_the_lookup_flag_shown(client,
     monkeypatch.setattr(f"{SI}.load_ai_context", AsyncMock(return_value=AiContext(answers=answers)))
     queue = AsyncMock()
     monkeypatch.setattr(f"{SI}.queue_lookup", queue)
-    monkeypatch.setattr(f"{SI}.lookup_pending", AsyncMock(return_value=True))
+    monkeypatch.setattr(f"{SI}.lookup_status", AsyncMock(return_value={"state": "running", "payees": 3}))
     body = client.get(f"/statement-imports/{IMPORT_ID}/groups", params={"tab": "all"}).json()
-    assert body["ai_pending"] is True
+    assert body["ai_pending"] is True and body["ai_failed"] is False
     suggestion = body["items"][0]["suggestion"]
     assert (suggestion["source"], suggestion["category_name"]) == ("ai", GROCERIES["name"])
     queue.assert_not_awaited()  # every wanted name has an answer
@@ -780,6 +780,8 @@ def test_ab336_an_upload_missing_answers_queues_one_lookup(client, fake_user, fa
     monkeypatch.setattr(f"{SI}.load_ai_context", AsyncMock(return_value=AiContext(missing=1)))
     queue = AsyncMock()
     monkeypatch.setattr(f"{SI}.queue_lookup", queue)
-    monkeypatch.setattr(f"{SI}.lookup_pending", AsyncMock(return_value=False))
-    assert client.get(f"/statement-imports/{IMPORT_ID}/groups").status_code == 200
+    monkeypatch.setattr(f"{SI}.lookup_status", AsyncMock(return_value={"state": "failed", "payees": None}))
+    body = client.get(f"/statement-imports/{IMPORT_ID}/groups").json()
     queue.assert_awaited_once_with(IMPORT_ID)
+    # ab-338: Allocation says suggestions are unavailable after a failed lookup.
+    assert body["ai_pending"] is False and body["ai_failed"] is True

@@ -600,3 +600,59 @@ async def test_ab336_ai_lookups_run_beside_parse_jobs(fake_pool, monkeypatch):
 
     assert mock_redis.brpop.await_args_list[0].args[0] == ["parse_jobs", "ai_category_jobs"]
     lookup.assert_awaited_once_with(fake_pool, iid)
+
+
+async def test_ab338_the_ai_lookup_is_flagged_before_the_upload_is_marked_parsed(fake_pool, monkeypatch):
+    """A page polling the upload must never see it parsed before the
+    lookup shows as running (the 45-then-345 race)."""
+    import_id = uuid4()
+    monkeypatch.setattr(
+        "app.worker.get_import_for_processing",
+        AsyncMock(return_value={"id": import_id, "account_id": uuid4(), "storage_key": "k",
+                                "file_name": "statement.pdf", "provider": "Test Provider"}),
+    )
+    monkeypatch.setattr("app.worker.PARSERS", {"Test Provider": MagicMock(return_value=[])})
+    monkeypatch.setattr("app.worker.insert_transactions", AsyncMock(return_value=0))
+    order = []
+    monkeypatch.setattr("app.worker.begin_lookup", AsyncMock(side_effect=lambda i: order.append("begin") or True))
+    monkeypatch.setattr("app.worker.mark_import_parsed", AsyncMock(side_effect=lambda *a, **k: order.append("parsed")))
+    monkeypatch.setattr("app.worker.queue_lookup",
+                        AsyncMock(side_effect=lambda i, **k: order.append(("queue", k)) or True))
+    monkeypatch.setattr("app.worker.cancel_lookup", AsyncMock(side_effect=lambda i: order.append("cancel")))
+    body = MagicMock()
+    body.read.return_value = b"x"
+    storage = MagicMock()
+    storage.get_object.return_value = {"Body": body}
+    monkeypatch.setattr("app.worker.get_storage_client", lambda: storage)
+
+    await process_job(fake_pool, str(import_id))
+
+    assert order == ["begin", "parsed", ("queue", {"fresh": True, "begun": True})]
+
+
+async def test_ab338_an_upload_that_is_not_parsed_drops_its_lookup_flag(fake_pool, monkeypatch):
+    import_id = uuid4()
+    monkeypatch.setattr(
+        "app.worker.get_import_for_processing",
+        AsyncMock(return_value={"id": import_id, "account_id": uuid4(), "storage_key": "k",
+                                "file_name": "statement.pdf", "provider": "Test Provider"}),
+    )
+    from app.parsers.base import StatementParseError
+
+    monkeypatch.setattr("app.worker.PARSERS", {"Test Provider": MagicMock(side_effect=StatementParseError("bad"))})
+    monkeypatch.setattr("app.worker.mark_import_failed", AsyncMock())
+    monkeypatch.setattr("app.worker.begin_lookup", AsyncMock(return_value=True))
+    queue = AsyncMock()
+    monkeypatch.setattr("app.worker.queue_lookup", queue)
+    cancel = AsyncMock()
+    monkeypatch.setattr("app.worker.cancel_lookup", cancel)
+    body = MagicMock()
+    body.read.return_value = b"x"
+    storage = MagicMock()
+    storage.get_object.return_value = {"Body": body}
+    monkeypatch.setattr("app.worker.get_storage_client", lambda: storage)
+
+    await process_job(fake_pool, str(import_id))
+
+    queue.assert_not_called()
+    cancel.assert_awaited_once_with(import_id)

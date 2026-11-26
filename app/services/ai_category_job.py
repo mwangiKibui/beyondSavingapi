@@ -16,18 +16,21 @@ logger = logging.getLogger(__name__)
 
 
 async def run_lookup(pool, import_id: UUID) -> None:
+    failed = True
     try:
-        await _run(pool, import_id)
+        failed = await _run(pool, import_id)
     except Exception:
         logger.error("AI category lookup failed for import %s", import_id, exc_info=True)
     finally:
-        await ai_categories._clear_pending(import_id)
+        await ai_categories._clear_pending(import_id, failed=failed)
 
 
-async def _run(pool, import_id: UUID) -> None:
+async def _run(pool, import_id: UUID) -> bool:
+    """True when it asked about names and got no answers at all (ab-338:
+    the Processing step and Allocation say suggestions are unavailable)."""
     record = await repo.get_import_for_lookup(pool, import_id=import_id)
     if record is None:
-        return
+        return False
     rows = await get_import_rows(
         pool,
         import_id=import_id,
@@ -42,9 +45,10 @@ async def _run(pool, import_id: UUID) -> None:
     keys = apply_learned_names(rows, keys, learned, directory)
     names = ai_categories.wanted_names(rows, keys)
     if not names:
-        return
+        return False
     known = await repo.get_answers(pool, names=names)
     missing = [n for n in names if n not in known][: ai_categories.MAX_NAMES_PER_JOB]
+    await ai_categories.set_lookup_payees(import_id, len(missing))
     saved = await ai_categories.answer_names(pool, missing) if missing else 0
     answers = await repo.get_answers(pool, names=names)
     categories = await get_user_categories(pool, user_id=record["user_id"])
@@ -55,3 +59,4 @@ async def _run(pool, import_id: UUID) -> None:
         "Import %s: AI lookup for %d business payees - %d asked, %d answered, %d categories mapped",
         import_id, len(names), len(missing), saved, mapped,
     )
+    return bool(missing) and saved == 0
