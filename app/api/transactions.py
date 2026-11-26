@@ -40,6 +40,7 @@ from app.repositories.transactions import (
 from app.repositories.transfer_reasons import get_transfer_reasons_by_ids
 from app.services.import_handling import HandlingRejected, change_handled_category, undo_handling
 from app.services.category_applies import ApplyGroup, edit_allocation
+from app.services.transaction_delete import delete_manual_transaction, restore_manual_transaction
 from app.services.rule_updates import remember_preferred
 from app.services.allocations import (
     CATEGORY_TYPE_FOR_DIRECTION,
@@ -1128,3 +1129,59 @@ async def change_handled_category_endpoint(
         transaction_id=transaction_id,
         user_id=user_id,
     )
+
+
+class DeleteTransactionResponse(BaseModel):
+    # The other sides of a transfer this row was paired with, now back in
+    # their statement's review (the UI says so).
+    released: list[UUID] = []
+
+
+@router.delete("/{transaction_id}", response_model=DeleteTransactionResponse)
+async def delete_transaction_endpoint(
+    transaction_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """ab-342: delete a manual entry (soft). A statement row is refused (409)."""
+    if pool is None:
+        logger.error("Database pool unavailable")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE)
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                released = await delete_manual_transaction(
+                    conn, user_id=user_id, transaction_id=transaction_id,
+                    secret=get_settings().suggestion_key_secret,
+                )
+    except AllocationRejected as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
+    except Exception:
+        logger.error("Unexpected error deleting transaction %s, user %s", transaction_id, user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
+        ) from None
+    return {"released": released}
+
+
+@router.post("/{transaction_id}/restore", status_code=status.HTTP_204_NO_CONTENT)
+async def restore_transaction_endpoint(
+    transaction_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> None:
+    """ab-342: Undo a delete (the toast's Undo)."""
+    if pool is None:
+        logger.error("Database pool unavailable")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE)
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await restore_manual_transaction(conn, user_id=user_id, transaction_id=transaction_id)
+    except AllocationRejected as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
+    except Exception:
+        logger.error("Unexpected error restoring transaction %s, user %s", transaction_id, user_id, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
+        ) from None
