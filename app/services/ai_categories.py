@@ -442,7 +442,9 @@ async def _ask(prompt: str) -> str | None:
         reply = await complete(
             prompt, max_tokens=MAX_TOKENS, model=settings.do_category_model, timeout=settings.do_category_timeout_seconds
         )
-    except InferenceError:
+    except InferenceError as e:
+        # ab-338: the lookup is then marked failed; say why in the worker log.
+        logger.warning("AI category call failed: %s", e)
         return None
     logger.info("AI category call: %s tokens in, %s out", reply.prompt_tokens, reply.completion_tokens)
     return reply.content
