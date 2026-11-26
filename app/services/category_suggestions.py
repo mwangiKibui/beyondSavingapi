@@ -30,9 +30,11 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
+from app.services.ai_categories import with_ai
 from app.services.merchant_keys import RowKey, extract_key
 
 if TYPE_CHECKING:
+    from app.services.ai_categories import AiContext
     from app.services.description_keywords import Keyword, KeywordContext
 
 CATEGORY_TYPE_FOR_DIRECTION = {"out": "expense", "in": "income"}
@@ -484,6 +486,7 @@ def build_preview_rows(
     keywords: "KeywordContext | None" = None,
     reasons: list[dict] | None = None,
     owner: dict | None = None,
+    ai: "AiContext | None" = None,
 ) -> list[dict]:
     """rows: every transaction in the import, each with its allocated
     total and (when its allocations use exactly one category) category_id.
@@ -493,6 +496,8 @@ def build_preview_rows(
     remembered or suggested transfer can be named (ab-285).
     owner: the user's first_name, last_name and account_numbers, to spot
     money in sent by the user themselves (ab-285). Matched in memory only.
+    ai: cached AI answers for business payees (ab-336), the last source; for
+    a business payee it also replaces a keyword's guess it disagrees with.
     Returns the open rows - nothing allocated yet, not a transfer - each
     with its suggestion or None."""
     shared_votes = shared_votes or {}
@@ -582,6 +587,9 @@ def build_preview_rows(
         keyword = keywords.keywords.match(row["description"], direction) if keywords else None
         if suggestion is None and keyword:
             suggestion = _keyword_suggestion(keyword, keywords, by_id, by_name, wanted_type, reasons_by_name)
+
+        if ai is not None:
+            suggestion = with_ai(suggestion, ai.suggestion(key, direction, categories))
 
         out.append({
             "transaction_id": row["id"],

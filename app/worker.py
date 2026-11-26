@@ -6,7 +6,7 @@ from uuid import UUID
 import asyncpg
 
 from app.core.config import get_settings
-from app.core.queues import PARSE_JOBS_QUEUE
+from app.core.queues import AI_CATEGORY_JOBS_QUEUE, PARSE_JOBS_QUEUE
 from app.core.redis import get_redis
 from app.core.storage import get_storage_client
 from app.parsers import MENTOR_SACCO, PARSERS
@@ -25,6 +25,8 @@ from app.repositories.statement_imports import (
 from app.repositories.notifications import notify_statement_ready
 from app.repositories.statement_profiles import get_profile, list_active_profiles, record_check_passed
 from app.repositories.transactions import insert_transactions
+from app.services.ai_categories import queue_lookup
+from app.services.ai_category_job import run_lookup
 from app.services.import_handling import handle_import_by_id
 from app.services.statement_files import file_type_of
 from app.services.layout_proposer import propose_layout
@@ -358,6 +360,8 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
                     transactions=transactions,
                 )
             await _handle_rows(pool, import_id=parsed_import_id)
+            # ab-336: AI categories for its business payees, in the background.
+            await queue_lookup(parsed_import_id, fresh=True)
         except (StatementParseError, ImportWriteError) as e:
             # A parser's own validation (ab-42's validate_running_balance,
             # a missing required anchor like Equity Bank/NCBA's opening
@@ -380,14 +384,34 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
             logger.error("Additionally failed to mark import %s as failed", import_id, exc_info=True)
 
 
+# ab-336: AI lookups wait on the model for tens of seconds, so they run as
+# tasks (a few at once) while the loop keeps taking parse jobs.
+_AI_LOOKUPS_AT_ONCE = 2
+
+
+async def _ai_lookup(pool: asyncpg.Pool, gate: asyncio.Semaphore, import_id: str) -> None:
+    async with gate:
+        try:
+            await run_lookup(pool, UUID(import_id))
+        except ValueError:
+            logger.warning("Ignoring an AI lookup job with a bad import id")
+
+
 async def run_worker(pool: asyncpg.Pool) -> None:
     redis_client = get_redis()
-    logger.info("Parse-job worker started, watching '%s'", PARSE_JOBS_QUEUE)
+    logger.info("Worker started, watching '%s' and '%s'", PARSE_JOBS_QUEUE, AI_CATEGORY_JOBS_QUEUE)
+    gate = asyncio.Semaphore(_AI_LOOKUPS_AT_ONCE)
+    running: set[asyncio.Task] = set()
     while True:
-        popped = await redis_client.brpop(PARSE_JOBS_QUEUE, timeout=POLL_TIMEOUT_SECONDS)
+        popped = await redis_client.brpop([PARSE_JOBS_QUEUE, AI_CATEGORY_JOBS_QUEUE], timeout=POLL_TIMEOUT_SECONDS)
         if popped is None:
             continue
-        _, import_id = popped
+        queue, import_id = popped
+        if queue == AI_CATEGORY_JOBS_QUEUE:
+            task = asyncio.create_task(_ai_lookup(pool, gate, import_id))
+            running.add(task)
+            task.add_done_callback(running.discard)
+            continue
         await process_job(pool, import_id)
 
 

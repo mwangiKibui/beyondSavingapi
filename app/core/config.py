@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     do_inference_url: str = "https://inference.do-ai.run/v1"
     do_inference_model: str = "openai-gpt-oss-120b"
     do_inference_timeout_seconds: float = 60
+    # ab-336: AI category suggestions for business payees nothing else
+    # knows (the ab-256 spike picked GLM-5.3 Flash). Same key; the key must
+    # allow this model too.
+    do_category_model: str = "glm-5.3-flash"
+    do_category_timeout_seconds: float = 120
 
 
 @lru_cache

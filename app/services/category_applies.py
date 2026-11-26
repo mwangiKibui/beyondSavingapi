@@ -32,6 +32,7 @@ from app.repositories.category_suggestions import (
     upsert_number_votes,
 )
 from app.repositories.accounts import DuplicateAccount, create_account, get_account
+from app.services.ai_categories import load_ai_context
 from app.services.limits import ACCOUNTS_MAX, enforce_limit
 from app.repositories.row_handling import delete_allocations, get_or_create_transfer_reason
 from app.repositories.transfer_reasons import get_user_transfer_reasons
@@ -200,9 +201,10 @@ async def load_suggestions(
     keywords = await load_keyword_context(conn, user_id=user_id, rows=rows)
     reasons = await get_user_transfer_reasons(conn, user_id=user_id)
     owner = await get_owner(conn, user_id=user_id)
+    ai = await load_ai_context(conn, user_id=user_id, rows=rows, keys=keys, categories=categories)
     preview = build_preview_rows(
         rows, keys=keys, rules=rules, directory=directory, categories=categories, shared_votes=votes,
-        keywords=keywords, reasons=reasons, owner=owner,
+        keywords=keywords, reasons=reasons, owner=owner, ai=ai,
     )
     return keys, {p["transaction_id"]: p for p in preview}, categories, directory
 

@@ -752,3 +752,34 @@ def test_ab335_changing_the_handling_clears_the_acceptance():
     accept = " ".join(inspect.getsource(statement_imports.accept_handled_rows).split())
     assert "SET handling_accepted_at = now()" in accept
     assert "handled_as IS NOT NULL AND handling_accepted_at IS NULL" in accept
+
+
+# --- ab-336: AI category answers ---------------------------------------------------
+
+
+def test_ab336_a_cached_ai_answer_is_suggested_and_the_lookup_flag_shown(client, fake_user, fake_pool, review, monkeypatch):
+    review([txn("GREENLEAF GROCERS")])
+    from app.services.ai_categories import AiContext
+
+    answers = {("GREENLEAF GROCERS", "out"): {"category_name": "Groceries", "is_new": False}}
+    monkeypatch.setattr(f"{SI}.load_ai_context", AsyncMock(return_value=AiContext(answers=answers)))
+    queue = AsyncMock()
+    monkeypatch.setattr(f"{SI}.queue_lookup", queue)
+    monkeypatch.setattr(f"{SI}.lookup_pending", AsyncMock(return_value=True))
+    body = client.get(f"/statement-imports/{IMPORT_ID}/groups", params={"tab": "all"}).json()
+    assert body["ai_pending"] is True
+    suggestion = body["items"][0]["suggestion"]
+    assert (suggestion["source"], suggestion["category_name"]) == ("ai", GROCERIES["name"])
+    queue.assert_not_awaited()  # every wanted name has an answer
+
+
+def test_ab336_an_upload_missing_answers_queues_one_lookup(client, fake_user, fake_pool, review, monkeypatch):
+    review([txn("SUNRISE CAR WASH")])
+    from app.services.ai_categories import AiContext
+
+    monkeypatch.setattr(f"{SI}.load_ai_context", AsyncMock(return_value=AiContext(missing=1)))
+    queue = AsyncMock()
+    monkeypatch.setattr(f"{SI}.queue_lookup", queue)
+    monkeypatch.setattr(f"{SI}.lookup_pending", AsyncMock(return_value=False))
+    assert client.get(f"/statement-imports/{IMPORT_ID}/groups").status_code == 200
+    queue.assert_awaited_once_with(IMPORT_ID)
