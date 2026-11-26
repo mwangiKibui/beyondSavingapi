@@ -420,13 +420,21 @@ def _flush_pending(state: _Collected, new_row: _Row | None, *, mode: str = "near
     state.pending = []
 
 
+# ab-339: a line that is only "End of Report" (or statement/transactions),
+# however decorated, ends the table even when the layout names no end
+# marker - so a bank's closing disclaimer under it isn't read into the last
+# row (Co-op: "***** End of Report *****" then "... Regulated by the Central
+# Bank of Kenya").
+_REPORT_END = re.compile(r"^[\W_]*END OF (?:THE )?(?:REPORT|STATEMENT|TRANSACTIONS)[\W_]*$", re.IGNORECASE)
+
+
 def _take_line(
     state: _Collected, text: str, cells: dict[str, str], profile: StatementProfile, y: float = 0.0
 ) -> None:
     """One line of the table (a PDF line or a spreadsheet row): ends the
     table, is skipped, is an opening/totals row, starts a transaction, or
     continues a row's description."""
-    if any(_starts(text, m) for m in profile.table.end_markers):
+    if _REPORT_END.match(text.strip()) or any(_starts(text, m) for m in profile.table.end_markers):
         _note_trailing(state, profile)
         _end_page(state)
         state.ended = True

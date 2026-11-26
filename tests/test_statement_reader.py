@@ -515,3 +515,21 @@ def test_with_learned_skip_rows_adds_them_to_the_profile():
     assert [r.model_dump() for r in out.table.skip_rows] == [{"match": "starts_with", "text": "Printed On:"}]
     plain = build(sample_rows(60), Layout(rows_per_page=20))
     assert with_learned_skip_rows(plain, profile()) == profile()
+
+
+# --- ab-339: the report's end ---------------------------------------------------
+
+
+@pytest.mark.parametrize("marker", ["********* End of Report *********", "--- END OF STATEMENT ---", "End of transactions"])
+def test_a_report_end_line_ends_the_table_without_a_saved_end_marker(marker):
+    pdf = build(sample_rows(6), Layout(end_marker=marker, after_end="Example Bank is Regulated by the Central Bank"))
+    rows = read_transactions(pdf, profile(), default_currency="KES")
+    assert len(rows) == 6
+    assert not any("Regulated" in (r["description"] or "") or "End" in (r["description"] or "") for r in rows)
+
+
+def test_a_row_mentioning_the_end_of_something_is_still_a_row():
+    rows = sample_rows(6)
+    rows[2][1] = "End of month transfer"
+    got = read_transactions(build(rows), profile(), default_currency="KES")
+    assert len(got) == 6 and got[2]["description"] == "End of month transfer"

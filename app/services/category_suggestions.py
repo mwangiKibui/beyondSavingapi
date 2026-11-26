@@ -566,7 +566,9 @@ def build_preview_rows(
 
         # ab-285: money in sent by the user themselves (their own name, or
         # one of their account numbers) - a Funds transfer, suggested only.
-        if suggestion is None and direction == "in" and owner and _from_owner(row["description"], owner):
+        if suggestion is None and direction == "in" and owner and _from_owner(
+            row["description"], owner, row.get("account_id")
+        ):
             suggestion = _transfer_named(BETWEEN_MY_ACCOUNTS, reasons_by_name, "own_account")
 
         if suggestion is None:
@@ -589,7 +591,7 @@ def build_preview_rows(
             suggestion = _keyword_suggestion(keyword, keywords, by_id, by_name, wanted_type, reasons_by_name)
 
         if ai is not None:
-            suggestion = with_ai(suggestion, ai.suggestion(key, direction, categories))
+            suggestion = with_ai(suggestion, ai.suggestion(key, direction, categories, row["description"]))
 
         out.append({
             "transaction_id": row["id"],
@@ -704,9 +706,12 @@ def _transfer_named(name: str, reasons_by_name: dict, source: str) -> dict:
 _DIGITS = re.compile(r"\d+")
 
 
-def _from_owner(description: str | None, owner: dict) -> bool:
-    """The user's own first AND last name as whole words, or one of their
-    account numbers (6+ digits), in the description."""
+def _from_owner(description: str | None, owner: dict, account_id: UUID | None = None) -> bool:
+    """The user's own first AND last name as whole words, or the number
+    (6+ digits) of one of their *other* accounts, in the description.
+    owner["account_numbers"]: {account id: digits}. ab-339: the row's own
+    account number proves nothing - Co-op card lines print it on every
+    card payment and refund."""
     text = (description or "").upper()
     if not text:
         return False
@@ -715,7 +720,8 @@ def _from_owner(description: str | None, owner: dict) -> bool:
     if len(first) >= 2 and len(last) >= 2 and first in words and last in words:
         return True
     found = set(_DIGITS.findall(text))
-    return any(n in found for n in (owner.get("account_numbers") or []) if n and len(n) >= 6)
+    numbers = (owner.get("account_numbers") or {}).items()
+    return any(n in found for aid, n in numbers if aid != account_id and n and len(n) >= 6)
 
 
 def new_category_names(preview_rows: list[dict]) -> list[str]:

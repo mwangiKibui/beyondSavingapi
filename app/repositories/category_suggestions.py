@@ -194,11 +194,13 @@ async def get_owner(pool: asyncpg.Pool, *, user_id: UUID) -> dict:
     """The user's own name and account numbers (digits only), to spot
     money in they sent themselves (ab-285). Used in memory only."""
     user = await pool.fetchrow("SELECT first_name, last_name FROM users WHERE id = $1", user_id)
-    numbers = await pool.fetch("SELECT account_number FROM accounts WHERE user_id = $1", user_id)
+    numbers = await pool.fetch("SELECT id, account_number FROM accounts WHERE user_id = $1", user_id)
+    digits = {r["id"]: re.sub(r"\D", "", r["account_number"] or "") for r in numbers}
     return {
         "first_name": user["first_name"] if user else None,
         "last_name": user["last_name"] if user else None,
-        "account_numbers": sorted({re.sub(r"\D", "", r["account_number"] or "") for r in numbers} - {""}),
+        # {account id: digits}, so a row's own account can be left out (ab-339).
+        "account_numbers": {aid: n for aid, n in digits.items() if n},
     }
 
 
