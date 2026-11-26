@@ -13,7 +13,7 @@ from uuid import UUID
 
 from app.services.row_kind import allocation_kind
 from app.services.category_suggestions import _display_name, _is_open, group_key
-from app.services.merchant_keys import RowKey, extract_key
+from app.services.merchant_keys import RowKey, extract_key, person_display
 
 ALLOWED_PAGE_SIZES = (5, 10, 20, 30)
 DEFAULT_PAGE_SIZE = 30
@@ -148,12 +148,23 @@ def build_groups(
             k = f"{r['handled_as']}:{k}"
         by_key.setdefault(k, []).append(r)
 
+    # ab-341: a person's name from any row with the same key (e.g. a bank's
+    # incoming row names the number its outgoing rows only show).
+    person_names: dict[str, tuple[str, str | None]] = {}
+    for r in rows:
+        k = keys.get(r["id"])
+        if k is not None and k.is_person and k.person_name and k.value not in person_names:
+            person_names[k.value] = (k.person_name, k.person_number)
+
     groups = []
     for gk, members in by_key.items():
         members = sorted(members, key=lambda r: (r["txn_date"], str(r["id"])))
         latest = members[-1]
         key = keys[latest["id"]]
         known_as = preview.get(latest["id"], {}).get("display_name")
+        if key.is_person and key.value in person_names:
+            name, number = person_names[key.value]
+            known_as = person_display(name, number or key.person_number)
         statements: dict = {}
         for r in members:
             if r.get("import_id") is not None:

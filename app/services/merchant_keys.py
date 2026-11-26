@@ -41,6 +41,9 @@ MPESA = "M-Pesa"
 NCBA = "NCBA Bank"
 MENTOR = "Mentor Sacco"
 EQUITY = "Equity Bank"
+# ab-341: people are keyed in one namespace whatever the statement, so the
+# same phone number on M-Pesa and on a bank statement is the same person.
+PERSON = "person"
 
 _BUSINESS_TOKENS = {
     "LTD", "LIMITED", "PLC", "CO", "COMPANY", "ENTERPRISE", "ENTERPRISES", "SUPERMARKET", "SUPERMARKETS",
@@ -98,6 +101,14 @@ class RowKey:
     # ab-281: rows handled at import without asking the user.
     is_charge: bool = False  # a bank/mobile charge or excise duty on one
     is_loan_repayment: bool = False  # repaying a loan (gets the Loan Repayment category)
+    # ab-341: who a person row is, for the uploader only. person_number is
+    # always masked ("2547•••001"); neither is ever stored.
+    person_name: str | None = None
+    person_number: str | None = None
+    # ab-341: the key this person had before ab-341, so choices remembered
+    # under it still apply. New choices are saved under `value`.
+    legacy_value: str | None = None
+    legacy_provider: str | None = None
 
 
 def normalize_text(text: str | None) -> str:
@@ -150,6 +161,85 @@ def _number_row(kind: str, number: str, name: str, *, account: str | None, provi
         match_text=name,
         display=f"{'Paybill' if kind == 'paybill' else 'Till'} {number}",
     )
+
+
+# --- people (ab-341) ----------------------------------------------------------
+
+# A Kenyan mobile number: 2547…/2541…, 07…/01…, +254 7… (a space allowed
+# after the country code). Not part of a longer run of digits.
+_FULL_PHONE = re.compile(r"(?<![\d*])(?:\+?254 ?|0)([17]\d{8})(?![\d*])")
+# A masked one: visible prefix, a run of * / X / •, visible suffix.
+_MASKED_PHONE = re.compile(r"(?<![\d*])(\+?254|0)([17]\d{0,5})([*X•]{2,})(\d{1,6})(?![\d*])")
+# Words that sit around the number/name, not part of the name.
+_PERSON_FILLER = {"TO", "FROM", "BY", "-"}
+
+
+def _find_phone(text: str) -> tuple[str, str] | None:
+    """(identity, masked display) for the first phone number in text."""
+    if m := _FULL_PHONE.search(text):
+        number = "254" + m.group(1)
+        return number, f"{number[:4]}•••{number[-3:]}"
+    if m := _MASKED_PHONE.search(text):
+        prefix = "254" + m.group(2)
+        return f"{prefix}*{len(m.group(3))}*{m.group(4)}", f"{prefix}•••{m.group(4)}"
+    return None
+
+
+def _phone_span(text: str) -> tuple[int, int] | None:
+    m = _FULL_PHONE.search(text) or _MASKED_PHONE.search(text)
+    return m.span() if m else None
+
+
+def _person_name(text: str) -> str:
+    """The name on a person row: the words after the number when there is
+    one (M-Pesa "to 2547… - JANE DOE", packed "~2547…~VERONICA~…"),
+    otherwise the row's words without the TO/FROM filler."""
+    spaced = _PACKED.sub(" ", text)
+    span = _phone_span(spaced)
+    tail = spaced[span[1]:] if span else spaced
+    words = [w for w in _words_only(tail).split() if w not in _PERSON_FILLER]
+    return _clean_name(" ".join(words))
+
+
+def _person(
+    text: str, *, secret: str, name: str | None = None, legacy: tuple[str, str] | None = None,
+    match_text: str = "",
+) -> RowKey:
+    """A person row keyed by who they are: full number, else masked number
+    plus name, else name. `legacy` is (provider, identity) as keyed before
+    ab-341."""
+    spaced = _PACKED.sub(" ", text)
+    name = _clean_name(name) if name is not None else _person_name(text)
+    found = _find_phone(spaced)
+    if found and _FULL_PHONE.search(spaced):
+        identity = found[0]
+    elif found:
+        identity = f"{found[0]}|{name}"
+    else:
+        identity = f"name|{name or normalize_text(text)}"
+    legacy_provider, legacy_identity = legacy or (None, None)
+    return RowKey(
+        kind="reference",
+        value=hash_value(PERSON, identity, secret=secret),
+        provider=PERSON,
+        display="Transfer",
+        match_text=match_text,
+        is_person=True,
+        person_name=name or None,
+        person_number=found[1] if found else None,
+        legacy_value=(
+            hash_value(legacy_provider, normalize_text(legacy_identity), secret=secret) if legacy else None
+        ),
+        legacy_provider=legacy_provider,
+    )
+
+
+def person_display(name: str | None, number: str | None) -> str | None:
+    """'JANE DOE · 2547•••001' for the uploader, or None when the row has no
+    name (the statement text is shown instead)."""
+    if not name:
+        return None
+    return f"{name} · {number}" if number else name
 
 
 def _person_row(provider: str, identity: str, *, secret: str, match_text: str = "") -> RowKey:
@@ -220,8 +310,8 @@ def _mpesa(text: str, secret: str) -> RowKey:
     if cleaned.endswith("CHARGE"):
         return _name_row(cleaned, is_charge=True)
     if m := _MPESA_PERSON.match(cleaned):
-        identity = m.group(1) or m.group(2) or cleaned
-        return _person_row(MPESA, identity, secret=secret)
+        old_identity = m.group(1) or m.group(2) or cleaned
+        return _person(cleaned, secret=secret, legacy=(MPESA, old_identity))
     return _fallback(cleaned)
 
 
@@ -276,7 +366,7 @@ def _ncba(text: str, secret: str) -> RowKey:
         # (e.g. 'MERCHANT ATM TRANSACTION * GOOGLE ONE').
         return _name_row(_words_only(m.group(1)), match_text=_words_only(text))
     if m := _NCBA_PERSON_IN.match(text):
-        return _person_row(NCBA, _words_only(m.group(1)), secret=secret)
+        return _person(m.group(1), secret=secret, legacy=(NCBA, _words_only(m.group(1))))
     if text.startswith("IB INCOMING MOBILE PAYMENTS"):
         # Narrative may name an employer or a person: keep the key private.
         # Reading the shared list by text is still fine (nothing is shared
@@ -344,8 +434,12 @@ def _equity(text: str, secret: str) -> RowKey:
 _UNLISTED_CHARGE = normalize_text(UNLISTED_CHARGE)
 
 
-def _fallback(text: str) -> RowKey:
+def _fallback(text: str, *, secret: str | None = None) -> RowKey:
     words = _words_only(text)
+    # ab-341: a row with a phone number and no business words is a person
+    # (Co-op "TRANSFER TO M-PESA 2547…", packed "MPS…~2547…~NAME~…").
+    if secret and _find_phone(_PACKED.sub(" ", text)) and not looks_like_business(words):
+        return _person(text, secret=secret)
     if not words:
         return RowKey(kind=None, value=None)
     # Private name key; only shared-list matches or business-looking
@@ -374,4 +468,4 @@ def extract_key(*, provider: str, description: str | None, direction: str, secre
         return _mentor(text)
     if provider == EQUITY:
         return _equity(text, secret)
-    return _fallback(text)
+    return _fallback(text, secret=secret)

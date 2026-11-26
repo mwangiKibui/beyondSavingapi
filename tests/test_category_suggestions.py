@@ -511,16 +511,30 @@ PERSON_ROWS = [
 ]
 
 
-@pytest.mark.parametrize("provider,description,direction", PERSON_ROWS)
-def test_person_rows_show_the_statement_text_not_transfer(provider, description, direction):
+# ab-341: a row that names the person shows "NAME · masked number"; the
+# rest still show the statement text as printed (ab-269).
+PERSON_DISPLAY = [
+    "JOHN DOE · 254700•••000",
+    "JOHN DOE · 254700•••000",
+    "JANE ROE · 254711•••111",
+    "JANE ROE",
+    None,
+    None,
+    None,
+]
+
+
+@pytest.mark.parametrize("row,expected", zip(PERSON_ROWS, PERSON_DISPLAY))
+def test_person_rows_show_who_or_the_statement_text_not_transfer(row, expected):
+    provider, description, direction = row
     out = preview([txn(description, direction=direction)], provider=provider)
-    assert out[0]["display_name"] == description
+    assert out[0]["display_name"] == (expected or description)
     assert out[0]["key_kind"] == "reference"
 
 
-def test_person_row_statement_text_is_tidied_but_otherwise_as_printed():
+def test_a_person_row_name_is_tidied():
     out = preview([txn("  Customer Transfer   to - 254700***000  JOHN DOE ")])
-    assert out[0]["display_name"] == "Customer Transfer to - 254700***000 JOHN DOE"
+    assert out[0]["display_name"] == "JOHN DOE · 254700•••000"
 
 
 @pytest.mark.parametrize("provider,description,direction", PERSON_ROWS)
@@ -540,15 +554,31 @@ def test_business_rows_are_not_person_rows():
     assert [r["display_name"] for r in preview(rows)] == ["PAZA BARBER SPA", "KPLC PREPAID"]
 
 
-def test_labelled_person_row_keeps_the_label_separate_from_the_statement_text():
+def test_labelled_person_row_keeps_the_label_separate_from_the_name():
     rows = [txn("Customer Transfer to - 254700***000 JOHN DOE")]
     keys = extract_keys(rows, provider="M-Pesa", secret=SECRET)
     (k,) = keys.values()
-    rule = stored_rule(GROCERIES, kind="reference", value=k.value, provider="M-Pesa", label="Mechanic")
+    rule = stored_rule(GROCERIES, kind="reference", value=k.value, provider="person", label="Mechanic")
     out = preview(rows, rules=[rule])
     assert out[0]["label"] == "Mechanic"
-    assert out[0]["display_name"] == "Customer Transfer to - 254700***000 JOHN DOE"
+    # ab-341: the person's name and masked number, not the raw text.
+    assert out[0]["display_name"] == "JOHN DOE · 254700•••000"
 
+
+def test_a_person_choice_remembered_before_ab341_still_applies():
+    rows = [txn("Customer Transfer to 254700000001 - JANE DOE")]
+    keys = extract_keys(rows, provider="M-Pesa", secret=SECRET)
+    (k,) = keys.values()
+    rule = stored_rule(GROCERIES, kind="reference", value=k.legacy_value, provider="M-Pesa", label="Mama mboga")
+    out = preview(rows, rules=[rule])
+    assert out[0]["suggestion"]["category_id"] == GROCERIES["id"]
+    assert out[0]["label"] == "Mama mboga"
+
+
+def test_a_person_row_without_a_name_shows_the_statement_text():
+    rows = [txn("TRANSFER TO M-PESA 254700000001")]
+    out = preview(rows, provider="Co-operative Bank", rules=[])
+    assert out[0]["display_name"] == "TRANSFER TO M-PESA 254700000001"
 
 
 # --- ab-298: latest choice wins, the amount rule still splits a merchant ------------

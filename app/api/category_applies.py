@@ -117,6 +117,8 @@ class ApplyGroupRequest(AllocationChoiceRequest):
     # ab-335: edit rows already allocated some other way - their current
     # allocations are replaced (not for rows handled at import).
     replace: bool = False
+    # ab-341: "Who is this?" for a person - blank clears it; needs remember.
+    label: str | None = Field(default=None, max_length=40)
 
 
 def check_choice(group: AllocationChoiceRequest) -> None:

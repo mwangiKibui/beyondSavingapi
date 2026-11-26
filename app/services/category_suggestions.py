@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from app.services.ai_categories import with_ai
-from app.services.merchant_keys import RowKey, extract_key
+from app.services.merchant_keys import RowKey, extract_key, person_display
 
 if TYPE_CHECKING:
     from app.services.ai_categories import AiContext
@@ -265,9 +265,22 @@ def rule_key(key: RowKey, directory: "Directory") -> tuple[str, str, str | None]
     return (key.kind, key.value, key.provider if key.kind == "reference" else None)
 
 
+def rule_keys_for(key: RowKey, directory: "Directory") -> list[tuple[str, str, str | None]]:
+    """Every rule key a row's remembered choices may sit under: its own,
+    and for a person, the key it had before ab-341 (read only - new
+    choices are saved under the row's own key)."""
+    rk = rule_key(key, directory)
+    if not rk:
+        return []
+    keys = [rk]
+    if key.legacy_value and key.legacy_provider:
+        keys.append(("reference", key.legacy_value, key.legacy_provider))
+    return keys
+
+
 def rule_lookup_pairs(keys: Iterable[RowKey], directory: "Directory") -> list[tuple[str, str]]:
     """Distinct (key_kind, key_value) pairs to fetch the user's rules for."""
-    pairs = {(rk[0], rk[1]) for k in keys if (rk := rule_key(k, directory))}
+    pairs = {(rk[0], rk[1]) for k in keys for rk in rule_keys_for(k, directory)}
     return sorted(pairs)
 
 
@@ -534,10 +547,10 @@ def build_preview_rows(
         if listed:
             known_as = listed.display_name
 
-        rk = rule_key(key, directory)
-        if rk:
+        rks = rule_keys_for(key, directory)
+        if rks:
             candidates = [
-                r for r in rules_by_key.get((*rk, direction), [])
+                r for rk in rks for r in rules_by_key.get((*rk, direction), [])
                 if (r["category_id"] in by_id and by_id[r["category_id"]]["type"] == wanted_type)
                 or _reason_fits(reasons_by_id.get(r.get("transfer_reason_id")), direction)
             ]
@@ -653,7 +666,8 @@ def _display_name(key: RowKey, known_as: str | None, description: str | None) ->
     `label`, so the UI can show both."""
     statement_text = " ".join((description or "").split())
     if key.is_person:
-        return statement_text or key.display
+        # ab-341: "JANE DOE · 2547•••001" when the row names the person.
+        return person_display(key.person_name, key.person_number) or statement_text or key.display
     return key.name or known_as or key.display or statement_text
 
 

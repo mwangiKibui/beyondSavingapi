@@ -225,3 +225,37 @@ def test_status_never_reorders_the_list():
     groups = [dict(g, status=s) for g, s in zip(sample_groups(), ["sorted", "decide", "handled"])]
     items, _ = select_groups(groups, sort="amount", order="desc")
     assert [g["group_key"] for g in items] == ["b", "a", "c"]
+
+
+# --- ab-341: people by number ------------------------------------------------------
+
+COOP = "Co-operative Bank"
+
+
+def test_each_number_is_its_own_group():
+    rows = [row("TRANSFER TO M-PESA 254700000001", provider=COOP),
+            row("TRANSFER TO M-PESA 254700000001", provider=COOP),
+            row("TRANSFER TO M-PESA 254700000002", provider=COOP)]
+    groups = groups_for(rows)
+    assert sorted(g["row_count"] for g in groups) == [1, 2]
+    assert all(g["is_person"] for g in groups)
+
+
+def test_a_group_takes_the_persons_name_from_another_row_with_the_same_number():
+    rows = [row("TRANSFER TO M-PESA 254700000001", provider=COOP),
+            row("MPS2ABCD123~0712345~254700000001~VERONICA~2026-01-31", provider=COOP, direction="in")]
+    groups = groups_for(rows)
+    assert {g["direction"]: g["display_name"] for g in groups} == {
+        "out": "VERONICA · 2547•••001", "in": "VERONICA · 2547•••001"}
+
+
+def test_without_a_name_anywhere_the_statement_text_shows():
+    groups = groups_for([row("TRANSFER TO M-PESA 254700000001", provider=COOP)])
+    assert groups[0]["display_name"] == "TRANSFER TO M-PESA 254700000001"
+
+
+def test_mpesa_and_bank_rows_of_one_number_are_one_group():
+    rows = [row("TRANSFER TO M-PESA 254700000001", provider=COOP),
+            row("Customer Transfer to 254700000001 - JANE DOE")]
+    groups = groups_for(rows)
+    assert len(groups) == 1 and groups[0]["display_name"] == "JANE DOE · 2547•••001"
