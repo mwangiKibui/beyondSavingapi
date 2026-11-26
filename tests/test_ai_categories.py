@@ -93,6 +93,24 @@ def test_a_reply_that_isnt_the_json_asked_for_saves_nothing(text):
     assert parse_answers(text, [("X SHOP", "out")]) is None
 
 
+def test_a_loan_paid_in_is_never_a_category():
+    out = parse_answers(json.dumps({"answers": [{"n": 1, "category": "Loan Received", "new": True}]}),
+                        [("BUSINESS LOANS LTD", "in")])
+    assert out[0]["category_name"] is None
+
+
+def test_other_is_no_suggestion():
+    assert _ctx("Other").suggestion(business(), "out", [cat("Other")]) is None
+    other = cat("Other")
+    mapped = _ctx("Mobile money", user_map={("Mobile money", "expense"): other["id"]})
+    assert mapped.suggestion(business(), "out", [other]) is None
+
+
+def test_bus_alone_doesnt_mark_a_business():
+    key = extract_key(provider="Co-operative Bank", description="BUS REFINANCE", direction="in", secret=SECRET)
+    assert ai_name(key) is None
+
+
 def test_a_category_with_digits_counts_as_unknown():
     out = parse_answers(json.dumps({"answers": [{"n": 1, "category": "Till 12345"}]}), [("X SHOP", "out")])
     assert out[0]["category_name"] is None

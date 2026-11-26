@@ -99,6 +99,7 @@ Rules:
 - Only if none fits, propose a short new category name (1-3 words) and set "new": true.
 - If you do not recognise the business or cannot tell what it sells, answer "unknown". Never guess.
 - "Other" only when you know the business but nothing else fits.
+- A loan paid out, disbursed or refinanced to the account holder is not income: answer "unknown".
 
 Payees:
 {payees}
@@ -138,6 +139,9 @@ def parse_answers(text: str, batch: list[tuple[str, str]]) -> list[dict] | None:
             continue
         category = " ".join(str(a.get("category") or "").split())
         if not category or category.lower() == "unknown" or len(category) > 60 or re.search(r"\d", category):
+            category = None
+        # Borrowed money is never income (Loans decision): no money-in loan category.
+        if category and direction == "in" and "loan" in category.lower():
             category = None
         defaults = DEFAULT_EXPENSE if direction == "out" else DEFAULT_INCOME
         is_new = category is not None and _norm(category) not in {_norm(d) for d in defaults}
@@ -250,7 +254,8 @@ class AiContext:
     def suggestion(self, key: RowKey, direction: str, categories: list[dict]) -> dict | None:
         name = ai_name(key)
         answer = self.answers.get((name, direction)) if name else None
-        if not answer or not answer["category_name"]:
+        # "Other" tells the user nothing: no suggestion.
+        if not answer or not answer["category_name"] or _norm(answer["category_name"]) == "other":
             return None
         kind = _TYPE_FOR_DIRECTION[direction]
         own = [c for c in categories if c["type"] == kind]
@@ -262,6 +267,8 @@ class AiContext:
             category = next((c for c in own if c["id"] == category_id), None)
         if category is None:
             return None  # not mapped yet: the lookup job maps it
+        if _norm(category["name"]) == "other":
+            return None  # mapped onto "Other": still tells the user nothing
         return _suggested(category, category["name"])
 
 
