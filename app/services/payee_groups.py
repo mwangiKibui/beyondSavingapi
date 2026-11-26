@@ -190,6 +190,9 @@ def build_groups(
             "sub_ledger_name": _same([r.get("sub_ledger_name") for r in members]),
             "sub_ledger_role": _same([r.get("sub_ledger_role") for r in members]),
             "other_side": _same([other_side(r) for r in members]),
+            # ab-340: the account or name the user gave, so Edit starts on it.
+            "other_account_id": _same([r.get("source_account_id") for r in members]),
+            "someone_else_name": _same([r.get("source_description") for r in members]),
             # ab-285: every row filed as a Funds transfer under one reason.
             "transfer_reason_id": _same([r.get("transfer_reason_id") for r in members]),
             "transfer_reason_name": _same([r.get("transfer_reason_name") for r in members]),
@@ -224,6 +227,8 @@ def build_groups(
                     "sub_ledger_name": r.get("sub_ledger_name"),
                     "sub_ledger_role": r.get("sub_ledger_role"),
                     "other_side": other_side(r),
+                    "other_account_id": r.get("source_account_id"),
+                    "someone_else_name": r.get("source_description"),
                     "note": r.get("note"),
                     "apply_id": r.get("apply_id"),
                     "suggestion": preview.get(r["id"], {}).get("suggestion"),

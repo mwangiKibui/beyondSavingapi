@@ -122,6 +122,8 @@ class AccountSummaryResponse(BaseModel):
 class TransferItem(BaseModel):
     """One funds transfer (ab-291): From -> To by direction."""
     id: UUID
+    # ab-340: the transaction to edit ("Add account" on a "—" side).
+    transaction_id: UUID
     date: date
     from_label: str
     from_account_id: UUID | None

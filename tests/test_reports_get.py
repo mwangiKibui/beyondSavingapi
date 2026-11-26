@@ -230,6 +230,7 @@ def test_get_account_summary_logs_and_returns_generic_500_on_unexpected_error(
 def _transfer_item(**overrides):
     base = {
         "id": str(uuid4()),
+        "transaction_id": str(uuid4()),
         "date": "2026-09-20",
         "from_label": "M-Pesa",
         "from_account_id": str(uuid4()),

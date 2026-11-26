@@ -62,7 +62,7 @@ from app.repositories.payee_groups import (
 from app.repositories.transfer_reasons import BETWEEN_MY_ACCOUNTS
 from app.services.sub_ledger_roles import SAVING_ROLES
 from app.services.allocations import CATEGORY_TYPE_FOR_DIRECTION, AllocationPlan, AllocationRejected
-from app.services.import_handling import pair_hand_filed_transfers, unpair_hand_filed
+from app.services.import_handling import pair_hand_filed_transfers, undo_handling, unpair_hand_filed
 from app.services.description_keywords import load_keyword_context
 from app.services.category_suggestions import (
     Directory,
@@ -729,6 +729,32 @@ async def _waiting_counts(conn, *, user_id: UUID, secret: str, exclude: set[UUID
     rows = [r for r in await get_uncategorised_rows(conn, user_id=user_id) if r["id"] not in exclude]
     keys = extract_row_keys(rows, secret=secret)
     return Counter(payee_group_key(keys[r["id"]], r["direction"], r["id"]) for r in rows)
+
+
+async def edit_allocation(
+    conn: asyncpg.Connection, *, user_id: UUID, transaction_id: UUID, group: ApplyGroup, secret: str
+) -> tuple[ApplyResult, list[UUID]]:
+    """ab-340: re-file one transaction from anywhere (Transactions, the Funds
+    transfers report). Its allocations - several splits included - are
+    replaced by this one choice. A row handled at import loses its handling
+    ("Not a charge..."), and a transfer leg is unpaired first, its other side
+    going back to waiting or the review as with Undo; a Funds transfer to one
+    of the user's accounts then pairs again. Returns the result and the
+    other sides now back in a review."""
+    rows = await lock_rows_for_apply(conn, user_id=user_id, transaction_ids=[transaction_id])
+    if not rows:
+        raise AllocationRejected(404, "Transaction not found")
+    row = rows[0]
+    released: list[UUID] = []
+    if row["handled_as"]:
+        back = await undo_handling(conn, transaction_id=transaction_id, user_id=user_id, secret=secret)
+        released = [t for t in back if t != transaction_id]
+    elif row["is_transfer"]:
+        released = await unpair_hand_filed(conn, user_id=user_id, transaction_ids=[transaction_id], secret=secret)
+    # One line of its payee: remembered as the payee's latest choice, no shared vote.
+    group = replace(group, transaction_ids=[transaction_id], replace=True, per_line=True)
+    result = await apply_groups(conn, user_id=user_id, groups=[group], secret=secret)
+    return result, released
 
 
 async def undo_apply(

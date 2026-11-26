@@ -54,7 +54,7 @@ async def get_categorised_here_rows(pool: asyncpg.Pool | asyncpg.Connection, *, 
                si.created_at AS import_created_at, t.handled_as, t.handled_reason,
                t.sub_ledger_id, sl.name AS sub_ledger_name, sl.role AS sub_ledger_role,
                al.category_id, al.transfer_reason_id, tr.name AS transfer_reason_name,
-               sa.nickname AS source_account_name, al.source_description, al.note,
+               al.source_account_id, sa.nickname AS source_account_name, al.source_description, al.note,
                al.apply_id, ca.created_at AS applied_at
         FROM category_applies ca
         JOIN allocations al ON al.apply_id = ca.id
