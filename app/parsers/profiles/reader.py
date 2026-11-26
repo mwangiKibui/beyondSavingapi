@@ -14,10 +14,11 @@ when the check fails.
 """
 
 import hashlib
+import logging
 import io
 import re
 import threading
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -39,6 +40,8 @@ from app.parsers.profiles.schema import StatementProfile
 from app.parsers.profiles.tabular import cell_text, find_header_row, load_grid
 from app.parsers.profiles.text import normalise
 
+logger = logging.getLogger(__name__)
+
 _PAGE_NUMBER = re.compile(r"^(page\s*)?\d+\s*(of|/)\s*\d+$|^\d{1,3}$", re.IGNORECASE)
 _RULE_MERGE = 2.0
 
@@ -53,6 +56,9 @@ class ReadResult:
     description_gaps: int = 0
     # Pages whose text above the first row went to no row (ab-333).
     orphan_pages: int = 0
+    # Rows ending in the same "<time>: <word>" tail as two others: page text
+    # taken for part of a row (ab-337). Logged; doesn't fail the read.
+    repeated_tails: int = 0
 
 
 # ab-333: the balance check proves the amounts, not the text. A read whose
@@ -393,6 +399,8 @@ class _Collected:
     # first row that no row took (it belonged to that row: wrong grouping).
     pages_with_rows: int = 0
     pages_with_orphans: int = 0
+    # ab-337: page furniture skipped, {key: first line's text}.
+    furniture_skipped: dict[str, str] = field(default_factory=dict)
     page_rows: int = 0
     page_orphans: bool = False
 
@@ -519,6 +527,7 @@ class _Page:
     width: float
     edges: list[dict]
     words: list[tuple[str, float, float, float]]
+    height: float = 0.0
 
 
 _PAGE_CACHE: "OrderedDict[str, list[_Page]]" = OrderedDict()
@@ -543,6 +552,7 @@ def _pdf_pages(content: bytes) -> list[_Page]:
         pages = [
             _Page(
                 width=float(page.width),
+                height=float(page.height),
                 edges=[
                     {k: e[k] for k in ("orientation", "x0", "x1", "top", "bottom")}
                     for e in page.edges
@@ -562,10 +572,130 @@ def _pdf_pages(content: bytes) -> list[_Page]:
     return pages
 
 
+# --- ab-337: page furniture ---------------------------------------------------
+# A footer or page header printed on every page ("Printed On: ... Page 3 of
+# 38") sits under the description column, so without this it joins the last
+# row on each page. A line counts as furniture when, with its digits dropped,
+# the same words appear near the top or bottom of most pages and it has no
+# date of its own (a real row always has one).
+
+_FURNITURE_MARGIN = 0.12
+_LETTERS = re.compile(r"[^\W\d_]+")
+_LEARNED_WORDS = 2
+
+
+def _furniture_key(text: str) -> str:
+    words = _LETTERS.findall(text.lower())
+    return " ".join(words) if any(len(w) >= 3 for w in words) else ""
+
+
+def _in_margin(top: float, height: float) -> bool:
+    return bool(height) and (top < height * _FURNITURE_MARGIN or top > height * (1 - _FURNITURE_MARGIN))
+
+
+def _page_furniture(pages: list[_Page], profile: StatementProfile) -> dict[str, str]:
+    """{key: the first line's text} for lines repeated near the top or
+    bottom of most pages. A one-page file has nothing to compare."""
+    if len(pages) < 2:
+        return {}
+    counts: Counter = Counter()
+    first: dict[str, str] = {}
+    for page in pages:
+        keys = set()
+        for line in lines_from_words(page.words, y_tolerance=profile.table.y_tolerance):
+            key = _in_margin(line.top, page.height) and _furniture_key(line.text)
+            if key:
+                keys.add(key)
+                first.setdefault(key, line.text)
+        counts.update(keys)
+    need = max(2, -(-len(pages) // 2))
+    return {k: first[k] for k, n in counts.items() if n >= need}
+
+
+def page_edge_lines(content: bytes, *, pages: int = 3) -> list[str]:
+    """The text of lines near the top or bottom of the first pages (ab-337:
+    where a footer the AI names must be found)."""
+    out = []
+    for page in _pdf_pages(content)[:pages]:
+        out += [line.text for line in lines_from_words(page.words) if _in_margin(line.top, page.height)]
+    return out
+
+
+def _is_furniture(line: Line, cells: dict[str, str], page: _Page, furniture: dict, profile: StatementProfile) -> bool:
+    # Text outside the description column too: a row's own wrapped text
+    # stays inside it, however often the same words repeat (ab-337).
+    return (
+        bool(furniture)
+        and _in_margin(line.top, page.height)
+        and _furniture_key(line.text) in furniture
+        and _date(cells.get("date", ""), profile) is None
+        and any(v.strip() for k, v in cells.items() if k != "description")
+    )
+
+
+def learned_skip_rows(content: bytes, profile: StatementProfile) -> list[dict]:
+    """skip_rows for the furniture this PDF repeats, which the profile
+    doesn't already skip - saved with a layout so a later ONE-page file of
+    it (nothing to compare) still drops its footer. Only lines that start
+    with words can be named this way; the profile's text rules hold no
+    digits."""
+    if not content.startswith(b"%PDF"):
+        return []
+    try:
+        skipped = _collect_pdf(content, profile).furniture_skipped
+    except Exception:
+        return []
+    out = []
+    for text in skipped.values():
+        if _skipped(text, profile):
+            continue
+        lead = re.match(r"^((?:[^\W\d_]+[:.]?\s+){0,%d}[^\W\d_]+[:.]?)" % (_LEARNED_WORDS - 1), text.strip())
+        if not lead or len(lead.group(1)) < 4:
+            continue
+        rule = {"match": "starts_with", "text": lead.group(1)}
+        if rule not in out:
+            out.append(rule)
+    return out
+
+
+def with_learned_skip_rows(content: bytes, profile: StatementProfile) -> StatementProfile:
+    """The profile plus learned_skip_rows (up to the schema's limit), or the
+    profile unchanged when there is nothing to add or it wouldn't validate."""
+    rules = learned_skip_rows(content, profile)
+    if not rules:
+        return profile
+    raw = profile.model_dump(mode="json")
+    raw["table"]["skip_rows"] = [*raw["table"]["skip_rows"], *rules][:10]
+    try:
+        return StatementProfile.model_validate(raw)
+    except ValueError:
+        logger.warning("Learned skip rows didn't validate; layout saved without them")
+        return profile
+
+
+# A description ending in a time and a word ("... 2026 10:41: Printed") on
+# several rows: page text a read took for part of a row (ab-337).
+_TIMESTAMP_TAIL = re.compile(r"\d{1,2}:\d{2}(?::\d{2})?:?\s+[^\W\d_]+\s*$")
+_TAIL_MIN_ROWS = 3
+
+
+def repeated_tail_rows(transactions: list) -> list[int]:
+    """Indexes of rows whose description ends in the same timestamp-and-word
+    tail as at least two others."""
+    tails: dict[str, list[int]] = {}
+    for i, t in enumerate(transactions):
+        m = _TIMESTAMP_TAIL.search(t.get("description") or "")
+        if m:
+            tails.setdefault(_furniture_key(m.group(0)), []).append(i)
+    return sorted(i for rows in tails.values() if len(rows) >= _TAIL_MIN_ROWS for i in rows)
+
+
 def _collect_pdf(content: bytes, profile: StatementProfile) -> _Collected:
     state = _Collected()
     bounds = None
-    for page_no, page in enumerate(_pdf_pages(content)):
+    pages = _pdf_pages(content)
+    furniture = _page_furniture(pages, profile)
+    for page_no, page in enumerate(pages):
         if state.ended:
             break
         lines = lines_from_words(page.words, y_tolerance=profile.table.y_tolerance)
@@ -593,7 +723,11 @@ def _collect_pdf(content: bytes, profile: StatementProfile) -> _Collected:
         for line in lines[start:]:
             if table_bottom is not None and line.top > table_bottom:
                 break  # below the ruled table: footers, disclaimers
-            _take_line(state, line.text, _cells(line, bounds, profile), profile, line.top)
+            cells = _cells(line, bounds, profile)
+            if _is_furniture(line, cells, page, furniture, profile):
+                state.furniture_skipped.setdefault(_furniture_key(line.text), line.text)
+                continue
+            _take_line(state, line.text, cells, profile, line.top)
             if state.ended:
                 break
         _close_page(state, profile)
@@ -709,6 +843,9 @@ def read_statement(content: bytes, profile: StatementProfile, *, default_currenc
             )
             or check
         )
+    tails = repeated_tail_rows(transactions)
+    if tails:
+        logger.warning("%d rows end in the same timestamp tail: page text may be in their descriptions", len(tails))
     return ReadResult(
         transactions=transactions,
         opening_balance=opening,
@@ -716,6 +853,7 @@ def read_statement(content: bytes, profile: StatementProfile, *, default_currenc
         check=check,
         description_gaps=len(gaps),
         orphan_pages=state.pages_with_orphans,
+        repeated_tails=len(tails),
     )
 
 

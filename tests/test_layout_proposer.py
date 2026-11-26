@@ -248,3 +248,29 @@ async def test_no_second_ai_call_when_the_upload_already_has_a_proposal(ai_on, m
     await propose_layout(object(), record=record(), content=odd_pdf(), file_type="pdf")
     called.assert_not_awaited()
     ai_on.assert_not_awaited()
+
+
+# --- ab-337: footers the model names -------------------------------------------
+
+FOOTED = Layout(headers=ODD, page_footer="Printed On: Thu Page {page} of {pages}", end_marker=None)
+
+
+def test_a_footer_the_model_names_becomes_a_skip_row():
+    pdf = build(ROWS, FOOTED)
+    answer = {**RIGHT, "page_furniture": ["Printed On:"]}
+    result = evaluate(pdf, odd_guess(pdf), json.dumps(answer))
+    assert result.outcome == "passed"
+    assert {"match": "starts_with", "text": "Printed On:"} in result.profile["table"]["skip_rows"]
+
+
+def test_furniture_not_found_at_the_edge_of_a_page_is_dropped():
+    # A made-up line, or one that is a transaction's own text, is never a skip rule.
+    pdf = build(ROWS, FOOTED)
+    answer = {**RIGHT, "page_furniture": ["Paid to", "Nothing Like This", "99 bad digits"]}
+    result = evaluate(pdf, odd_guess(pdf), json.dumps(answer))
+    assert result.outcome == "passed"
+    assert result.profile["table"]["skip_rows"] == []
+
+
+def test_the_answer_without_page_furniture_still_parses():
+    assert parse_answer(json.dumps(RIGHT)).page_furniture == []

@@ -456,3 +456,62 @@ def test_a_two_word_heading_takes_its_own_words_not_another_columns():
     result = read_statement(pdf, profile, default_currency="KES")
     assert len(result.transactions) == 3 and result.check.passed
     assert result.transactions[0]["txn_date"] == date(2026, 10, 1)
+
+
+# --- ab-337: page footers ----------------------------------------------------
+
+FOOTER = "Printed On: Thu,26 November 2026 10:4{page}: Printed By: Teller Desk Page:{page} of {pages}"
+
+
+def test_a_footer_on_every_page_stays_out_of_the_rows():
+    # Its time and page number change per page: only the words are compared.
+    pdf = build(sample_rows(60), Layout(rows_per_page=20, page_footer=FOOTER))
+    result = read_statement(pdf, profile(), default_currency="KES")
+    assert len(result.transactions) == 60
+    assert not any("Printed" in (r["description"] or "") for r in result.transactions)
+    assert result.repeated_tails == 0
+
+
+def test_a_one_page_footer_is_skipped_by_a_learned_skip_row():
+    pdf = build(sample_rows(6), Layout(page_footer=FOOTER, end_marker=None))
+    plain = read_transactions(pdf, profile(), default_currency="KES")
+    assert "Printed" in plain[-1]["description"]  # one page: no repeat to see
+    learned = profile(table={"skip_rows": [{"match": "starts_with", "text": "Printed On"}]})
+    rows = read_transactions(pdf, learned, default_currency="KES")
+    assert not any("Printed" in (r["description"] or "") for r in rows)
+
+
+def test_wrapped_text_that_is_not_on_every_page_is_kept():
+    pdf = build(sample_rows(60), Layout(rows_per_page=20, page_footer=FOOTER), continuation={19: "Printed card order"})
+    rows = read_transactions(pdf, profile(), default_currency="KES")
+    assert rows[19]["description"].endswith("Printed card order")
+
+
+def test_learned_skip_rows_name_the_repeated_footer():
+    from app.parsers.profiles.reader import learned_skip_rows
+
+    pdf = build(sample_rows(60), Layout(rows_per_page=20, page_footer=FOOTER))
+    assert learned_skip_rows(pdf, profile()) == [{"match": "starts_with", "text": "Printed On:"}]
+    # Already known, or a one-page file: nothing new to learn.
+    known = profile(table={"skip_rows": [{"match": "starts_with", "text": "Printed On:"}]})
+    assert learned_skip_rows(pdf, known) == []
+    assert learned_skip_rows(build(sample_rows(6), Layout(page_footer=FOOTER, end_marker=None)), profile()) == []
+
+
+def test_a_repeated_timestamp_tail_is_counted():
+    from app.parsers.profiles.reader import repeated_tail_rows
+
+    rows = [{"description": f"Paid to Store {i} 2026 10:4{i}: Printed"} for i in range(3)]
+    rows += [{"description": "Paid to Store Z"}]
+    assert repeated_tail_rows(rows) == [0, 1, 2]
+    assert repeated_tail_rows(rows[:2] + rows[3:]) == []  # fewer than 3: noise
+
+
+def test_with_learned_skip_rows_adds_them_to_the_profile():
+    from app.parsers.profiles.reader import with_learned_skip_rows
+
+    pdf = build(sample_rows(60), Layout(rows_per_page=20, page_footer=FOOTER))
+    out = with_learned_skip_rows(pdf, profile())
+    assert [r.model_dump() for r in out.table.skip_rows] == [{"match": "starts_with", "text": "Printed On:"}]
+    plain = build(sample_rows(60), Layout(rows_per_page=20))
+    assert with_learned_skip_rows(plain, profile()) == profile()
