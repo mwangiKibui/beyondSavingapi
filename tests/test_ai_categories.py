@@ -245,6 +245,37 @@ async def test_answer_names_asks_in_batches_and_saves(monkeypatch):
     assert save.await_count == 2
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_wait(monkeypatch):
+    monkeypatch.setattr(ai_categories, "RETRY_WAITS_SECONDS", (0, 0))
+
+
+async def test_ab339_a_busy_or_empty_call_is_tried_again(monkeypatch):
+    """The model service answers 529 (overloaded), times out or replies
+    empty now and then: a batch is asked up to three times."""
+    monkeypatch.setattr(ai_categories, "inference_enabled", lambda: True)
+    ok = InferenceReply(content="fine", model="m", prompt_tokens=1, completion_tokens=1)
+    complete = AsyncMock(side_effect=[InferenceError("HTTP 529"), InferenceError("Empty inference reply"), ok])
+    monkeypatch.setattr(ai_categories, "complete", complete)
+    assert await ai_categories._ask("prompt") == "fine"
+    assert complete.await_count == 3
+
+
+async def test_ab339_a_call_that_keeps_failing_gives_up_after_three_tries(monkeypatch):
+    monkeypatch.setattr(ai_categories, "inference_enabled", lambda: True)
+    complete = AsyncMock(side_effect=InferenceError("HTTP 529"))
+    monkeypatch.setattr(ai_categories, "complete", complete)
+    assert await ai_categories._ask("prompt") is None
+    assert complete.await_count == 3
+
+
+async def test_ab339_no_key_is_not_retried(monkeypatch):
+    complete = AsyncMock(side_effect=InferenceError("No inference key configured"))
+    monkeypatch.setattr(ai_categories, "complete", complete)
+    assert await ai_categories._ask("prompt") is None
+    assert complete.await_count == 1
+
+
 async def test_a_failed_call_saves_nothing_and_never_raises(monkeypatch):
     monkeypatch.setattr(ai_categories, "complete", AsyncMock(side_effect=InferenceError("down")))
     save = AsyncMock()

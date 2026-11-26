@@ -17,21 +17,23 @@ logger = logging.getLogger(__name__)
 
 
 async def run_lookup(pool, import_id: UUID) -> None:
-    failed = True
+    outcome = "failed"
     try:
-        failed = await _run(pool, import_id)
+        outcome = await _run(pool, import_id)
     except Exception:
         logger.error("AI category lookup failed for import %s", import_id, exc_info=True)
     finally:
-        await ai_categories._clear_pending(import_id, failed=failed)
+        # ab-339: a lookup that missed some answers may run again soon.
+        await ai_categories._clear_pending(import_id, failed=outcome == "failed", retry_soon=outcome != "done")
 
 
-async def _run(pool, import_id: UUID) -> bool:
-    """True when it asked about names and got no answers at all (ab-338:
-    the Processing step and Allocation say suggestions are unavailable)."""
+async def _run(pool, import_id: UUID) -> str:
+    """"done"; "partial" when some batches got no answer; "failed" when it
+    asked and got no answers at all (ab-338: Processing and Allocation then
+    say suggestions are unavailable)."""
     record = await repo.get_import_for_lookup(pool, import_id=import_id)
     if record is None:
-        return False
+        return "done"
     rows = await get_import_rows(
         pool,
         import_id=import_id,
@@ -47,7 +49,7 @@ async def _run(pool, import_id: UUID) -> bool:
     names = ai_categories.wanted_names(rows, keys)
     texts = ai_categories.wanted_texts(rows, keys)  # ab-339: masked descriptions
     if not names and not texts:
-        return False
+        return "done"
     user_id = record["user_id"]
     known = await repo.get_answers(pool, names=names)
     missing = [n for n in names if n not in known][: ai_categories.MAX_NAMES_PER_JOB]
@@ -73,4 +75,7 @@ async def _run(pool, import_id: UUID) -> bool:
         "%d categories mapped",
         import_id, len(names), len(texts), len(missing) + len(missing_texts), saved + saved_texts, mapped,
     )
-    return bool(missing or missing_texts) and saved + saved_texts == 0
+    asked, answered = len(missing) + len(missing_texts), saved + saved_texts
+    if asked and answered == 0:
+        return "failed"
+    return "partial" if answered < asked else "done"

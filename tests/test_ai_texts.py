@@ -247,4 +247,33 @@ async def test_the_job_asks_this_users_missing_texts_and_saves_them_for_them_onl
     assert kwargs["answers"] == [{"text_key": "TRANSFER TO M-PESA ***", "direction": "out",
                                   "answer_type": "transfer", "name": "Sent to another of my accounts",
                                   "is_new": False}]
-    ai_category_job.ai_categories._clear_pending.assert_awaited_once_with(iid, failed=False)
+    ai_category_job.ai_categories._clear_pending.assert_awaited_once_with(iid, failed=False, retry_soon=False)
+
+
+async def test_a_lookup_that_missed_some_answers_may_run_again_soon(monkeypatch):
+    """Two texts asked, one batch answered: the review can queue the rest
+    in minutes, not hours."""
+    monkeypatch.setattr(ai_category_job, "_run", AsyncMock(return_value="partial"))
+    clear = AsyncMock()
+    monkeypatch.setattr(ai_category_job.ai_categories, "_clear_pending", clear)
+    iid = uuid4()
+    await ai_category_job.run_lookup(object(), iid)
+    clear.assert_awaited_once_with(iid, failed=False, retry_soon=True)
+
+
+async def test_the_done_flag_lasts_minutes_after_a_partial_lookup(monkeypatch):
+    seen = {}
+
+    class R:
+        async def set(self, key, value, ex=None, **kw):
+            seen[key] = ex
+
+        async def delete(self, key):
+            pass
+
+    monkeypatch.setattr("app.core.redis.get_redis", lambda: R())
+    iid = uuid4()
+    await ai_categories._clear_pending(iid, retry_soon=True)
+    assert seen[f"ai_category_done:{iid}"] == ai_categories.AI_RETRY_AFTER_SECONDS
+    await ai_categories._clear_pending(iid)
+    assert seen[f"ai_category_done:{iid}"] == 6 * 3600

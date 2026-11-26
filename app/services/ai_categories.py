@@ -604,29 +604,46 @@ async def running_lookups(import_ids: list[UUID]) -> set[UUID]:
         return set()
 
 
-async def _clear_pending(import_id: UUID, *, failed: bool = False) -> None:
+# ab-339: after a lookup that missed answers (the model busy or slow), the
+# review may queue another this soon instead of hours later.
+AI_RETRY_AFTER_SECONDS = 600
+
+
+async def _clear_pending(import_id: UUID, *, failed: bool = False, retry_soon: bool = False) -> None:
     try:
         from app.core.redis import get_redis
 
         redis = get_redis()
-        await redis.set(AI_DONE_KEY.format(import_id=import_id), "failed" if failed else "1", ex=AI_DONE_TTL_SECONDS)
+        ttl = AI_RETRY_AFTER_SECONDS if retry_soon else AI_DONE_TTL_SECONDS
+        await redis.set(AI_DONE_KEY.format(import_id=import_id), "failed" if failed else "1", ex=ttl)
         await redis.delete(AI_PENDING_KEY.format(import_id=import_id))
     except Exception:
         logger.warning("Clearing the AI lookup flag for import %s failed", import_id)
 
 
+# ab-339: the model service sometimes answers 529 (overloaded), times out
+# or replies empty; a batch is asked again after these pauses.
+RETRY_WAITS_SECONDS = (5, 15)
+
+
 async def _ask(prompt: str) -> str | None:
     settings = get_settings()
-    try:
-        reply = await complete(
-            prompt, max_tokens=MAX_TOKENS, model=settings.do_category_model, timeout=settings.do_category_timeout_seconds
-        )
-    except InferenceError as e:
-        # ab-338: the lookup is then marked failed; say why in the worker log.
-        logger.warning("AI category call failed: %s", e)
-        return None
-    logger.info("AI category call: %s tokens in, %s out", reply.prompt_tokens, reply.completion_tokens)
-    return reply.content
+    for attempt, wait in enumerate((*RETRY_WAITS_SECONDS, None), start=1):
+        try:
+            reply = await complete(
+                prompt, max_tokens=MAX_TOKENS, model=settings.do_category_model,
+                timeout=settings.do_category_timeout_seconds,
+            )
+        except InferenceError as e:
+            # The lookup is then marked failed; say why in the worker log.
+            logger.warning("AI category call failed (try %d): %s", attempt, e)
+            if wait is None or not inference_enabled():
+                return None
+            await asyncio.sleep(wait)
+            continue
+        logger.info("AI category call: %s tokens in, %s out", reply.prompt_tokens, reply.completion_tokens)
+        return reply.content
+    return None
 
 
 async def answer_names(conn, names: list[tuple[str, str]]) -> int:
