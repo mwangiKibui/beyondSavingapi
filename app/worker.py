@@ -25,7 +25,7 @@ from app.repositories.statement_imports import (
 from app.repositories.notifications import notify_statement_ready
 from app.repositories.statement_profiles import get_profile, list_active_profiles, record_check_passed
 from app.repositories.transactions import insert_transactions
-from app.services.ai_categories import queue_lookup
+from app.services.ai_categories import begin_lookup, cancel_lookup, queue_lookup
 from app.services.ai_category_job import run_lookup
 from app.services.import_handling import handle_import_by_id
 from app.services.statement_files import file_type_of
@@ -307,6 +307,10 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
                     "bespoke parser" if parser else "mapping wizard",
                 )
 
+        # ab-338: flagged before the upload can be marked parsed, so the
+        # wizard never sees it parsed without its AI lookup running.
+        lookup_begun = await begin_lookup(parsed_import_id)
+        lookup_queued = False
         try:
             if attempt.transactions is not None:
                 await _write_single_account_import(
@@ -361,7 +365,7 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
                 )
             await _handle_rows(pool, import_id=parsed_import_id)
             # ab-336: AI categories for its business payees, in the background.
-            await queue_lookup(parsed_import_id, fresh=True)
+            lookup_queued = await queue_lookup(parsed_import_id, fresh=True, begun=lookup_begun)
         except (StatementParseError, ImportWriteError) as e:
             # A parser's own validation (ab-42's validate_running_balance,
             # a missing required anchor like Equity Bank/NCBA's opening
@@ -372,6 +376,9 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
                 "Import %s (provider %s) rejected: %s", import_id, record["provider"], e
             )
             await mark_import_failed(pool, import_id=parsed_import_id, error_detail=str(e))
+        finally:
+            if lookup_begun and not lookup_queued:
+                await cancel_lookup(parsed_import_id)
     except Exception:
         logger.error("Unexpected error processing parse job %s", import_id, exc_info=True)
         try:

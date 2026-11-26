@@ -133,7 +133,7 @@ def test_without_saved_progress_the_step_comes_from_the_import(client, fake_user
                     "reviewed_count": 0, "total_count": 0, "updated_at": None, "error_detail": None,
                     "added_count": 3 if parsed else None, "already_count": 0 if parsed else None,
                     "already_recorded_by": None, "account_id": str(imp["account_id"]), "sub_ledger_id": None,
-                    "file_name": "statement.pdf"}
+                    "file_name": "statement.pdf", "ai_lookup": None, "ai_lookup_payees": None}
 
 
 def test_progress_says_which_account_and_sub_ledger_the_upload_is_for(client, fake_user, fake_pool, monkeypatch):
@@ -455,3 +455,31 @@ def test_delete_failure_is_a_generic_500(client, fake_user, fake_pool, monkeypat
     monkeypatch.setattr(f"{API}.soft_delete_import", AsyncMock(side_effect=RuntimeError("db down")))
     response = client.delete(delete_url())
     assert response.status_code == 500 and "db down" not in response.text
+
+# --- ab-338: the AI lookup on the Processing step ------------------------------
+
+
+def test_ab338_progress_says_the_ai_lookup_is_running_and_for_how_many_payees(client, fake_user, fake_pool, monkeypatch):
+    patch_repo(monkeypatch, imp=import_row("parsed"))
+    status = AsyncMock(return_value={"state": "running", "payees": 25})
+    monkeypatch.setattr(f"{API}.lookup_status", status)
+    body = client.get(url()).json()
+    assert (body["step"], body["ai_lookup"], body["ai_lookup_payees"]) == ("allocation", "running", 25)
+    status.assert_awaited_once_with(IMPORT_ID)
+
+
+def test_ab338_progress_says_when_the_ai_lookup_failed(client, fake_user, fake_pool, monkeypatch):
+    patch_repo(monkeypatch, imp=import_row("parsed"), progress={
+        "step": "review", "draft": {}, "reviewed_count": 0, "total_count": 0, "updated_at": UPDATED})
+    monkeypatch.setattr(f"{API}.lookup_status", AsyncMock(return_value={"state": "failed", "payees": None}))
+    body = client.get(url()).json()
+    assert (body["ai_lookup"], body["ai_lookup_payees"]) == ("failed", None)
+
+
+def test_ab338_no_ai_lookup_is_reported_before_the_upload_is_parsed(client, fake_user, fake_pool, monkeypatch):
+    patch_repo(monkeypatch, imp=import_row("pending"))
+    status = AsyncMock(return_value={"state": "running", "payees": None})
+    monkeypatch.setattr(f"{API}.lookup_status", status)
+    body = client.get(url()).json()
+    assert body["ai_lookup"] is None
+    status.assert_not_awaited()

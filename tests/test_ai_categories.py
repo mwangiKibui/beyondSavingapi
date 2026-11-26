@@ -280,11 +280,19 @@ class FakeRedis:
     def __init__(self):
         self.store, self.queue = {}, []
 
-    async def set(self, key, value, nx=False, ex=None):
+    async def set(self, key, value, nx=False, ex=None, xx=False, keepttl=False):
         if nx and key in self.store:
+            return None
+        if xx and key not in self.store:
             return None
         self.store[key] = value
         return True
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def mget(self, keys):
+        return [self.store.get(k) for k in keys]
 
     async def exists(self, key):
         return int(key in self.store)
@@ -317,6 +325,56 @@ async def test_a_lookup_is_queued_once_until_it_finishes(fake_redis):
     assert await ai_categories.queue_lookup(iid, fresh=True) is True
 
 
+async def test_ab338_a_begun_lookup_shows_as_running_before_it_is_queued(fake_redis):
+    iid = uuid4()
+    fake_redis.store[f"ai_category_done:{iid}"] = "1"
+    assert await ai_categories.begin_lookup(iid) is True
+    assert await ai_categories.lookup_status(iid) == {"state": "running", "payees": None}
+    assert fake_redis.queue == []
+    # The worker queues it once the rows are written, without a second flag.
+    assert await ai_categories.queue_lookup(iid, begun=True) is True
+    assert fake_redis.queue == [("ai_category_jobs", str(iid))]
+
+
+async def test_ab338_a_cancelled_lookup_is_not_running(fake_redis):
+    iid = uuid4()
+    await ai_categories.begin_lookup(iid)
+    await ai_categories.cancel_lookup(iid)
+    assert await ai_categories.lookup_status(iid) == {"state": None, "payees": None}
+
+
+async def test_ab338_the_status_carries_the_payee_count_then_the_outcome(fake_redis):
+    iid = uuid4()
+    await ai_categories.begin_lookup(iid)
+    await ai_categories.set_lookup_payees(iid, 25)
+    assert await ai_categories.lookup_status(iid) == {"state": "running", "payees": 25}
+    await ai_categories._clear_pending(iid, failed=True)
+    assert await ai_categories.lookup_status(iid) == {"state": "failed", "payees": None}
+    await ai_categories.begin_lookup(iid)
+    await ai_categories._clear_pending(iid)
+    assert await ai_categories.lookup_status(iid) == {"state": None, "payees": None}
+
+
+async def test_ab338_the_payee_count_never_revives_a_finished_lookup(fake_redis):
+    iid = uuid4()
+    await ai_categories.set_lookup_payees(iid, 3)
+    assert await ai_categories.lookup_status(iid) == {"state": None, "payees": None}
+
+
+async def test_ab338_running_lookups_for_a_page_of_uploads(fake_redis):
+    a, b = uuid4(), uuid4()
+    await ai_categories.begin_lookup(a)
+    assert await ai_categories.running_lookups([a, b]) == {a}
+    assert await ai_categories.running_lookups([]) == set()
+
+
+async def test_ab338_status_is_quiet_without_redis_or_a_key(monkeypatch):
+    monkeypatch.setattr(ai_categories, "inference_enabled", lambda: False)
+    assert await ai_categories.begin_lookup(uuid4()) is False
+    assert await ai_categories.lookup_status(uuid4()) == {"state": None, "payees": None}
+    assert await ai_categories.running_lookups([uuid4()]) == set()
+
+
 async def test_nothing_is_queued_without_a_key(monkeypatch):
     monkeypatch.setattr(ai_categories, "inference_enabled", lambda: False)
     assert await ai_categories.queue_lookup(uuid4()) is False
@@ -342,15 +400,43 @@ async def test_the_job_asks_only_for_names_without_an_answer(monkeypatch, fake_r
     monkeypatch.setattr(ai_category_job, "get_user_categories", AsyncMock(return_value=[]))
     mapped = AsyncMock(return_value=0)
     monkeypatch.setattr(ai_category_job.ai_categories, "map_for_user", mapped)
-    fake_redis.store[f"ai_category_pending:{iid}"] = "1"
+    fake_redis.store[f"ai_category_pending:{iid}"] = ""
+    payees = AsyncMock()
+    monkeypatch.setattr(ai_category_job.ai_categories, "set_lookup_payees", payees)
 
     await ai_category_job.run_lookup(object(), iid)
 
+    payees.assert_awaited_once_with(iid, 1)  # ab-338: the one name it asks about
     assert answer.await_args.args[1] == [("SUNRISE CAR WASH", "out")]
     assert mapped.await_args.kwargs["user_id"] == uid
     assert await ai_categories.lookup_pending(iid) is False
+    assert await ai_categories.lookup_status(iid) == {"state": None, "payees": None}
+
+
+async def test_ab338_a_job_whose_answers_all_fail_is_marked_failed(monkeypatch, fake_redis):
+    iid = uuid4()
+    record = {"id": iid, "account_id": uuid4(), "period_start": None, "period_end": None,
+              "provider": "Co-operative Bank", "user_id": uuid4()}
+    rows = [{"id": uuid4(), "direction": "out", "description": "SUNRISE CAR WASH"}]
+    monkeypatch.setattr(ai_category_job.repo, "get_import_for_lookup", AsyncMock(return_value=record))
+    monkeypatch.setattr(ai_category_job, "get_import_rows", AsyncMock(return_value=rows))
+    monkeypatch.setattr(ai_category_job, "get_directory", AsyncMock())
+    monkeypatch.setattr(ai_category_job, "learned_name_lookups", lambda *a: [])
+    monkeypatch.setattr(ai_category_job, "get_learned_names", AsyncMock(return_value={}))
+    monkeypatch.setattr(ai_category_job, "apply_learned_names", lambda rows, keys, *a: keys)
+    monkeypatch.setattr(ai_category_job.repo, "get_answers", AsyncMock(return_value={}))
+    monkeypatch.setattr(ai_category_job.ai_categories, "answer_names", AsyncMock(return_value=0))
+    monkeypatch.setattr(ai_category_job, "get_user_categories", AsyncMock(return_value=[]))
+    monkeypatch.setattr(ai_category_job.ai_categories, "map_for_user", AsyncMock(return_value=0))
+    await ai_categories.begin_lookup(iid)
+
+    await ai_category_job.run_lookup(object(), iid)
+
+    assert await ai_categories.lookup_status(iid) == {"state": "failed", "payees": None}
 
 
 async def test_the_job_never_raises(monkeypatch, fake_redis):
     monkeypatch.setattr(ai_category_job.repo, "get_import_for_lookup", AsyncMock(side_effect=RuntimeError("db")))
-    await ai_category_job.run_lookup(object(), uuid4())
+    iid = uuid4()
+    await ai_category_job.run_lookup(object(), iid)
+    assert (await ai_categories.lookup_status(iid))["state"] == "failed"
