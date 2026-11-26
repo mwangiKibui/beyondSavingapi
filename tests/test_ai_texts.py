@@ -277,3 +277,17 @@ async def test_the_done_flag_lasts_minutes_after_a_partial_lookup(monkeypatch):
     assert seen[f"ai_category_done:{iid}"] == ai_categories.AI_RETRY_AFTER_SECONDS
     await ai_categories._clear_pending(iid)
     assert seen[f"ai_category_done:{iid}"] == 6 * 3600
+
+
+async def test_descriptions_are_asked_15_at_a_time(monkeypatch):
+    texts = [(f"SHOP {chr(65 + i // 26)}{chr(65 + i % 26)} ***", "out") for i in range(31)]
+    sizes = []
+
+    async def ask(prompt):
+        sizes.append(prompt.count("(money out)"))
+        return None
+
+    monkeypatch.setattr(ai_categories, "_ask", ask)
+    saved = await ai_categories.answer_texts(object(), user_id=uuid4(), texts=texts, categories=CATEGORIES,
+                                             reasons=REASONS)
+    assert saved == 0 and sorted(sizes) == [1, 15, 15]

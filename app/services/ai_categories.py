@@ -51,6 +51,10 @@ logger = logging.getLogger(__name__)
 
 SOURCE = "ai"
 BATCH_SIZE = 25
+# ab-339: descriptions are messier than business names (name-only rows the
+# model mulls over), so fewer per call keeps its thinking - and replies -
+# short and predictable.
+TEXT_BATCH_SIZE = 15
 CONCURRENT_CALLS = 4
 # Names asked about in one job at most; the rest wait for the next upload.
 MAX_NAMES_PER_JOB = 500
@@ -672,9 +676,9 @@ async def answer_texts(
     conn, *, user_id: UUID, texts: list[tuple[str, str]], categories: list[dict], reasons: list[dict]
 ) -> int:
     """ab-339: this user's masked descriptions with no fresh answer, in
-    batches of 25, saved for them only. Returns how many were saved."""
+    batches of 15, saved for them only. Returns how many were saved."""
     model = get_settings().do_category_model
-    batches = [texts[i : i + BATCH_SIZE] for i in range(0, len(texts), BATCH_SIZE)]
+    batches = [texts[i : i + TEXT_BATCH_SIZE] for i in range(0, len(texts), TEXT_BATCH_SIZE)]
     gate = asyncio.Semaphore(CONCURRENT_CALLS)
     saved = 0
 
