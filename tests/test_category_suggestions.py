@@ -514,9 +514,9 @@ PERSON_ROWS = [
 # ab-341: a row that names the person shows "NAME · masked number"; the
 # rest still show the statement text as printed (ab-269).
 PERSON_DISPLAY = [
-    "JOHN DOE · 254700•••000",
-    "JOHN DOE · 254700•••000",
-    "JANE ROE · 254711•••111",
+    "JOHN DOE · 254700***000",
+    "JOHN DOE · 254700***000",
+    "JANE ROE · 254711***111",
     "JANE ROE",
     None,
     None,
@@ -534,7 +534,7 @@ def test_person_rows_show_who_or_the_statement_text_not_transfer(row, expected):
 
 def test_a_person_row_name_is_tidied():
     out = preview([txn("  Customer Transfer   to - 254700***000  JOHN DOE ")])
-    assert out[0]["display_name"] == "JOHN DOE · 254700•••000"
+    assert out[0]["display_name"] == "JOHN DOE · 254700***000"
 
 
 @pytest.mark.parametrize("provider,description,direction", PERSON_ROWS)
@@ -562,7 +562,7 @@ def test_labelled_person_row_keeps_the_label_separate_from_the_name():
     out = preview(rows, rules=[rule])
     assert out[0]["label"] == "Mechanic"
     # ab-341: the person's name and masked number, not the raw text.
-    assert out[0]["display_name"] == "JOHN DOE · 254700•••000"
+    assert out[0]["display_name"] == "JOHN DOE · 254700***000"
 
 
 def test_a_person_choice_remembered_before_ab341_still_applies():

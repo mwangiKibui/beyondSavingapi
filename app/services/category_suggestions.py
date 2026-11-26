@@ -666,7 +666,7 @@ def _display_name(key: RowKey, known_as: str | None, description: str | None) ->
     `label`, so the UI can show both."""
     statement_text = " ".join((description or "").split())
     if key.is_person:
-        # ab-341: "JANE DOE · 2547•••001" when the row names the person.
+        # ab-341: "JANE DOE · 254700000001" when the row names the person.
         return person_display(key.person_name, key.person_number) or statement_text or key.display
     return key.name or known_as or key.display or statement_text
 

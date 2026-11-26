@@ -212,7 +212,7 @@ def test_two_users_never_see_each_others_rows(client, fake_pool, monkeypatch):
     assert all(PERSON not in p["title"] for p in bobs["payees"]["items"])
 
     alices = search_as(alice, "other")
-    assert [p["title"] for p in alices["payees"]["items"]] == ["A N OTHER · 2547•••000"]  # ab-341
+    assert [p["title"] for p in alices["payees"]["items"]] == ["A N OTHER · 0700000000"]  # ab-341
     assert [t["title"] for t in alices["transactions"]["items"]] == ["ACME SUPERMARKET OCT"]
 
 

@@ -246,7 +246,7 @@ def test_a_group_takes_the_persons_name_from_another_row_with_the_same_number():
             row("MPS2ABCD123~0712345~254700000001~VERONICA~2026-01-31", provider=COOP, direction="in")]
     groups = groups_for(rows)
     assert {g["direction"]: g["display_name"] for g in groups} == {
-        "out": "VERONICA · 2547•••001", "in": "VERONICA · 2547•••001"}
+        "out": "VERONICA · 254700000001", "in": "VERONICA · 254700000001"}
 
 
 def test_without_a_name_anywhere_the_statement_text_shows():
@@ -258,4 +258,4 @@ def test_mpesa_and_bank_rows_of_one_number_are_one_group():
     rows = [row("TRANSFER TO M-PESA 254700000001", provider=COOP),
             row("Customer Transfer to 254700000001 - JANE DOE")]
     groups = groups_for(rows)
-    assert len(groups) == 1 and groups[0]["display_name"] == "JANE DOE · 2547•••001"
+    assert len(groups) == 1 and groups[0]["display_name"] == "JANE DOE · 254700000001"

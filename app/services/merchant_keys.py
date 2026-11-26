@@ -101,8 +101,8 @@ class RowKey:
     # ab-281: rows handled at import without asking the user.
     is_charge: bool = False  # a bank/mobile charge or excise duty on one
     is_loan_repayment: bool = False  # repaying a loan (gets the Loan Repayment category)
-    # ab-341: who a person row is, for the uploader only. person_number is
-    # always masked ("2547•••001"); neither is ever stored.
+    # ab-341: who a person row is, for the uploader only: the name, and the
+    # number as the statement prints it (masked or not). Neither is stored.
     person_name: str | None = None
     person_number: str | None = None
     # ab-341: the key this person had before ab-341, so choices remembered
@@ -175,13 +175,12 @@ _PERSON_FILLER = {"TO", "FROM", "BY", "-"}
 
 
 def _find_phone(text: str) -> tuple[str, str] | None:
-    """(identity, masked display) for the first phone number in text."""
+    """(identity, the number as printed) for the first phone number in text."""
     if m := _FULL_PHONE.search(text):
-        number = "254" + m.group(1)
-        return number, f"{number[:4]}•••{number[-3:]}"
+        return "254" + m.group(1), m.group(0).strip()
     if m := _MASKED_PHONE.search(text):
         prefix = "254" + m.group(2)
-        return f"{prefix}*{len(m.group(3))}*{m.group(4)}", f"{prefix}•••{m.group(4)}"
+        return f"{prefix}*{len(m.group(3))}*{m.group(4)}", m.group(0).strip()
     return None
 
 
@@ -235,7 +234,7 @@ def _person(
 
 
 def person_display(name: str | None, number: str | None) -> str | None:
-    """'JANE DOE · 2547•••001' for the uploader, or None when the row has no
+    """'JANE DOE · 254700000001' for the uploader, or None when the row has no
     name (the statement text is shown instead)."""
     if not name:
         return None

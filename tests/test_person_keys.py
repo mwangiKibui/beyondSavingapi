@@ -84,15 +84,15 @@ def test_name_only_when_no_digits_are_shown():
 # --- what the uploader sees ---------------------------------------------------------
 
 
-def test_the_display_is_the_name_and_a_masked_number():
+def test_the_display_is_the_name_and_the_number_as_printed():
     k = key(MPESA, "Customer Transfer to 254700000001 - JANE DOE")
     assert k.person_name == "JANE DOE"
-    assert k.person_number == "2547•••001"
+    assert k.person_number == "254700000001"
 
 
-def test_a_masked_statement_number_stays_masked():
+def test_a_masked_statement_number_shows_as_printed():
     k = key(MPESA, "Customer Transfer to 0712***678 - JANE DOE")
-    assert k.person_number == "254712•••678"
+    assert k.person_number == "0712***678"
 
 
 def test_nothing_raw_is_in_the_key():
