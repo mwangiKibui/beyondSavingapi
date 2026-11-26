@@ -12,6 +12,14 @@ from app.core.config import get_settings
 from app.core.db import get_pool
 from app.core.errors import GENERIC_ERROR_MESSAGE
 from app.core.security import get_current_user_id
+from app.api.accounts import _validate_provider
+from app.api.category_applies import (
+    AllocationChoiceRequest,
+    CreatedAccount,
+    CreatedCategory,
+    alerts_after_apply,
+    check_choice,
+)
 from app.repositories.accounts import get_account, get_accounts_by_ids
 from app.repositories.categories import get_categories_by_ids
 from app.repositories.notifications import generate_budget_alerts
@@ -31,6 +39,7 @@ from app.repositories.transactions import (
 )
 from app.repositories.transfer_reasons import get_transfer_reasons_by_ids
 from app.services.import_handling import HandlingRejected, change_handled_category, undo_handling
+from app.services.category_applies import ApplyGroup, edit_allocation
 from app.services.rule_updates import remember_preferred
 from app.services.allocations import (
     CATEGORY_TYPE_FOR_DIRECTION,
@@ -478,6 +487,68 @@ async def _remember(pool: asyncpg.Pool, *, user_id: UUID, category_by_transactio
         )
     except Exception:
         logger.error("Unexpected error remembering categories for user %s", user_id, exc_info=True)
+
+
+class EditAllocationResponse(TransactionDetailResponse):
+    # The other sides of a transfer this row was paired with, now back in
+    # their statement's review (the UI says so).
+    released: list[UUID] = []
+    created_categories: list[CreatedCategory] = []
+    created_accounts: list[CreatedAccount] = []
+
+
+@router.put("/{transaction_id}/allocation", response_model=EditAllocationResponse)
+async def edit_allocation_endpoint(
+    transaction_id: UUID,
+    body: AllocationChoiceRequest,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """ab-340: edit how a transaction is allocated, from anywhere - the same
+    choice as one review group (type, category or transfer reason, the
+    transfer's other side, note). Replaces every split; a transfer to one
+    of the user's accounts pairs with that account's row. What the bank
+    printed (date, amount, description) never changes."""
+    check_choice(body)
+    if pool is None:
+        logger.error("Database pool unavailable")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE)
+
+    try:
+        if body.new_account is not None:
+            await _validate_provider(pool, body.new_account.account_type, body.new_account.provider)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                result, released = await edit_allocation(
+                    conn,
+                    user_id=user_id,
+                    transaction_id=transaction_id,
+                    group=ApplyGroup(transaction_ids=[transaction_id], **body.model_dump()),
+                    secret=get_settings().suggestion_key_secret,
+                )
+        transaction = await get_transaction(pool, transaction_id=transaction_id, user_id=user_id)
+        allocations = await get_allocations(pool, transaction_id=transaction_id)
+    except AllocationRejected as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error(
+            "Unexpected error editing the allocation of transaction %s, user %s", transaction_id, user_id,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
+        ) from None
+
+    await alerts_after_apply(pool, user_id=user_id, result=result)
+    return {
+        **transaction,
+        "allocations": allocations,
+        "released": released,
+        "created_categories": result.created_categories,
+        "created_accounts": result.created_accounts,
+    }
 
 
 class UpdateAllocationRequest(BaseModel):

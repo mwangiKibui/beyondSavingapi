@@ -46,6 +46,9 @@ class GroupRow(BaseModel):
     sub_ledger_role: str | None = None
     # A transfer's other side (account nickname or the name the user gave).
     other_side: str | None = None
+    # ab-340: what the user picked as the other side, so Edit starts on it.
+    other_account_id: UUID | None = None
+    someone_else_name: str | None = None
     # ab-288: the user's own words for the row ("Other" + a note).
     note: str | None = None
     apply_id: UUID | None = None
@@ -104,6 +107,9 @@ class PayeeGroup(BaseModel):
     sub_ledger_role: str | None = None
     # A transfer's other side (account nickname or the name the user gave).
     other_side: str | None = None
+    # ab-340: what the user picked as the other side, so Edit starts on it.
+    other_account_id: UUID | None = None
+    someone_else_name: str | None = None
     apply_id: UUID | None = None
     # Uncategorised -> "Categorised here" only (ab-284): when it was filed.
     applied_at: datetime | None = None

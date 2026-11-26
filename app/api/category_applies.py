@@ -49,11 +49,10 @@ class NewAccountRequest(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
-class ApplyGroupRequest(BaseModel):
-    # The group's rows, as listed; all must be the same payee and still
-    # uncategorised.
-    transaction_ids: list[UUID] = Field(min_length=1, max_length=5000)
-    # Exactly one of these four (checked in the handler).
+class AllocationChoiceRequest(BaseModel):
+    """What the rows are filed as - shared by a review group and by editing
+    one transaction (ab-340, PUT /transactions/{id}/allocation)."""
+    # Exactly one of these four (checked by check_choice).
     category_id: UUID | None = None
     new_category_name: str | None = None
     use_suggestion: bool = False
@@ -73,16 +72,10 @@ class ApplyGroupRequest(BaseModel):
     # "From now on": the payee's top saved choice, plus a shared vote for
     # business payees. Off learns nothing.
     remember: bool = False
-    # ab-292: one line of a payee filed on its own - remember learns softly
-    # (one more use, never forced to the top) and casts no shared vote.
-    per_line: bool = False
     # ab-288: what the rows were, in the user's words - mainly for "Other".
     # Saved on each allocation (shown on the Transaction statement and
     # Funds transfers reports); private, never learned or shared.
     note: str | None = None
-    # ab-335: edit rows already allocated some other way - their current
-    # allocations are replaced (not for rows handled at import).
-    replace: bool = False
 
     @field_validator("new_category_name", "someone_else_name", "note", mode="before")
     @classmethod
@@ -112,6 +105,47 @@ class ApplyGroupRequest(BaseModel):
         if value is not None and len(value) > NOTE_MAX:
             raise ValueError(f"Note must be {NOTE_MAX} characters or fewer")
         return value
+
+
+class ApplyGroupRequest(AllocationChoiceRequest):
+    # The group's rows, as listed; all must be the same payee and still
+    # uncategorised.
+    transaction_ids: list[UUID] = Field(min_length=1, max_length=5000)
+    # ab-292: one line of a payee filed on its own - remember learns softly
+    # (one more use, never forced to the top) and casts no shared vote.
+    per_line: bool = False
+    # ab-335: edit rows already allocated some other way - their current
+    # allocations are replaced (not for rows handled at import).
+    replace: bool = False
+
+
+def check_choice(group: AllocationChoiceRequest) -> None:
+    """The checks a choice needs before anything is looked up (422s)."""
+    chosen = sum([group.category_id is not None, group.new_category_name is not None, group.use_suggestion,
+                  group.transfer_reason_id is not None])
+    # ab-288: these kinds need no target (or have a default one).
+    targetless = group.kind in ("saving", "borrowed") or (group.kind == "transfer" and chosen == 0)
+    if group.kind == "refund":
+        group.refund = True
+    if chosen != 1 and not targetless:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Each group needs exactly one of category_id, new_category_name, use_suggestion "
+                "or transfer_reason_id"
+            ),
+        )
+    if group.refund and (group.category_id is None and group.new_category_name is None):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A refund needs the expense category it comes off",
+        )
+    if group.refund and group.remember:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Refunds aren't remembered")
+    if group.new_account is not None and group.new_account.account_number:
+        group.new_account.account_number = _validate_account_number(
+            group.new_account.account_type, group.new_account.account_number
+        )
 
 
 class ApplyRequest(BaseModel):
@@ -175,7 +209,7 @@ def _require_pool(pool: asyncpg.Pool | None) -> None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=GENERIC_ERROR_MESSAGE)
 
 
-async def _alerts(pool: asyncpg.Pool, *, user_id: UUID, result: ApplyResult) -> None:
+async def alerts_after_apply(pool: asyncpg.Pool, *, user_id: UUID, result: ApplyResult) -> None:
     """After commit, as confirm and bulk-allocate do: a failure is logged
     and never undoes the saved categories."""
     try:
@@ -205,31 +239,7 @@ async def apply_categories_endpoint(
     pool: asyncpg.Pool | None = Depends(get_pool),
 ) -> dict:
     for group in body.groups:
-        chosen = sum([group.category_id is not None, group.new_category_name is not None, group.use_suggestion,
-                      group.transfer_reason_id is not None])
-        # ab-288: these kinds need no target (or have a default one).
-        targetless = group.kind in ("saving", "borrowed") or (group.kind == "transfer" and chosen == 0)
-        if group.kind == "refund":
-            group.refund = True
-        if chosen != 1 and not targetless:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    "Each group needs exactly one of category_id, new_category_name, use_suggestion "
-                    "or transfer_reason_id"
-                ),
-            )
-        if group.refund and (group.category_id is None and group.new_category_name is None):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="A refund needs the expense category it comes off",
-            )
-        if group.refund and group.remember:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Refunds aren't remembered")
-        if group.new_account is not None and group.new_account.account_number:
-            group.new_account.account_number = _validate_account_number(
-                group.new_account.account_type, group.new_account.account_number
-            )
+        check_choice(group)
     _require_pool(pool)
 
     try:
@@ -265,7 +275,7 @@ async def apply_categories_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
         ) from None
 
-    await _alerts(pool, user_id=user_id, result=result)
+    await alerts_after_apply(pool, user_id=user_id, result=result)
     return _response(result)
 
 
@@ -340,5 +350,5 @@ async def apply_earlier_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
         ) from None
 
-    await _alerts(pool, user_id=user_id, result=result)
+    await alerts_after_apply(pool, user_id=user_id, result=result)
     return _response(result)

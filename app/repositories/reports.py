@@ -523,6 +523,8 @@ def build_funds_transfers(rows: list[dict], *, account_id: UUID | None = None) -
             continue
         out.append({
             "id": r["id"],
+            # ab-340: "Add account" on a "—" side edits this transaction.
+            "transaction_id": r["transaction_id"],
             "date": r["date"],
             "from_label": from_label,
             "from_account_id": from_id,

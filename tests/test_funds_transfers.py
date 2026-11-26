@@ -118,3 +118,10 @@ def test_the_users_note_follows_the_reason():
     r["note"] = "Chama contribution"
     assert build_funds_transfers([r])[0]["reason"] == "Other · Chama contribution"
     assert build_funds_transfers([row(reason="From family")])[0]["reason"] == "From family"
+
+
+def test_each_transfer_names_its_transaction_for_add_account():
+    """ab-340: "Add account" on a "—" side edits that transaction."""
+    r = row()
+    [item] = build_funds_transfers([r])
+    assert item["transaction_id"] == r["transaction_id"] and item["to_label"] == "—"
