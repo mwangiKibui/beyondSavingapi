@@ -14,6 +14,13 @@ What leaves the app: business names (never a person, number, amount, date,
 balance, account or user id) and category names. Nothing here ever blocks
 an import or the review: any failure means no AI suggestion.
 
+ab-339: every other open row is asked about by its description with its
+identifiers masked (mask_description: numbers, references, codes and dates
+become ***; words, names included, are kept - developer decision
+2026-11-26). The model picks one of the user's own categories, one of
+their transfer reasons (a Funds transfer), or unknown. Those answers are
+private to the user (user_ai_text_answers), never shared.
+
 The lookup runs in the worker after an import is read (and once for an
 older import when its review opens); the review reads only the caches.
 """
@@ -36,6 +43,7 @@ from app.core.queues import (
     AI_PENDING_TTL_SECONDS,
 )
 from app.repositories import ai_categories as repo
+from app.repositories.transfer_reasons import get_user_transfer_reasons
 from app.services.inference import InferenceError, complete, inference_enabled
 from app.services.merchant_keys import RowKey
 
@@ -85,6 +93,140 @@ def wanted_names(rows: Iterable[dict], keys: dict[UUID, RowKey]) -> list[tuple[s
         if name:
             out[(name, row["direction"])] = None
     return list(out)
+
+
+# --- ab-339: masked descriptions --------------------------------------------
+
+_MAX_TEXT = 300
+# Separators some banks pack a row's fields with.
+_PACKED_SEPARATORS = re.compile(r"[~|_]+")
+_DATE = re.compile(r"(?<![^\W_])\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}(?![^\W_])")
+# Any run of letters/digits with a digit in it: phone, account and card
+# numbers, references, transaction codes.
+_IDENTIFIER = re.compile(r"[^\W_]*\d[^\W_]*")
+_STARS = re.compile(r"\*+")
+_STAR_RUN = re.compile(r"\*\*\*(?:[\s:.,;/#>-]*\*\*\*)+")
+_WORD = re.compile(r"[^\W\d_]{3,}")
+
+
+def mask_description(description: str | None) -> str | None:
+    """The description with its identifiers masked (***), upper-cased; None
+    when no word of 3+ letters is left to ask about. Names are kept."""
+    text = _PACKED_SEPARATORS.sub(" ", (description or "").upper())
+    text = _DATE.sub("***", text)
+    text = _IDENTIFIER.sub("***", text)
+    text = _STARS.sub("***", text)
+    text = _STAR_RUN.sub("***", text)
+    text = " ".join(text.split())
+    if not _WORD.search(text):
+        return None
+    if len(text) > _MAX_TEXT:
+        text = text[:_MAX_TEXT].rsplit(" ", 1)[0]
+    return text
+
+
+def _askable(key: RowKey) -> bool:
+    """Rows handled at import are never asked about."""
+    return not (key.row_kind or key.is_charge or key.is_loan_repayment)
+
+
+def wanted_texts(rows: Iterable[dict], keys: dict[UUID, RowKey]) -> list[tuple[str, str]]:
+    """(masked text, direction) for every open row that isn't a business
+    name (those are asked about by name) and wasn't handled at import."""
+    out: dict[tuple[str, str], None] = {}
+    for row in rows:
+        key = keys[row["id"]]
+        if row.get("allocated") or row.get("is_transfer") or ai_name(key) or not _askable(key):
+            continue
+        text = mask_description(row.get("description"))
+        if text:
+            out[(text, row["direction"])] = None
+    return list(out)
+
+
+def _reasons_for(reasons: list[dict], direction: str) -> list[dict]:
+    return [r for r in reasons if r.get("direction") in (None, direction)]
+
+
+TEXT_PROMPT = """You help sort rows of a Kenyan bank or M-Pesa statement. Each row is the \
+statement's description with numbers, references and dates replaced by ***.
+
+The account holder's categories:
+Money out: {expense}
+Money in: {income}
+
+Their funds-transfer reasons (money moved between their own accounts, savings or investments, \
+or to and from family, that is not spending or income):
+Money out: {reasons_out}
+Money in: {reasons_in}
+
+For each row answer one of:
+- "category": the category for the money's direction that fits, even if the wording differs. \
+Only if none fits, a short new category name (1-3 words) with "new": true.
+- "transfer": a funds transfer; "name" must be one of the transfer reasons for that direction.
+- "unknown": when you cannot tell what the row is. Never guess; a person's name alone is usually unknown.
+
+Rules:
+- Never answer "Other".
+- A loan paid out, disbursed or refinanced to the account holder is not income: answer unknown.
+- Interest charged is an expense; interest earned is income.
+
+Rows:
+{rows}
+
+Reply with JSON only: {{"answers": [{{"n": 1, "type": "category|transfer|unknown", "name": "<name>", \
+"new": false}}, ...]}} with one answer per row, in order."""
+
+
+def text_prompt(batch: list[tuple[str, str]], categories: list[dict], reasons: list[dict]) -> str:
+    def names(items):
+        return json.dumps([i["name"] for i in items if _norm(i["name"]) != "other"])
+
+    rows = "\n".join(f'{i}. "{text}" (money {direction})' for i, (text, direction) in enumerate(batch, start=1))
+    return TEXT_PROMPT.format(
+        expense=names([c for c in categories if c["type"] == "expense"]),
+        income=names([c for c in categories if c["type"] == "income"]),
+        reasons_out=names(_reasons_for(reasons, "out")),
+        reasons_in=names(_reasons_for(reasons, "in")),
+        rows=rows,
+    )
+
+
+def _text_answer(a: dict, direction: str, categories: list[dict], reasons: list[dict]) -> tuple[str, str | None, bool]:
+    name = " ".join(str(a.get("name") or "").split())
+    if not name or len(name) > 60 or re.search(r"\d", name) or _norm(name) in ("other", "unknown"):
+        return "unknown", None, False
+    if a.get("type") == "transfer":
+        reason = next((r for r in _reasons_for(reasons, direction) if _norm(r["name"]) == _norm(name)), None)
+        return ("transfer", reason["name"], False) if reason else ("unknown", None, False)
+    if a.get("type") != "category":
+        return "unknown", None, False
+    # Borrowed money is never income (Loans decision): no money-in loan category.
+    if direction == "in" and "loan" in name.lower():
+        return "unknown", None, False
+    own = local_match(name, [c for c in categories if c["type"] == _TYPE_FOR_DIRECTION[direction]])
+    if own is not None:
+        return ("unknown", None, False) if _norm(own["name"]) == "other" else ("category", own["name"], False)
+    return "category", name, True
+
+
+def parse_text_answers(
+    text: str, batch: list[tuple[str, str]], categories: list[dict], reasons: list[dict]
+) -> list[dict] | None:
+    """One answer per row of the batch, or None when the reply isn't the
+    JSON asked for. A row the reply skips is asked again next time."""
+    data = _json_object(text)
+    if data is None or not isinstance(data.get("answers"), list):
+        return None
+    by_n = {a.get("n"): a for a in data["answers"] if isinstance(a, dict)}
+    out = []
+    for i, (text_key, direction) in enumerate(batch, start=1):
+        if i not in by_n:
+            continue
+        answer_type, name, is_new = _text_answer(by_n[i], direction, categories, reasons)
+        out.append({"text_key": text_key, "direction": direction, "answer_type": answer_type, "name": name,
+                    "is_new": is_new})
+    return out
 
 
 # --- step 1: one answer per merchant -----------------------------------------
@@ -248,12 +390,20 @@ def parse_map(text: str, items: list[tuple[str, str]], categories: list[dict]) -
 class AiContext:
     answers: dict[tuple[str, str], dict] = field(default_factory=dict)
     user_map: dict[tuple[str, str], UUID | None] = field(default_factory=dict)
-    # Wanted names with no fresh answer yet: a lookup is worth queuing.
+    # Wanted names/texts with no fresh answer yet: a lookup is worth queuing.
     missing: int = 0
+    # ab-339: this user's answers for masked descriptions, and their
+    # transfer reasons (for a Funds transfer answer).
+    text_answers: dict[tuple[str, str], dict] = field(default_factory=dict)
+    reasons: list[dict] = field(default_factory=list)
 
-    def suggestion(self, key: RowKey, direction: str, categories: list[dict]) -> dict | None:
+    def suggestion(
+        self, key: RowKey, direction: str, categories: list[dict], description: str | None = None
+    ) -> dict | None:
         name = ai_name(key)
-        answer = self.answers.get((name, direction)) if name else None
+        if name is None:
+            return self._text_suggestion(key, direction, categories, description)
+        answer = self.answers.get((name, direction))
         # "Other" tells the user nothing: no suggestion.
         if not answer or not answer["category_name"] or _norm(answer["category_name"]) == "other":
             return None
@@ -271,6 +421,27 @@ class AiContext:
             return None  # mapped onto "Other": still tells the user nothing
         return _suggested(category, category["name"])
 
+    def _text_suggestion(
+        self, key: RowKey, direction: str, categories: list[dict], description: str | None
+    ) -> dict | None:
+        if not self.text_answers or not _askable(key):
+            return None
+        text = mask_description(description)
+        answer = self.text_answers.get((text, direction)) if text else None
+        if not answer or not answer["name"] or _norm(answer["name"]) == "other":
+            return None
+        if answer["answer_type"] == "transfer":
+            reason = next((r for r in _reasons_for(self.reasons, direction) if _norm(r["name"]) == _norm(answer["name"])),
+                          None)
+            return {"kind": "transfer", "transfer_reason_id": reason["id"] if reason else None, "category_id": None,
+                    "category_name": reason["name"] if reason else answer["name"], "is_new_category": False,
+                    "source": SOURCE, "merchant_name": None}
+        own = [c for c in categories if c["type"] == _TYPE_FOR_DIRECTION[direction]]
+        category = local_match(answer["name"], own)
+        if category is not None and _norm(category["name"]) == "other":
+            return None
+        return _suggested(category, category["name"] if category else answer["name"])
+
 
 def _suggested(category: dict | None, name: str) -> dict:
     return {
@@ -287,11 +458,19 @@ async def load_ai_context(conn, *, user_id: UUID, rows: list[dict], keys: dict, 
     Never raises: the review opens without AI suggestions instead."""
     try:
         names = wanted_names(rows, keys)
-        if not names:
+        texts = wanted_texts(rows, keys)
+        if not names and not texts:
             return AiContext()
-        answers = await repo.get_answers(conn, names=names)
-        user_map = await repo.get_user_map(conn, user_id=user_id, categories_hash=categories_hash(categories))
-        return AiContext(answers=answers, user_map=user_map, missing=sum(n not in answers for n in names))
+        answers, user_map, text_answers, reasons = {}, {}, {}, []
+        if names:
+            answers = await repo.get_answers(conn, names=names)
+            user_map = await repo.get_user_map(conn, user_id=user_id, categories_hash=categories_hash(categories))
+        if texts:
+            text_answers = await repo.get_text_answers(conn, user_id=user_id, texts=texts)
+            reasons = await get_user_transfer_reasons(conn, user_id=user_id)
+        missing = sum(n not in answers for n in names) + sum(t not in text_answers for t in texts)
+        return AiContext(answers=answers, user_map=user_map, missing=missing, text_answers=text_answers,
+                         reasons=reasons)
     except Exception:
         logger.error("Loading AI category answers failed", exc_info=True)
         return AiContext()
@@ -466,6 +645,29 @@ async def answer_names(conn, names: list[tuple[str, str]]) -> int:
         answers = parse_answers(text, batch) if text else None
         if answers:
             await repo.save_answers(conn, answers=answers, model=model)
+            saved += len(answers)
+
+    await asyncio.gather(*(one(b) for b in batches))
+    return saved
+
+
+async def answer_texts(
+    conn, *, user_id: UUID, texts: list[tuple[str, str]], categories: list[dict], reasons: list[dict]
+) -> int:
+    """ab-339: this user's masked descriptions with no fresh answer, in
+    batches of 25, saved for them only. Returns how many were saved."""
+    model = get_settings().do_category_model
+    batches = [texts[i : i + BATCH_SIZE] for i in range(0, len(texts), BATCH_SIZE)]
+    gate = asyncio.Semaphore(CONCURRENT_CALLS)
+    saved = 0
+
+    async def one(batch: list[tuple[str, str]]) -> None:
+        nonlocal saved
+        async with gate:
+            reply = await _ask(text_prompt(batch, categories, reasons))
+        answers = parse_text_answers(reply, batch, categories, reasons) if reply else None
+        if answers:
+            await repo.save_text_answers(conn, user_id=user_id, answers=answers, model=model)
             saved += len(answers)
 
     await asyncio.gather(*(one(b) for b in batches))

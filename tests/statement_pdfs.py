@@ -41,6 +41,9 @@ class Layout:
     # description column and running across the money columns (like a
     # bank's "Printed On ... Page 1 of 9"). {page} and {pages} are filled in.
     page_footer: str | None = None
+    # ab-339: text under the description column below the end marker (a
+    # bank's closing disclaimer after "End of Report").
+    after_end: str | None = None
 
 
 def build(rows: list[list[str]], layout: Layout | None = None, *, continuation: dict[int, str] | None = None) -> bytes:
@@ -120,6 +123,8 @@ def build(rows: list[list[str]], layout: Layout | None = None, *, continuation: 
             c.drawString(layout.xs[0] + 2, 30, layout.page_footer.format(page=page_no, pages=len(chunks)))
         if page_no == len(chunks) and layout.end_marker:
             c.drawString(40, y - 10, layout.end_marker)
+            if layout.after_end:
+                c.drawString(layout.xs[desc_col] + 2, y - 24, layout.after_end)
         c.showPage()
     c.save()
     return buf.getvalue()

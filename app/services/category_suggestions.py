@@ -589,7 +589,7 @@ def build_preview_rows(
             suggestion = _keyword_suggestion(keyword, keywords, by_id, by_name, wanted_type, reasons_by_name)
 
         if ai is not None:
-            suggestion = with_ai(suggestion, ai.suggestion(key, direction, categories))
+            suggestion = with_ai(suggestion, ai.suggestion(key, direction, categories, row["description"]))
 
         out.append({
             "transaction_id": row["id"],

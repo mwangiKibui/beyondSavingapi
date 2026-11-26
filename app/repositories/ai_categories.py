@@ -100,3 +100,48 @@ async def get_import_for_lookup(conn: asyncpg.Pool | asyncpg.Connection, *, impo
         import_id,
     )
     return dict(row) if row else None
+
+
+# --- ab-339: one user's answers for masked descriptions (migration 44) --------
+
+
+async def get_text_answers(
+    conn: asyncpg.Pool | asyncpg.Connection, *, user_id: UUID, texts: list[tuple[str, str]]
+) -> dict:
+    """{(text_key, direction): answer} for this user's fresh answers among
+    texts (unknown ones from the last 90 days)."""
+    if not texts:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT a.text_key, a.direction, a.answer_type, a.name, a.is_new
+        FROM user_ai_text_answers a
+        JOIN unnest($2::text[], $3::text[]) AS w(text_key, direction)
+          ON w.text_key = a.text_key AND w.direction = a.direction
+        WHERE a.user_id = $1
+          AND (a.answer_type <> 'unknown' OR a.answered_at > now() - make_interval(days => $4))
+        """,
+        user_id,
+        [t for t, _ in texts],
+        [d for _, d in texts],
+        UNKNOWN_RETRY_DAYS,
+    )
+    return {(r["text_key"], r["direction"]): dict(r) for r in rows}
+
+
+async def save_text_answers(
+    conn: asyncpg.Pool | asyncpg.Connection, *, user_id: UUID, answers: list[dict], model: str
+) -> None:
+    """answers: text_key, direction, answer_type, name, is_new."""
+    if not answers:
+        return
+    await conn.executemany(
+        """
+        INSERT INTO user_ai_text_answers (user_id, text_key, direction, answer_type, name, is_new, model)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (user_id, text_key, direction) DO UPDATE
+        SET answer_type = EXCLUDED.answer_type, name = EXCLUDED.name, is_new = EXCLUDED.is_new,
+            model = EXCLUDED.model, answered_at = now()
+        """,
+        [(user_id, a["text_key"], a["direction"], a["answer_type"], a["name"], a["is_new"], model) for a in answers],
+    )

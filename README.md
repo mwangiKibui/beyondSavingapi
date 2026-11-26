@@ -113,11 +113,12 @@ When no stored layout reads an upload and our own guess doesn't pass the balance
 
 Business payees that nothing else recognises get a category from their name, shown in the review as "AI suggested" (`app/services/ai_categories.py`).
 
-- **What's sent:** business names only (`ai_name`: a business key, never a person, reference, bare number or row handled at import) and category names. Never amounts, dates, balances, numbers, people or user ids.
+- **What's sent:** business names (`ai_name`) and category names; and, since ab-339, every other open row's **description with its identifiers masked** (below). Never amounts, balances, numbers or user ids.
 - **Step 1, shared:** names go in batches of 25 with the default category names; the model answers a default, a new name, or "unknown". Answers are cached for everyone in `merchant_ai_answers` ("unknown" is asked again after 90 days).
 - **Step 2, per user:** the answer is mapped onto the user's own categories, first by name and synonyms (`local_match`), else by a small call with only category names, cached in `user_category_ai_map` per category list.
 - **When:** the worker queues a lookup after each import (`ai_category_jobs`), and the review queues one for an older upload with unanswered names. The review only reads the caches and shows `ai_pending` while a lookup runs. Any failure means no AI suggestion; nothing waits on it.
 - **Order:** the last source. For a business payee it also replaces a description keyword's guess it disagrees with, never the user's own choices, other users' picks, the shared list or own-account transfers.
+- **Masked descriptions (ab-339):** rows that aren't a business name and weren't handled at import go as `mask_description(text)`: any word containing a digit (phone, account and card numbers, references, transaction codes) and any date become `***`; words are kept, **names included** (developer decision 2026-11-26). A row with no word of 3+ letters left isn't sent. The model picks one of the user's categories, one of their **transfer reasons** (shown as a Funds transfer suggestion; the user still picks the accounts), a new category name, or unknown. These answers are **private to the user** (`user_ai_text_answers`, migration 44), never shared or suggested to anyone else.
 - **Model:** `DO_CATEGORY_MODEL`, default `glm-5.3-flash` (chosen in the ab-256 spike: `docs/research/do-inference-model-choice.md`). The same `DO_INFERENCE_KEY` must allow it as well as the layout model.
 
 ## Shared payee list cache
