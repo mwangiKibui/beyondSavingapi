@@ -167,7 +167,7 @@ async def get_allocations(pool: asyncpg.Pool, *, transaction_id: UUID) -> list[d
         """
         SELECT al.id, al.category_id, c.name AS category_name,
                -- ab-286: money in under an expense category is a refund.
-               (t.direction = 'in' AND c.type = 'expense') AS is_refund,
+               COALESCE(t.direction = 'in' AND c.type = 'expense', false) AS is_refund,
                al.transfer_reason_id, tr.name AS transfer_reason_name,
                al.source_account_id, sa.nickname AS source_account_name,
                al.source_sub_ledger_id, ssl.name AS source_sub_ledger_name,
