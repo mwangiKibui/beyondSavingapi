@@ -470,3 +470,49 @@ async def list_transactions(
     rows = await pool.fetch(paged_query, *params, page_size, (page - 1) * page_size)
 
     return [dict(row) for row in rows], total
+
+
+async def lock_transaction_for_delete(conn: asyncpg.Connection, *, transaction_id: UUID, user_id: UUID) -> dict | None:
+    """ab-342: the user's live row, locked - with what decides whether it can
+    be deleted (a statement row can't) and whether it's a paired transfer."""
+    row = await conn.fetchrow(
+        """
+        SELECT t.id, t.import_id, t.handled_as, t.transfer_group_id
+        FROM transactions t
+        JOIN accounts a ON a.id = t.account_id
+        WHERE t.id = $1 AND a.user_id = $2
+        FOR UPDATE OF t
+        """,
+        transaction_id,
+        user_id,
+    )
+    return dict(row) if row else None
+
+
+async def soft_delete_transaction(conn: asyncpg.Connection, *, transaction_id: UUID) -> None:
+    """ab-342: `transactions` is a live-row view (beyondSavingdb 000041), so
+    the row - and, through every query's join, its allocations - drop out
+    of lists, reports, balances and search. Nothing is removed."""
+    await conn.execute("UPDATE transactions SET deleted_at = now() WHERE id = $1", transaction_id)
+
+
+async def lock_deleted_manual_transaction(
+    conn: asyncpg.Connection, *, transaction_id: UUID, user_id: UUID
+) -> dict | None:
+    """ab-342 Undo: the user's soft-deleted manual row, locked."""
+    row = await conn.fetchrow(
+        """
+        SELECT t.id
+        FROM transactions_all t
+        JOIN accounts a ON a.id = t.account_id
+        WHERE t.id = $1 AND a.user_id = $2 AND t.import_id IS NULL AND t.deleted_at IS NOT NULL
+        FOR UPDATE OF t
+        """,
+        transaction_id,
+        user_id,
+    )
+    return dict(row) if row else None
+
+
+async def restore_transaction(conn: asyncpg.Connection, *, transaction_id: UUID) -> None:
+    await conn.execute("UPDATE transactions_all SET deleted_at = NULL WHERE id = $1", transaction_id)
