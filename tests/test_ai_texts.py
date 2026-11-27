@@ -227,7 +227,7 @@ async def test_the_job_asks_this_users_missing_texts_and_saves_them_for_them_onl
     monkeypatch.setattr(ai_category_job.repo, "get_text_answers", AsyncMock(return_value={}))
     asked = []
 
-    async def ask(prompt):
+    async def ask(prompt, **kw):
         asked.append(prompt)
         return reply({"type": "transfer", "name": "Sent to another of my accounts"})
 
@@ -283,7 +283,7 @@ async def test_descriptions_are_asked_15_at_a_time(monkeypatch):
     texts = [(f"SHOP {chr(65 + i // 26)}{chr(65 + i % 26)} ***", "out") for i in range(31)]
     sizes = []
 
-    async def ask(prompt):
+    async def ask(prompt, **kw):
         sizes.append(prompt.count("(money out)"))
         return None
 
@@ -291,3 +291,119 @@ async def test_descriptions_are_asked_15_at_a_time(monkeypatch):
     saved = await ai_categories.answer_texts(object(), user_id=uuid4(), texts=texts, categories=CATEGORIES,
                                              reasons=REASONS)
     assert saved == 0 and sorted(sizes) == [1, 15, 15]
+
+
+# --- ab-345: retries that work, and no answers for nameless people ------------
+
+from app.services.inference import EmptyReply, InferenceReply  # noqa: E402
+
+
+def text_reply(n: int, skip: set[int] = frozenset()) -> InferenceReply:
+    answers = [{"n": i, "type": "category", "name": "Groceries"} for i in range(1, n + 1) if i not in skip]
+    return InferenceReply(content=json.dumps({"answers": answers}), model="m", prompt_tokens=1, completion_tokens=1)
+
+
+def asked_count(prompt: str) -> int:
+    return prompt.count("(money out)")
+
+
+@pytest.fixture
+def ai_on(monkeypatch):
+    monkeypatch.setattr(ai_categories, "inference_enabled", lambda: True)
+    monkeypatch.setattr(ai_categories, "RETRY_WAITS_SECONDS", (0, 0))
+
+
+async def test_an_empty_reply_splits_the_batch_until_it_is_answered(monkeypatch, ai_on):
+    texts = [(f"SHOP {chr(65 + i)} ***", "out") for i in range(15)]
+    sizes = []
+
+    async def fake(prompt, **kw):
+        n = asked_count(prompt)
+        sizes.append(n)
+        if n > 4:  # the model chokes on big batches
+            raise EmptyReply("Empty inference reply")
+        return text_reply(n)
+
+    monkeypatch.setattr(ai_categories, "complete", fake)
+    save = AsyncMock()
+    monkeypatch.setattr(ai_categories.repo, "save_text_answers", save)
+    saved = await ai_categories.answer_texts(object(), user_id=uuid4(), texts=texts, categories=CATEGORIES,
+                                             reasons=REASONS)
+    assert saved == 15
+    # Asked once at 15 (no three tries of the same batch), then halves.
+    assert sizes.count(15) == 1
+    assert sum(1 for s in sizes if s <= 4) >= 4
+
+
+async def test_a_single_text_with_an_empty_reply_is_tried_three_times_then_left(monkeypatch, ai_on):
+    complete = AsyncMock(side_effect=EmptyReply("Empty inference reply"))
+    monkeypatch.setattr(ai_categories, "complete", complete)
+    save = AsyncMock()
+    monkeypatch.setattr(ai_categories.repo, "save_text_answers", save)
+    saved = await ai_categories.answer_texts(object(), user_id=uuid4(), texts=[("SHOP ***", "out")],
+                                             categories=CATEGORIES, reasons=REASONS)
+    assert saved == 0 and complete.await_count == 3
+
+
+async def test_rows_a_reply_skipped_are_asked_again(monkeypatch, ai_on):
+    texts = [(f"SHOP {chr(65 + i)} ***", "out") for i in range(4)]
+    sizes = []
+
+    async def fake(prompt, **kw):
+        n = asked_count(prompt)
+        sizes.append(n)
+        return text_reply(n, skip={2} if n == 4 else set())
+
+    monkeypatch.setattr(ai_categories, "complete", fake)
+    monkeypatch.setattr(ai_categories.repo, "save_text_answers", AsyncMock())
+    saved = await ai_categories.answer_texts(object(), user_id=uuid4(), texts=texts, categories=CATEGORIES,
+                                             reasons=REASONS)
+    assert saved == 4 and sizes == [4, 1]
+
+
+async def test_business_names_split_on_an_empty_reply_too(monkeypatch, ai_on):
+    names = [(f"SHOP {chr(65 + i)} STORES", "out") for i in range(6)]
+
+    async def fake(prompt, **kw):
+        n = asked_count(prompt)
+        if n > 3:
+            raise EmptyReply("Empty inference reply")
+        return InferenceReply(content=json.dumps({"answers": [{"n": i, "category": "Groceries"} for i in range(1, n + 1)]}),
+                              model="m", prompt_tokens=1, completion_tokens=1)
+
+    monkeypatch.setattr(ai_categories, "complete", fake)
+    monkeypatch.setattr(ai_categories.repo, "save_answers", AsyncMock())
+    assert await ai_categories.answer_names(object(), names) == 6
+
+
+def person_key(name=None):
+    return RowKey(kind="reference", value="h:p", provider="person", is_person=True, display="Transfer",
+                  person_name=name, person_number="254700000001")
+
+
+def test_a_person_row_with_no_name_is_never_asked():
+    rows = [{"id": uuid4(), "direction": "out", "description": "TRANSFER TO M-PESA 254700000001"},
+            {"id": uuid4(), "direction": "in", "description": "SAO4~254700000001~0119~MPESAC2B~JANE DOE"}]
+    keys = {rows[0]["id"]: person_key(), rows[1]["id"]: person_key("JANE DOE")}
+    assert [t for t, _ in wanted_texts(rows, keys)] == [mask_description(rows[1]["description"])]
+
+
+def test_a_nameless_person_row_ignores_a_cached_answer():
+    ai = ctx("transfer", "Between my accounts")
+    assert ai.suggestion(person_key(), "out", CATEGORIES, "TRANSFER TO M-PESA 254700000001") is None
+    # A business-less, non-person row with the same text still gets it.
+    assert ai.suggestion(other_key(), "out", CATEGORIES, "TRANSFER TO M-PESA 254700000001") is not None
+
+
+def test_unanswered_is_only_for_rows_the_ai_was_meant_to_answer():
+    ai = AiContext(enabled=True, text_answers={("ANSWERED ***", "out"): {"answer_type": "unknown", "name": None}})
+    assert ai.unanswered(other_key(), "out", "SHOP 123") is True
+    assert ai.unanswered(other_key(), "out", "ANSWERED 9") is False  # "unknown" is an answer
+    assert ai.unanswered(other_key(is_charge=True), "out", "SHOP 123") is False  # handled at import
+    assert ai.unanswered(person_key(), "out", "TRANSFER TO M-PESA 254700000001") is False
+    assert ai.unanswered(other_key(), "out", "254700000001") is False  # nothing to ask
+    biz = RowKey(kind="name", value="g", is_business=True, name="GREENLEAF GROCERS")
+    assert ai.unanswered(biz, "out", "GREENLEAF GROCERS") is True
+    assert AiContext(enabled=True, answers={("GREENLEAF GROCERS", "out"): {"category_name": None}}).unanswered(
+        biz, "out", "GREENLEAF GROCERS") is False
+    assert AiContext().unanswered(other_key(), "out", "SHOP 123") is False  # AI off

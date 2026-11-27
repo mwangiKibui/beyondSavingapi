@@ -625,6 +625,10 @@ def build_preview_rows(
             "row_kind": key.row_kind,
             "paid_with_overdraft": key.paid_with_overdraft,
             "suggestion": suggestion,
+            # ab-345: nothing suggested yet and the AI's answer is missing,
+            # so asking it again may help.
+            "ai_missing": bool(suggestion is None and ai is not None
+                               and ai.unanswered(key, direction, row["description"])),
             # Which keyword the description matched, for learning the
             # user's choice when they file the row.
             "keyword_match": (

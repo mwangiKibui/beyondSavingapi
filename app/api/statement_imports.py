@@ -41,6 +41,7 @@ from app.repositories.statement_imports import (
 from app.repositories.notifications import generate_budget_alerts
 from app.repositories.sub_ledgers import list_sub_ledgers
 from app.services.ai_categories import load_ai_context, lookup_status, queue_lookup, running_lookups
+from app.services.inference import inference_enabled
 from app.services.allocations import AllocationRejected, alert_groups
 from app.repositories.transfer_reasons import get_user_transfer_reasons
 from app.services.description_keywords import load_keyword_context
@@ -604,6 +605,8 @@ class ReviewGroupsResponse(BaseModel):
     ai_pending: bool = False
     # ab-338: the last lookup got no answers - suggestions unavailable for now.
     ai_failed: bool = False
+    # ab-345: payees still waiting on an AI answer.
+    ai_missing: int = 0
 
 
 def _ai_flags(lookup: dict) -> dict:
@@ -656,7 +659,43 @@ async def review_groups_endpoint(
         "card_counts": card_counts(all_groups),
         **_ai_flags(await lookup_status(import_id)),
         "suggested": sum(1 for g in all_groups if "suggested" in group_cards(g)),
+        "ai_missing": count_payees([g for g in all_groups if g.get("ai_missing")]),
     }
+
+
+class AiLookupResponse(BaseModel):
+    queued: bool
+    ai_pending: bool
+
+
+AI_UNAVAILABLE = "AI suggestions are unavailable right now"
+
+
+@router.post("/{import_id}/ai-lookup", response_model=AiLookupResponse, status_code=status.HTTP_202_ACCEPTED)
+async def ask_ai_again_endpoint(
+    import_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """ab-345: ask the AI again about this upload's payees it hasn't
+    answered (a failed or partial lookup), now rather than after the
+    retry timer. Only missing answers are asked; a no-op while a lookup
+    runs. The Allocation step polls /groups until ai_pending clears."""
+    _require_pool(pool)
+    try:
+        statement_import = await get_import_for_preview(pool, import_id=import_id, user_id=user_id)
+    except Exception:
+        logger.error("Unexpected error loading import %s for an AI retry, user %s", import_id, user_id,
+                     exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE
+        ) from None
+    if statement_import is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Statement import not found")
+    if not inference_enabled():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=AI_UNAVAILABLE)
+    queued = await queue_lookup(import_id, fresh=True)
+    return {"queued": queued, "ai_pending": (await lookup_status(import_id))["state"] == "running"}
 
 
 class ImportReviewResponse(BaseModel):

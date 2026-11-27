@@ -207,6 +207,8 @@ def build_groups(
             "last_date": latest["txn_date"],
             "statements": list(statements.values()),
             "suggestion": group_suggestion([preview.get(r["id"], {}).get("suggestion") for r in members]),
+            # ab-345: some open row still waits on an AI answer.
+            "ai_missing": any(preview.get(r["id"], {}).get("ai_missing") for r in members),
             "category_id": category_id,
             "category_name": category_names.get(category_id) if category_id else None,
             "is_refund": bool(category_id) and is_refund(latest),

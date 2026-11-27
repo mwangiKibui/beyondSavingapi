@@ -71,3 +71,12 @@ async def test_a_network_failure_is_an_inference_error(key):
 
     with pytest.raises(InferenceError):
         await complete("hello", client=client(handler))
+
+
+async def test_ab345_an_empty_reply_is_its_own_error(key):
+    from app.services.inference import EmptyReply
+
+    key("sk-test")
+    response = httpx.Response(200, json={"choices": [{"message": {"content": "  "}}]})
+    with pytest.raises(EmptyReply):
+        await complete("hello", client=client(lambda r: response))
