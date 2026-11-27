@@ -807,3 +807,22 @@ def test_apply_label_is_at_most_40_characters(client, fake_user, fake_pool, appl
     ]})
     assert response.status_code == 422
     applies["apply_groups"].assert_not_awaited()
+
+
+# --- ab-343: one person, money in and out ------------------------------------------
+
+
+def test_review_groups_return_a_person_once_with_both_sides(client, fake_user, fake_pool, review):
+    review([
+        txn("Customer Transfer to 254700000001 - JANE DOE"),
+        txn("Customer Transfer to 254700000001 - JANE DOE"),
+        txn("Funds received from 254700000001 - JANE DOE", direction="in"),
+        txn(GROCER),
+    ])
+    body = client.get(f"/statement-imports/{IMPORT_ID}/groups?page_size=5").json()
+    assert body["total"] == 2 and body["counts"]["decide"] == 2
+    jane = [g for g in body["items"] if g["is_person"]]
+    assert [(g["direction"], g["row_count"]) for g in jane] == [("out", 2), ("in", 1)]
+    assert jane[0]["person_key"] and jane[0]["person_key"] == jane[1]["person_key"]
+    assert "254700000001" not in jane[0]["person_key"]
+    assert next(g for g in body["items"] if not g["is_person"])["person_key"] is None

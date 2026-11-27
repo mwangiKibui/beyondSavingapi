@@ -8,6 +8,7 @@ import pytest
 from app.services.category_suggestions import _is_open
 from app.services.payee_groups import (
     build_groups,
+    count_payees,
     extract_row_keys,
     group_suggestion,
     payee_group_key,
@@ -259,3 +260,90 @@ def test_mpesa_and_bank_rows_of_one_number_are_one_group():
             row("Customer Transfer to 254700000001 - JANE DOE")]
     groups = groups_for(rows)
     assert len(groups) == 1 and groups[0]["display_name"] == "JANE DOE · 254700000001"
+
+
+# --- ab-343: one person, money in and out --------------------------------------
+
+def test_both_directions_of_one_number_share_a_person_key():
+    rows = [row("TRANSFER TO M-PESA 254700000001", provider=COOP),
+            row("MPS2ABCD123~254700000001~0119283~MPESAC2B~JANE DOE", provider=COOP, direction="in")]
+    groups = groups_for(rows)
+    assert len(groups) == 2  # still allocated per direction
+    keys = {g["person_key"] for g in groups}
+    assert len(keys) == 1 and None not in keys
+    assert "254700000001" not in keys.pop()
+
+
+def test_same_name_different_numbers_are_different_people():
+    rows = [row("MPS2ABCD123~7604987~254700000001~JANE~2026-01-07", provider=COOP, direction="in"),
+            row("MPS2ABCD124~7604987~254700000002~JANE~2026-01-07", provider=COOP, direction="in"),
+            row("TRANSFER TO M-PESA 254700000002", provider=COOP)]
+    by_dir = {}
+    for g in groups_for(rows):
+        by_dir.setdefault(g["person_key"], set()).add(g["direction"])
+    assert sorted(map(sorted, by_dir.values())) == [["in"], ["in", "out"]]
+
+
+def test_businesses_name_only_people_and_handled_rows_have_no_person_key():
+    rows = [row(GROCER),
+            row("MPS 254700000001 UA7JH2ZRWZ JANE DOE 948FMNd", provider="Equity Bank", direction="in"),
+            row("TRANSFER TO M-PESA 254700000003", provider=COOP, handled_as="transfer")]
+    assert [g["person_key"] for g in groups_for(rows)] == [None, None, None]
+
+
+def person_groups():
+    # p1 out 3 rows/300, p1 in 2 rows/50, business 4 rows/100, p2 in 1 row/900
+    return [
+        {"group_key": "p1o", "person_key": "p1", "display_name": "Jane", "direction": "out", "is_person": True,
+         "row_count": 3, "total": 300, "last_date": date(2026, 10, 1)},
+        {"group_key": "biz", "person_key": None, "display_name": "Acme", "direction": "out", "is_person": False,
+         "row_count": 4, "total": 100, "last_date": date(2026, 10, 2)},
+        {"group_key": "p2i", "person_key": "p2", "display_name": "Bob", "direction": "in", "is_person": True,
+         "row_count": 1, "total": 900, "last_date": date(2026, 10, 3)},
+        {"group_key": "p1i", "person_key": "p1", "display_name": "Jane", "direction": "in", "is_person": True,
+         "row_count": 2, "total": 50, "last_date": date(2026, 10, 4)},
+    ]
+
+
+def keys_of(items):
+    return [g["group_key"] for g in items]
+
+
+def test_a_persons_directions_sit_together_out_first_sorted_as_one():
+    items, total = select_groups(person_groups())
+    # Jane's 5 rows beat Acme's 4; out before in.
+    assert keys_of(items) == ["p1o", "p1i", "biz", "p2i"] and total == 3
+
+
+@pytest.mark.parametrize("sort,order,expected", [
+    ("amount", "desc", ["p2i", "p1o", "p1i", "biz"]),   # Jane 350 > Acme 100
+    ("payee", "asc", ["biz", "p2i", "p1o", "p1i"]),
+    ("recent", "desc", ["p1o", "p1i", "p2i", "biz"]),   # Jane's latest row is 4 Oct
+])
+def test_person_bundles_sort_by_their_combined_values(sort, order, expected):
+    assert keys_of(select_groups(person_groups(), sort=sort, order=order)[0]) == expected
+
+
+def test_pages_count_people_and_never_split_one():
+    first, total = select_groups(person_groups(), page=1, page_size=1)
+    assert keys_of(first) == ["p1o", "p1i"] and total == 3
+    assert keys_of(select_groups(person_groups(), page=2, page_size=1)[0]) == ["biz"]
+
+
+def test_a_direction_filter_leaves_one_side():
+    items, total = select_groups(person_groups(), direction="in")
+    assert keys_of(items) == ["p1i", "p2i"] and total == 2
+
+
+def test_the_coop_case_is_one_person_with_both_sides():
+    out = [row("TRANSFER TO M-PESA 254700000001", provider=COOP) for _ in range(31)]
+    inn = [row(f"SAO4ZIPB{i:02d}~254700000001~0119283~MPESAC2B_40 0200~JANE DOE", provider=COOP, direction="in")
+           for i in range(24)]
+    items, total = select_groups(groups_for(out + inn))
+    assert total == 1
+    assert [(g["direction"], g["row_count"]) for g in items] == [("out", 31), ("in", 24)]
+    assert {g["display_name"] for g in items} == {"JANE DOE · 254700000001"}
+
+
+def test_count_payees_counts_a_person_once():
+    assert count_payees(person_groups()) == 3

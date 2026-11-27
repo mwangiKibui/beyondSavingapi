@@ -270,6 +270,8 @@ async def test_ab339_a_call_that_keeps_failing_gives_up_after_three_tries(monkey
 
 
 async def test_ab339_no_key_is_not_retried(monkeypatch):
+    # Pinned: a developer's .env may hold a real key.
+    monkeypatch.setattr(ai_categories, "inference_enabled", lambda: False)
     complete = AsyncMock(side_effect=InferenceError("No inference key configured"))
     monkeypatch.setattr(ai_categories, "complete", complete)
     assert await ai_categories._ask("prompt") is None
