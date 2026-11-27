@@ -3,6 +3,8 @@ from uuid import UUID
 
 import asyncpg
 
+from app.services.statement_files import file_type_of
+
 
 async def list_statement_imports(
     pool: asyncpg.Pool,
@@ -397,6 +399,52 @@ async def get_import_for_layout(pool, *, import_id: UUID, user_id: UUID) -> dict
         user_id,
     )
     return dict(row) if row else None
+
+
+async def get_waiting_import(pool, *, import_id: UUID) -> dict | None:
+    """ab-317: an upload waiting for support, for an admin to map - any
+    user's, but only while it waits, and nothing about who uploaded it."""
+    row = await pool.fetchrow(
+        """
+        SELECT si.id, si.status, si.storage_key, si.file_name, si.fingerprint,
+               a.provider, a.currency, i.id AS institution_id
+        FROM statement_imports si
+        JOIN accounts a ON a.id = si.account_id
+        LEFT JOIN institutions i ON i.name = a.provider AND i.type = a.account_type
+        WHERE si.id = $1 AND si.status = 'awaiting_support'
+        """,
+        import_id,
+    )
+    return dict(row) if row else None
+
+
+async def list_awaiting_support(pool, *, limit: int, offset: int) -> tuple[list[dict], int]:
+    """ab-317: the admin queue, newest first. The file name is used only to
+    tell the file type; it never leaves this function."""
+    rows = await pool.fetch(
+        """
+        SELECT si.id, si.created_at AS uploaded_at, si.file_name, si.fingerprint,
+               a.provider, i.id AS institution_id, i.name AS institution_name,
+               count(*) OVER () AS total
+        FROM statement_imports si
+        JOIN accounts a ON a.id = si.account_id
+        LEFT JOIN institutions i ON i.name = a.provider AND i.type = a.account_type
+        WHERE si.status = 'awaiting_support'
+        ORDER BY si.created_at DESC, si.id
+        LIMIT $1 OFFSET $2
+        """,
+        limit,
+        offset,
+    )
+    total = rows[0]["total"] if rows else await pool.fetchval(
+        "SELECT count(*) FROM statement_imports WHERE status = 'awaiting_support'"
+    )
+    items = []
+    for r in rows:
+        item = {k: r[k] for k in ("id", "uploaded_at", "fingerprint", "provider", "institution_id", "institution_name")}
+        item["file_type"] = file_type_of(r["file_name"] or "") or "pdf"
+        items.append(item)
+    return items, int(total)
 
 
 async def list_waiting_imports(pool, *, institution_id: UUID) -> list[UUID]:

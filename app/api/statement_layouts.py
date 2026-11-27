@@ -158,25 +158,16 @@ def _unexpected(action: str, import_id: UUID, user_id: UUID) -> HTTPException:
     return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=GENERIC_ERROR_MESSAGE)
 
 
-@router.get("/{import_id}/layout", response_model=LayoutStartResponse)
-async def get_layout_endpoint(
-    import_id: UUID,
-    user_id: UUID = Depends(get_current_user_id),
-    pool: asyncpg.Pool | None = Depends(get_pool),
-) -> dict:
+# --- shared with the admin queue (ab-317) ---------------------------------------
+
+
+async def start_layout(pool, statement_import: dict) -> dict:
     """Where the wizard starts: our guess, and page 1 (or the first rows)."""
-    _require_pool(pool)
-    try:
-        statement_import = await _mappable_import(pool, import_id=import_id, user_id=user_id)
-        file_type = _file_type(statement_import)
-        content = await run_in_threadpool(load_content, statement_import["storage_key"])
-        start = await run_in_threadpool(layout_start, content, file_type)
-    except HTTPException:
-        raise
-    except Exception:
-        raise _unexpected("starting the layout", import_id, user_id) from None
+    file_type = _file_type(statement_import)
+    content = await run_in_threadpool(load_content, statement_import["storage_key"])
+    start = await run_in_threadpool(layout_start, content, file_type)
     guess, sources = start.get("guess"), []
-    proposed = await _proposal(pool, import_id, guess)
+    proposed = await _proposal(pool, statement_import["id"], guess)
     if proposed is not None:
         guess, sources = proposed, ["ai"] * len(proposed["table"]["columns"])
     elif guess is not None:
@@ -188,6 +179,63 @@ async def get_layout_endpoint(
         "guess": guess,
         "suggestion_sources": sources,
     }
+
+
+async def check_mapping(statement_import: dict, body: LayoutRequest) -> dict:
+    """Reads the file with this mapping and checks its balances. Saves nothing."""
+    profile = _profile_for(statement_import, body.profile)
+    content = await run_in_threadpool(load_content, statement_import["storage_key"])
+    result = await run_in_threadpool(
+        lambda: check_layout(
+            content,
+            profile,
+            currency=statement_import.get("currency") or "KES",
+            grouping_chosen=body.row_grouping_chosen,
+        )
+    )
+    return {k: v for k, v in result.__dict__.items() if k != "profile"}
+
+
+async def save_mapping(pool, statement_import: dict, body: LayoutRequest, *, actor_id: UUID, source: str):
+    """Saves a mapping that passes as a shared layout and reads the upload
+    with it. Returns (created profile, the validated mapping)."""
+    if statement_import.get("institution_id") is None or not statement_import.get("fingerprint"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Layouts can't be saved for this provider yet",
+        )
+    profile = _profile_for(statement_import, body.profile)
+    content = await run_in_threadpool(load_content, statement_import["storage_key"])
+    result = await run_in_threadpool(
+        lambda: check_layout(
+            content,
+            profile,
+            currency=statement_import.get("currency") or "KES",
+            grouping_chosen=body.row_grouping_chosen,
+        )
+    )
+    if not result.usable:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=result.message or "This mapping doesn't pass the balance check yet",
+        )
+    fingerprint = await run_in_threadpool(fingerprint_file, content, statement_import.get("file_name") or "statement.pdf")
+    # ab-337: plus the footers this file repeats, for later one-page files.
+    to_save = await run_in_threadpool(with_learned_skip_rows, content, result.profile or profile)
+    created = await save_layout(
+        pool,
+        statement_import=statement_import,
+        # ab-333: with the row grouping the check read it with.
+        profile=to_save,
+        user_id=actor_id,
+        fingerprint=fingerprint.to_text() if fingerprint else None,
+        source=source,
+    )
+    logger.info(
+        "Import %s: layout saved as profile %s v%s (%s)",
+        statement_import["id"], created["id"], created.get("version"), source,
+    )
+    return created, profile
 
 
 async def _proposal(pool, import_id: UUID, guess: dict | None) -> dict | None:
@@ -236,6 +284,23 @@ async def _record_choices(pool, body: LayoutRequest, profile, *, user_id: UUID, 
         logger.error("Recording column heading choices failed for user %s", user_id, exc_info=True)
 
 
+@router.get("/{import_id}/layout", response_model=LayoutStartResponse)
+async def get_layout_endpoint(
+    import_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    pool: asyncpg.Pool | None = Depends(get_pool),
+) -> dict:
+    """Where the wizard starts: our guess, and page 1 (or the first rows)."""
+    _require_pool(pool)
+    try:
+        statement_import = await _mappable_import(pool, import_id=import_id, user_id=user_id)
+        return await start_layout(pool, statement_import)
+    except HTTPException:
+        raise
+    except Exception:
+        raise _unexpected("starting the layout", import_id, user_id) from None
+
+
 @router.post("/{import_id}/layout/check", response_model=LayoutCheckResponse)
 async def check_layout_endpoint(
     import_id: UUID,
@@ -247,21 +312,11 @@ async def check_layout_endpoint(
     _require_pool(pool)
     try:
         statement_import = await _mappable_import(pool, import_id=import_id, user_id=user_id)
-        profile = _profile_for(statement_import, body.profile)
-        content = await run_in_threadpool(load_content, statement_import["storage_key"])
-        result = await run_in_threadpool(
-            lambda: check_layout(
-                content,
-                profile,
-                currency=statement_import.get("currency") or "KES",
-                grouping_chosen=body.row_grouping_chosen,
-            )
-        )
+        return await check_mapping(statement_import, body)
     except HTTPException:
         raise
     except Exception:
         raise _unexpected("checking a layout", import_id, user_id) from None
-    return {k: v for k, v in result.__dict__.items() if k != "profile"}
 
 
 @router.put("/{import_id}/layout", response_model=LayoutSavedResponse)
@@ -275,47 +330,12 @@ async def save_layout_endpoint(
     _require_pool(pool)
     try:
         statement_import = await _mappable_import(pool, import_id=import_id, user_id=user_id)
-        if statement_import.get("institution_id") is None or not statement_import.get("fingerprint"):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Layouts can't be saved for this provider yet",
-            )
-        profile = _profile_for(statement_import, body.profile)
-        content = await run_in_threadpool(load_content, statement_import["storage_key"])
-        result = await run_in_threadpool(
-            lambda: check_layout(
-                content,
-                profile,
-                currency=statement_import.get("currency") or "KES",
-                grouping_chosen=body.row_grouping_chosen,
-            )
-        )
-        if not result.usable:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=result.message or "This mapping doesn't pass the balance check yet",
-            )
-        fingerprint = await run_in_threadpool(
-            fingerprint_file, content, statement_import.get("file_name") or "statement.pdf"
-        )
-        # ab-337: plus the footers this file repeats, for later one-page files.
-        to_save = await run_in_threadpool(with_learned_skip_rows, content, result.profile or profile)
-        created = await save_layout(
-            pool,
-            statement_import=statement_import,
-            # ab-333: with the row grouping the check read it with.
-            profile=to_save,
-            user_id=user_id,
-            fingerprint=fingerprint.to_text() if fingerprint else None,
-        )
+        created, profile = await save_mapping(pool, statement_import, body, actor_id=user_id, source="user")
     except HTTPException:
         raise
     except Exception:
         raise _unexpected("saving a layout", import_id, user_id) from None
     await _record_choices(pool, body, profile, user_id=user_id, file_type=_file_type(statement_import))
-    logger.info(
-        "Import %s: layout saved as profile %s v%s", import_id, created["id"], created.get("version")
-    )
     return {"status": "pending", "profile_id": created["id"]}
 
 

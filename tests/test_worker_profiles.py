@@ -81,6 +81,8 @@ def job(monkeypatch):
     monkeypatch.setattr("app.worker.set_import_fingerprint", m.fingerprint)
     m.checked = AsyncMock()
     monkeypatch.setattr("app.worker.record_check_passed", m.checked)
+    m.check_failed = AsyncMock()
+    monkeypatch.setattr("app.worker.record_check_failed", m.check_failed)
     m.handle = AsyncMock()
     monkeypatch.setattr("app.worker._handle_rows", m.handle)
     m.status = AsyncMock()
@@ -131,6 +133,25 @@ async def test_a_failing_check_falls_back_to_the_bespoke_parser(pool, job, caplo
     job.checked.assert_not_called()
     job.fingerprint.assert_awaited_once()
     assert any("falling back" in r.message for r in caplog.records)
+
+
+async def test_a_failing_check_is_recorded_on_the_profile(pool, job):
+    """ab-317: the admin list shows a layout's latest check result."""
+    job.content = BAD
+    c = candidate()
+    job.profiles.return_value = [c]
+    await process_job(pool, str(job.import_id))
+    job.check_failed.assert_awaited_once_with(pool, profile_id=c["id"])
+    job.checked.assert_not_called()
+
+
+async def test_recording_a_failed_check_failing_doesnt_stop_the_import(pool, job, caplog):
+    job.content = BAD
+    job.profiles.return_value = [candidate()]
+    job.check_failed.side_effect = RuntimeError("db hiccup")
+    await process_job(pool, str(job.import_id))
+    job.status.assert_awaited_once_with(pool, import_id=job.import_id, status="needs_mapping")
+    assert "failed check" in caplog.text
 
 
 async def test_a_failing_check_with_no_parser_goes_to_the_mapping_wizard(pool, job):

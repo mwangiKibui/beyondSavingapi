@@ -20,7 +20,7 @@ from app.parsers.profiles.schema import validate_profile
 from app.repositories.statement_profiles import (
     create_profile,
     find_institution_id,
-    list_active_builtin_profiles,
+    list_builtin_profiles,
     retire_profiles,
 )
 
@@ -107,8 +107,8 @@ _BUILTIN_LOCK = 3130001
 async def ensure_builtin_profiles(pool) -> None:
     """ab-313: makes each shipped profile (app/parsers/profiles/builtin)
     the active built-in profile of its institution. Unchanged ones are left
-    alone; a changed one is stored as the next version and the previous
-    built-in retired. Never raises - startup carries on without it."""
+    alone, and so is one an admin retired (ab-317); a changed one is stored
+    as the next version and the previous built-in retired. Never raises - startup carries on without it."""
     for builtin in load_builtin_profiles():
         try:
             clean = validate_profile(builtin.profile).model_dump(mode="json")
@@ -129,9 +129,12 @@ async def ensure_builtin_profiles(pool) -> None:
                         builtin.institution_type,
                     )
                     continue
-                current = await list_active_builtin_profiles(conn, institution_id=institution_id)
-                if any(r["fingerprint"] == builtin.fingerprint and r["profile"] == clean for r in current):
+                stored = await list_builtin_profiles(conn, institution_id=institution_id)
+                # ab-317: already stored - active, or retired by an admin
+                # (which must stay retired until an admin restores it).
+                if any(r["fingerprint"] == builtin.fingerprint and r["profile"] == clean for r in stored):
                     continue
+                current = [r for r in stored if r.get("status", "active") == "active"]
                 created = await create_profile(
                     conn,
                     institution_id=institution_id,
