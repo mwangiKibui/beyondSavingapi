@@ -82,6 +82,10 @@ class PayeeGroup(BaseModel):
     number_kind: str | None = None
     number: str | None = None
     is_person: bool
+    # ab-343: the same for a person's money-in and money-out groups (one
+    # phone number); they come back next to each other, out first, on one
+    # page. None for businesses and people without a number. Opaque.
+    person_key: str | None = None
     is_business: bool
     direction: Literal["in", "out"]
     currency: str

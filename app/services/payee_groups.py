@@ -8,12 +8,14 @@ rows with no readable payee are groups of one. Person rows show the
 statement text, and only ever to the user who imported them (ab-269).
 """
 
+import hashlib
 from collections import Counter
+from datetime import datetime
 from uuid import UUID
 
 from app.services.row_kind import allocation_kind
 from app.services.category_suggestions import _display_name, _is_open, group_key
-from app.services.merchant_keys import RowKey, extract_key, person_display
+from app.services.merchant_keys import PERSON, RowKey, extract_key, person_display
 
 ALLOWED_PAGE_SIZES = (5, 10, 20, 30)
 DEFAULT_PAGE_SIZE = 30
@@ -36,6 +38,16 @@ def extract_row_keys(rows: list[dict], *, secret: str) -> dict[UUID, RowKey]:
 def payee_group_key(key: RowKey, direction: str, transaction_id: UUID) -> str:
     """The row's payee group; a row with no payee is a group of its own."""
     return group_key(key, direction) or f"t:{transaction_id}"
+
+
+def person_group_key(key: RowKey) -> str | None:
+    """ab-343: shared by a person's money-in and money-out groups when the
+    rows carry their phone number, so the list shows them as one person.
+    Never set from a name alone (two Janes with different numbers are two
+    people). Opaque: the number never appears in it."""
+    if not key.is_person or key.provider != PERSON or not key.person_number:
+        return None
+    return "p:" + hashlib.sha256(f"person|{key.value}".encode()).hexdigest()[:16]
 
 
 def review_tab(row: dict) -> str:
@@ -184,6 +196,8 @@ def build_groups(
             "number_kind": key.number_kind,
             "number": key.number,
             "is_person": key.is_person,
+            # ab-343: rows handled at import stay on their own.
+            "person_key": None if _handled_at_import(latest) else person_group_key(key),
             "is_business": key.is_business,
             "direction": latest["direction"],
             "currency": latest["currency"],
@@ -328,16 +342,41 @@ def select_groups(
         and (handled_as is None or g.get("handled_as") == handled_as)
         and (not needle or _matches(g, needle))
     ]
-    if sort == "payee":
-        sort_key = lambda g: (g["display_name"] or "").lower()  # noqa: E731
-    elif sort == "amount":
-        sort_key = lambda g: g["total"]  # noqa: E731
-    elif sort == "recent":
-        # ab-284: newest filed first ("Categorised here"), else latest row.
-        sort_key = lambda g: g.get("applied_at") or g["last_date"]  # noqa: E731
-    else:
-        sort_key = lambda g: (g["row_count"], g["total"])  # noqa: E731
-    out.sort(key=lambda g: g["group_key"])  # stable tie-break
-    out.sort(key=sort_key, reverse=order == "desc")
+    # ab-343: a person's money-in and money-out groups sort, page and count
+    # as one (out first); every other group is a bundle of one.
+    bundles: dict[str, list[dict]] = {}
+    for g in out:
+        bundles.setdefault(_bundle_id(g), []).append(g)
+    ordered = [sorted(b, key=lambda g: (g["direction"] != "out", g["group_key"])) for b in bundles.values()]
+    ordered.sort(key=lambda b: min(g["group_key"] for g in b))  # stable tie-break
+    ordered.sort(key=lambda b: _bundle_sort_key(b, sort), reverse=order == "desc")
     start = (page - 1) * page_size
-    return out[start:start + page_size], len(out)
+    return [g for b in ordered[start:start + page_size] for g in b], len(ordered)
+
+
+def _bundle_id(group: dict) -> str:
+    return group.get("person_key") or f"g:{group['group_key']}"
+
+
+def count_payees(groups: list[dict]) -> int:
+    """ab-343: payees as the list shows them - a person's money in and out
+    count once, like select_groups' total."""
+    return len({_bundle_id(g) for g in groups})
+
+
+def _recent(group: dict):
+    # ab-284: newest filed first ("Categorised here"), else latest row. A
+    # filed time and a row date compare by day first.
+    value = group.get("applied_at") or group["last_date"]
+    day = value.date() if isinstance(value, datetime) else value
+    return day, value.isoformat()
+
+
+def _bundle_sort_key(bundle: list[dict], sort: str):
+    if sort == "payee":
+        return (bundle[0]["display_name"] or "").lower()
+    if sort == "amount":
+        return sum(g["total"] for g in bundle)
+    if sort == "recent":
+        return max(_recent(g) for g in bundle)
+    return sum(g["row_count"] for g in bundle), sum(g["total"] for g in bundle)
