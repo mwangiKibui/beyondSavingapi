@@ -157,7 +157,8 @@ async def requeue_waiting(pool, *, institution_id: UUID) -> int:
 
 
 async def save_layout(
-    pool, *, statement_import: dict, profile: StatementProfile, user_id: UUID, fingerprint: str | None = None
+    pool, *, statement_import: dict, profile: StatementProfile, user_id: UUID, fingerprint: str | None = None,
+    source: str = "user",
 ) -> dict:
     """Stores a usable mapping as an active, shared profile and re-reads the
     upload with it (and any others of its institution waiting for support).
@@ -169,7 +170,7 @@ async def save_layout(
         institution_id=statement_import["institution_id"],
         fingerprint=fingerprint,
         profile=profile.model_dump(mode="json"),
-        source="user",
+        source=source,  # ab-317: "admin" when an admin maps a waiting upload
         status="active",
         created_by=user_id,
     )

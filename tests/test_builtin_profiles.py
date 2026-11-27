@@ -44,7 +44,7 @@ def repo(monkeypatch):
         "retire": AsyncMock(),
     }
     monkeypatch.setattr(f"{S}.find_institution_id", m["institution"])
-    monkeypatch.setattr(f"{S}.list_active_builtin_profiles", m["builtin"])
+    monkeypatch.setattr(f"{S}.list_builtin_profiles", m["builtin"])
     monkeypatch.setattr(f"{S}.create_profile", m["create"])
     monkeypatch.setattr(f"{S}.retire_profiles", m["retire"])
     monkeypatch.setattr(f"{S}.load_builtin_profiles", lambda: [MPESA])
@@ -67,6 +67,24 @@ async def test_an_unchanged_builtin_is_left_alone(repo):
     await svc.ensure_builtin_profiles(Pool())
     repo["create"].assert_not_awaited()
     repo["retire"].assert_not_awaited()
+
+
+async def test_a_builtin_an_admin_retired_stays_retired(repo):
+    """ab-317: the startup sync doesn't bring back what an admin retired."""
+    repo["builtin"].return_value = [
+        {"id": uuid4(), "fingerprint": MPESA.fingerprint, "profile": CLEAN, "status": "retired"}]
+    await svc.ensure_builtin_profiles(Pool())
+    repo["create"].assert_not_awaited()
+    repo["retire"].assert_not_awaited()
+
+
+async def test_a_changed_builtin_retires_only_the_active_old_one(repo):
+    active = {"id": uuid4(), "fingerprint": MPESA.fingerprint, "profile": {**CLEAN, "currency": None}, "status": "active"}
+    retired = {"id": uuid4(), "fingerprint": MPESA.fingerprint, "profile": {**CLEAN, "currency": "USD"}, "status": "retired"}
+    repo["builtin"].return_value = [active, retired]
+    await svc.ensure_builtin_profiles(Pool())
+    repo["create"].assert_awaited_once()
+    assert repo["retire"].await_args.kwargs["profile_ids"] == [active["id"]]
 
 
 async def test_a_changed_builtin_becomes_a_new_version_and_retires_the_old(repo):

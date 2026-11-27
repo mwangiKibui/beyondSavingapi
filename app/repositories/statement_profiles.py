@@ -45,7 +45,7 @@ async def get_profile(pool: asyncpg.Pool, *, profile_id: UUID) -> dict | None:
     row = await pool.fetchrow(
         """
         SELECT id, institution_id, fingerprint, profile, version, source, status,
-               usage_count, last_check_passed_at
+               usage_count, last_check_passed_at, last_check_failed_at, created_at, updated_at
         FROM statement_profiles WHERE id = $1
         """,
         profile_id,
@@ -98,6 +98,62 @@ async def record_check_passed(pool: asyncpg.Pool, *, profile_id: UUID) -> None:
     )
 
 
+async def record_check_failed(pool: asyncpg.Pool, *, profile_id: UUID) -> None:
+    """ab-317: this profile matched a file but its read failed the check."""
+    await pool.execute(
+        "UPDATE statement_profiles SET last_check_failed_at = now(), updated_at = now() WHERE id = $1",
+        profile_id,
+    )
+
+
+# --- ab-317: admin -------------------------------------------------------------
+
+_ADMIN_FIELDS = """id, institution_id, fingerprint, version, source, status, usage_count,
+                   last_check_passed_at, last_check_failed_at, created_at, updated_at"""
+
+
+async def list_institution_profiles(pool: asyncpg.Pool, *, institution_id: UUID) -> list[dict]:
+    """Every profile of one institution, active first, then newest."""
+    rows = await pool.fetch(
+        f"""
+        SELECT {_ADMIN_FIELDS} FROM statement_profiles
+        WHERE institution_id = $1
+        ORDER BY (status = 'active') DESC, fingerprint, version DESC
+        """,
+        institution_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_profile_for_update(conn, *, profile_id: UUID) -> dict | None:
+    row = await conn.fetchrow(
+        f"SELECT {_ADMIN_FIELDS}, profile FROM statement_profiles WHERE id = $1 FOR UPDATE", profile_id
+    )
+    return _row(row) if row else None
+
+
+async def set_profile_status(conn, *, profile_id: UUID, status: str) -> None:
+    await conn.execute(
+        "UPDATE statement_profiles SET status = $2, updated_at = now() WHERE id = $1", profile_id, status
+    )
+
+
+async def retire_other_active(conn, *, institution_id: UUID, fingerprint: str, keep_id: UUID) -> list[UUID]:
+    """The other active versions of this layout, retired so keep_id is the
+    one used (matching prefers a checked profile over a new one)."""
+    rows = await conn.fetch(
+        """
+        UPDATE statement_profiles SET status = 'retired', updated_at = now()
+        WHERE institution_id = $1 AND fingerprint = $2 AND id <> $3 AND status = 'active'
+        RETURNING id
+        """,
+        institution_id,
+        fingerprint,
+        keep_id,
+    )
+    return [r["id"] for r in rows]
+
+
 # --- ab-313: built-in profiles -------------------------------------------------
 
 
@@ -107,11 +163,13 @@ async def find_institution_id(conn, *, name: str, type: str) -> UUID | None:
     )
 
 
-async def list_active_builtin_profiles(conn, *, institution_id: UUID) -> list[dict]:
+async def list_builtin_profiles(conn, *, institution_id: UUID) -> list[dict]:
+    """Every built-in profile of the institution, retired ones too (ab-317:
+    one an admin retired must stay retired)."""
     rows = await conn.fetch(
         """
-        SELECT id, fingerprint, profile FROM statement_profiles
-        WHERE institution_id = $1 AND source = 'builtin' AND status = 'active'
+        SELECT id, fingerprint, profile, status FROM statement_profiles
+        WHERE institution_id = $1 AND source = 'builtin'
         """,
         institution_id,
     )

@@ -23,7 +23,12 @@ from app.repositories.statement_imports import (
     set_sub_ledger_opening_balances,
 )
 from app.repositories.notifications import notify_statement_ready
-from app.repositories.statement_profiles import get_profile, list_active_profiles, record_check_passed
+from app.repositories.statement_profiles import (
+    get_profile,
+    list_active_profiles,
+    record_check_failed,
+    record_check_passed,
+)
 from app.repositories.transactions import insert_transactions
 from app.services.ai_categories import begin_lookup, cancel_lookup, queue_lookup
 from app.services.ai_category_job import run_lookup
@@ -299,6 +304,12 @@ async def process_job(pool: asyncpg.Pool, import_id: str) -> None:
                     attempt.wrong_institution,
                 )
             if attempt.transactions is None and attempt.matched_profile_id is not None:
+                # ab-317: the admin layouts list shows the latest check result.
+                try:
+                    await record_check_failed(pool, profile_id=attempt.matched_profile_id)
+                except Exception:
+                    logger.error("Recording a failed check for profile %s failed",
+                                 attempt.matched_profile_id, exc_info=True)
                 logger.warning(
                     "Import %s: profile %s didn't read it (%s) - falling back to the %s",
                     import_id,
