@@ -90,7 +90,7 @@ def test_payee_person_row_shows_statement_text_and_links_by_query():
 
     assert total == 1
     assert items[0]["is_person"] is True
-    assert items[0]["title"] == PERSON
+    assert items[0]["title"] == "A N OTHER · 0700000000"  # ab-341
     assert items[0]["subtitle"] == "1 transaction · last 1 Oct 2026"
     # A person's name never becomes a reusable key; the user's own words do.
     assert items[0]["link"]["search"] == "other"

@@ -27,6 +27,7 @@ from app.repositories.category_suggestions import (
     get_user_categories,
     get_user_rules,
     learn_rules,
+    set_person_label,
     set_preferred_rules,
     upsert_merchant_votes,
     upsert_number_votes,
@@ -122,6 +123,9 @@ class ApplyGroup:
     # ab-335: the rows were already allocated some other way (an earlier
     # statement, the Transactions page): their allocations are replaced.
     replace: bool = False
+    # ab-341: "Who is this?" for a person payee - None leaves it as is,
+    # blank clears it. Saved on the remembered choice, so it needs remember.
+    label: str | None = None
     # Internal: the suggestion use_suggestion resolved to for these rows.
     suggestion: dict | None = None
 
@@ -328,6 +332,13 @@ async def apply_groups(
         if len(found) != 1:
             raise AllocationRejected(422, "Each group must be rows of one payee")
         group_keys.append(found.pop())
+        if g.label is not None:
+            if not all(raw_keys[t].is_person for t in g.transaction_ids):
+                raise AllocationRejected(422, "Only a person can be given a name")
+            if not g.remember:
+                raise AllocationRejected(422, "A name is saved with a remembered choice - turn remember on")
+            if len(g.label.strip()) > 40:
+                raise AllocationRejected(422, "Keep the name to 40 characters")
 
     keys, preview, categories, directory = await load_suggestions(conn, user_id=user_id, rows=rows, keys=raw_keys)
     groups = [_normalise(g, by_id[g.transaction_ids[0]]) for g in groups]
@@ -466,6 +477,9 @@ async def apply_groups(
                                 category=category, per_line=g.per_line, preview=preview,
                                 learn_softly=g.learn_softly)
             remembered.append(len(results))
+            if g.label is not None:
+                await _save_person_label(conn, user_id=user_id, rows=allocatable, keys=keys, directory=directory,
+                                         label=g.label)
         results.append({
             "apply_id": apply_id,
             "group_key": gk,
@@ -687,6 +701,14 @@ async def _remember(conn, *, user_id: UUID, rows: list[dict], keys: dict, direct
     )
     await upsert_merchant_votes(conn, user_id=user_id, votes=learning.merchant_votes)
     await upsert_number_votes(conn, user_id=user_id, votes=learning.number_votes)
+
+
+async def _save_person_label(conn, *, user_id: UUID, rows: list[dict], keys: dict, directory: Directory,
+                             label: str) -> None:
+    text = label.strip() or None
+    for kind, value, provider in {rk for r in rows if (rk := rule_key(keys[r["id"]], directory))}:
+        await set_person_label(conn, user_id=user_id, key_kind=kind, key_value=value, provider=provider,
+                               label=text)
 
 
 async def _remember_transfer(conn, *, user_id: UUID, rows: list[dict], keys: dict, directory: Directory,

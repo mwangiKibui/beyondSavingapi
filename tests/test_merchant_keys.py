@@ -127,7 +127,7 @@ def test_mpesa_charge_rows_are_name_keys():
 def test_mpesa_person_transfer_is_a_private_hashed_reference():
     k = key("M-Pesa", "Customer Transfer Fuliza MPesa to 254700000000 - JOHN KAMAU")
     assert k.kind == "reference"
-    assert k.provider == "M-Pesa"
+    assert k.provider == "person"  # ab-341: one namespace for people
     assert "JOHN" not in k.value and "254700000000" not in k.value
     assert not k.is_business
 
@@ -288,14 +288,16 @@ def test_equity_business_and_charge_rows_keep_name_keys(description, expected):
 
 def test_a_packed_row_keeps_its_words_and_stays_private():
     """ab-333: details joined by ~ (a bank's M-Pesa deposit) - the codes,
-    numbers and date go, the name is kept as a private key."""
+    numbers and date go; since ab-341 the phone number keys the person
+    privately and the name is kept for the uploader's display."""
     key = extract_key(
         provider="Sample Bank",
         description="MPS2ABCDEF~0712345~254700000000~ALEXSA~2026-01-31",
         direction="in",
         secret="s",
     )
-    assert (key.kind, key.value, key.is_business) == ("name", "ALEXSA", False)
+    assert (key.kind, key.provider, key.is_person, key.is_business) == ("reference", "person", True, False)
+    assert key.person_name == "ALEXSA" and "ALEXSA" not in key.value
 
 
 def test_pipes_split_too():

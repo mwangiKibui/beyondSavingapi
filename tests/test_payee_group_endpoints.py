@@ -787,3 +787,23 @@ def test_ab336_an_upload_missing_answers_queues_one_lookup(client, fake_user, fa
     queue.assert_awaited_once_with(IMPORT_ID)
     # ab-338: Allocation says suggestions are unavailable after a failed lookup.
     assert body["ai_pending"] is False and body["ai_failed"] is True
+
+
+# --- ab-341: "Who is this?" ------------------------------------------------------
+
+
+def test_apply_passes_a_person_label_through(client, fake_user, fake_pool, applies):
+    response = client.post("/category-applies", json={"groups": [
+        {"transaction_ids": [str(uuid4())], "category_id": str(uuid4()), "remember": True, "label": "Mama mboga"},
+    ]})
+    assert response.status_code == 201
+    (group,) = applies["apply_groups"].await_args.kwargs["groups"]
+    assert group.label == "Mama mboga"
+
+
+def test_apply_label_is_at_most_40_characters(client, fake_user, fake_pool, applies):
+    response = client.post("/category-applies", json={"groups": [
+        {"transaction_ids": [str(uuid4())], "category_id": str(uuid4()), "remember": True, "label": "x" * 41},
+    ]})
+    assert response.status_code == 422
+    applies["apply_groups"].assert_not_awaited()

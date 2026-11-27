@@ -296,6 +296,22 @@ async def set_rule_labels(conn: asyncpg.Connection, *, user_id: UUID, labels: li
     )
 
 
+async def set_person_label(
+    conn: asyncpg.Connection, *, user_id: UUID, key_kind: str, key_value: str, provider: str | None,
+    label: str | None,
+) -> None:
+    """ab-341: "Who is this?" - the user's private label for a person, on
+    every remembered choice for them (both directions). None clears it."""
+    await conn.execute(
+        """
+        UPDATE user_category_rules
+        SET label = $5, updated_at = now()
+        WHERE user_id = $1 AND key_kind = $2 AND key_value = $3 AND provider IS NOT DISTINCT FROM $4
+        """,
+        user_id, key_kind, key_value, provider, label,
+    )
+
+
 async def upsert_merchant_votes(conn: asyncpg.Connection, *, user_id: UUID, votes: list[dict]) -> None:
     """One vote per user per business name and direction; a later confirm
     replaces it. Read back by get_shared_votes - no admin step."""
