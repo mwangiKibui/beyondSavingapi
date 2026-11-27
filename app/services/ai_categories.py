@@ -44,7 +44,7 @@ from app.core.queues import (
 )
 from app.repositories import ai_categories as repo
 from app.repositories.transfer_reasons import get_user_transfer_reasons
-from app.services.inference import InferenceError, complete, inference_enabled
+from app.services.inference import EmptyReply, InferenceError, complete, inference_enabled
 from app.services.merchant_keys import RowKey
 
 logger = logging.getLogger(__name__)
@@ -130,7 +130,12 @@ def mask_description(description: str | None) -> str | None:
 
 
 def _askable(key: RowKey) -> bool:
-    """Rows handled at import are never asked about."""
+    """Rows handled at import are never asked about. ab-345: nor is a
+    person whose row shows their number but no name (Co-op "TRANSFER TO
+    M-PESA 2547…"): masked, every such row reads the same, so one answer
+    would land on everyone. Those learn from the user's own choices."""
+    if key.is_person and key.person_number and not key.person_name:
+        return False
     return not (key.row_kind or key.is_charge or key.is_loan_repayment)
 
 
@@ -396,6 +401,8 @@ class AiContext:
     user_map: dict[tuple[str, str], UUID | None] = field(default_factory=dict)
     # Wanted names/texts with no fresh answer yet: a lookup is worth queuing.
     missing: int = 0
+    # ab-345: AI is configured, so a missing answer is worth asking again.
+    enabled: bool = False
     # ab-339: this user's answers for masked descriptions, and their
     # transfer reasons (for a Funds transfer answer).
     text_answers: dict[tuple[str, str], dict] = field(default_factory=dict)
@@ -424,6 +431,19 @@ class AiContext:
         if _norm(category["name"]) == "other":
             return None  # mapped onto "Other": still tells the user nothing
         return _suggested(category, category["name"])
+
+    def unanswered(self, key: RowKey, direction: str, description: str | None) -> bool:
+        """ab-345: the AI was meant to answer this row and hasn't yet (its
+        call failed or is still to come). "unknown" counts as an answer."""
+        if not self.enabled:
+            return False
+        name = ai_name(key)
+        if name is not None:
+            return (name, direction) not in self.answers
+        if not _askable(key):
+            return False
+        text = mask_description(description)
+        return bool(text) and (text, direction) not in self.text_answers
 
     def _text_suggestion(
         self, key: RowKey, direction: str, categories: list[dict], description: str | None
@@ -474,7 +494,7 @@ async def load_ai_context(conn, *, user_id: UUID, rows: list[dict], keys: dict, 
             reasons = await get_user_transfer_reasons(conn, user_id=user_id)
         missing = sum(n not in answers for n in names) + sum(t not in text_answers for t in texts)
         return AiContext(answers=answers, user_map=user_map, missing=missing, text_answers=text_answers,
-                         reasons=reasons)
+                         reasons=reasons, enabled=inference_enabled())
     except Exception:
         logger.error("Loading AI category answers failed", exc_info=True)
         return AiContext()
@@ -630,7 +650,10 @@ async def _clear_pending(import_id: UUID, *, failed: bool = False, retry_soon: b
 RETRY_WAITS_SECONDS = (5, 15)
 
 
-async def _ask(prompt: str) -> str | None:
+async def _ask(prompt: str, *, retry_empty: bool = True) -> str | None:
+    """The reply's text, or None when the call kept failing. ab-345: with
+    retry_empty=False an empty reply comes back as "" at once, so a batch
+    can be split instead of asked the same way three times."""
     settings = get_settings()
     for attempt, wait in enumerate((*RETRY_WAITS_SECONDS, None), start=1):
         try:
@@ -638,6 +661,15 @@ async def _ask(prompt: str) -> str | None:
                 prompt, max_tokens=MAX_TOKENS, model=settings.do_category_model,
                 timeout=settings.do_category_timeout_seconds,
             )
+        except EmptyReply as e:
+            if not retry_empty:
+                logger.warning("AI category call returned nothing; splitting the batch")
+                return ""
+            logger.warning("AI category call failed (try %d): %s", attempt, e)
+            if wait is None or not inference_enabled():
+                return None
+            await asyncio.sleep(wait)
+            continue
         except InferenceError as e:
             # The lookup is then marked failed; say why in the worker log.
             logger.warning("AI category call failed (try %d): %s", attempt, e)
@@ -653,23 +685,17 @@ async def _ask(prompt: str) -> str | None:
 async def answer_names(conn, names: list[tuple[str, str]]) -> int:
     """Step 1 for names with no fresh answer: batches of 25, a few at a
     time. Returns how many answers were saved; a failed batch saves
-    nothing, so its names are asked again next time."""
+    nothing, so its names are asked again next time. ab-345: an empty or
+    unreadable reply splits the batch; names a reply skips are asked again."""
     model = get_settings().do_category_model
-    batches = [names[i : i + BATCH_SIZE] for i in range(0, len(names), BATCH_SIZE)]
-    gate = asyncio.Semaphore(CONCURRENT_CALLS)
-    saved = 0
 
-    async def one(batch: list[tuple[str, str]]) -> None:
-        nonlocal saved
-        async with gate:
-            text = await _ask(answer_prompt(batch))
-        answers = parse_answers(text, batch) if text else None
-        if answers:
-            await repo.save_answers(conn, answers=answers, model=model)
-            saved += len(answers)
+    async def save(answers: list[dict]) -> None:
+        await repo.save_answers(conn, answers=answers, model=model)
 
-    await asyncio.gather(*(one(b) for b in batches))
-    return saved
+    return await _answer_all(
+        names, BATCH_SIZE, prompt=answer_prompt, parse=lambda text, batch: parse_answers(text, batch),
+        key=lambda a: (a["name_key"], a["direction"]), save=save,
+    )
 
 
 async def answer_texts(
@@ -678,21 +704,47 @@ async def answer_texts(
     """ab-339: this user's masked descriptions with no fresh answer, in
     batches of 15, saved for them only. Returns how many were saved."""
     model = get_settings().do_category_model
-    batches = [texts[i : i + TEXT_BATCH_SIZE] for i in range(0, len(texts), TEXT_BATCH_SIZE)]
+
+    async def save(answers: list[dict]) -> None:
+        await repo.save_text_answers(conn, user_id=user_id, answers=answers, model=model)
+
+    return await _answer_all(
+        texts, TEXT_BATCH_SIZE, prompt=lambda batch: text_prompt(batch, categories, reasons),
+        parse=lambda text, batch: parse_text_answers(text, batch, categories, reasons),
+        key=lambda a: (a["text_key"], a["direction"]), save=save,
+    )
+
+
+async def _answer_all(items: list[tuple[str, str]], size: int, *, prompt, parse, key, save) -> int:
+    """Asks about items in batches, a few calls at a time, saving each
+    batch's answers. ab-345: a batch the model replies to with nothing (or
+    with something unreadable) is split in half and each half asked, down
+    to single items; items a reply skips are asked again on their own
+    batch. A call that keeps failing (overloaded, timed out) is left for
+    the next lookup - splitting wouldn't help."""
     gate = asyncio.Semaphore(CONCURRENT_CALLS)
-    saved = 0
 
-    async def one(batch: list[tuple[str, str]]) -> None:
-        nonlocal saved
+    async def one(batch: list[tuple[str, str]]) -> int:
         async with gate:
-            reply = await _ask(text_prompt(batch, categories, reasons))
-        answers = parse_text_answers(reply, batch, categories, reasons) if reply else None
+            reply = await _ask(prompt(batch), retry_empty=len(batch) == 1)
+        if reply is None:
+            return 0
+        answers = (parse(reply, batch) or []) if reply else []
         if answers:
-            await repo.save_text_answers(conn, user_id=user_id, answers=answers, model=model)
-            saved += len(answers)
+            await save(answers)
+        if len(batch) == 1:
+            return len(answers)
+        if not answers:
+            half = len(batch) // 2
+            parts = [batch[:half], batch[half:]]
+        else:
+            answered = {key(a) for a in answers}
+            rest = [item for item in batch if item not in answered]
+            parts = [rest] if rest else []
+        return len(answers) + sum(await asyncio.gather(*(one(p) for p in parts)))
 
-    await asyncio.gather(*(one(b) for b in batches))
-    return saved
+    batches = [items[i : i + size] for i in range(0, len(items), size)]
+    return sum(await asyncio.gather(*(one(b) for b in batches)))
 
 
 async def map_for_user(conn, *, user_id: UUID, categories: list[dict], answers: Iterable[dict]) -> int:

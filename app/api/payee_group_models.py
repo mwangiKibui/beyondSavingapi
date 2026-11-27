@@ -95,6 +95,8 @@ class PayeeGroup(BaseModel):
     last_date: date
     statements: list[GroupStatement]
     suggestion: GroupSuggestion | None = None
+    # ab-345: an open row still waits on an AI answer (POST .../ai-lookup).
+    ai_missing: bool = False
     # Set when every row has the same single category / was filed by the
     # same apply (undo it with DELETE /category-applies/{apply_id}).
     category_id: UUID | None = None

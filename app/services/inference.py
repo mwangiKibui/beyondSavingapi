@@ -20,6 +20,12 @@ class InferenceError(Exception):
     pass
 
 
+class EmptyReply(InferenceError):
+    """ab-345: the model answered with nothing - often a batch too big for
+    it to think through. Callers may split the batch rather than ask the
+    same thing again."""
+
+
 @dataclass
 class InferenceReply:
     content: str
@@ -77,7 +83,7 @@ async def complete(
         logger.warning("Inference reply from %s wasn't the expected shape", model)
         raise InferenceError("Unexpected inference reply") from e
     if not content.strip():
-        raise InferenceError("Empty inference reply")
+        raise EmptyReply("Empty inference reply")
     return InferenceReply(
         content=content,
         model=model,

@@ -826,3 +826,65 @@ def test_review_groups_return_a_person_once_with_both_sides(client, fake_user, f
     assert jane[0]["person_key"] and jane[0]["person_key"] == jane[1]["person_key"]
     assert "254700000001" not in jane[0]["person_key"]
     assert next(g for g in body["items"] if not g["is_person"])["person_key"] is None
+
+
+# --- ab-345: missing AI answers and asking again ----------------------------------
+
+
+def test_review_groups_flag_payees_the_ai_has_not_answered(client, fake_user, fake_pool, review, monkeypatch):
+    review([txn("GREENLEAF GROCERS"), txn("SUNRISE CAR WASH"), txn("Customer Transfer to 254700000001")])
+    from app.services.ai_categories import AiContext
+
+    answers = {("GREENLEAF GROCERS", "out"): {"category_name": "Groceries", "is_new": False}}
+    monkeypatch.setattr(f"{SI}.load_ai_context",
+                        AsyncMock(return_value=AiContext(enabled=True, answers=answers, missing=1)))
+    monkeypatch.setattr(f"{SI}.queue_lookup", AsyncMock())
+    monkeypatch.setattr(f"{SI}.lookup_status", AsyncMock(return_value={"state": None, "payees": None}))
+    body = client.get(f"/statement-imports/{IMPORT_ID}/groups", params={"tab": "all"}).json()
+    flags = {g["display_name"]: g["ai_missing"] for g in body["items"]}
+    assert flags["GREENLEAF GROCERS"] is False and flags["SUNRISE CAR WASH"] is True
+    assert body["ai_missing"] == 1
+
+
+def test_ask_ai_again_queues_a_fresh_lookup(client, fake_user, fake_pool, monkeypatch):
+    monkeypatch.setattr(f"{SI}.get_import_for_preview", AsyncMock(return_value=import_row()))
+    monkeypatch.setattr(f"{SI}.inference_enabled", lambda: True)
+    queue = AsyncMock(return_value=True)
+    monkeypatch.setattr(f"{SI}.queue_lookup", queue)
+    monkeypatch.setattr(f"{SI}.lookup_status", AsyncMock(return_value={"state": "running", "payees": None}))
+    response = client.post(f"/statement-imports/{IMPORT_ID}/ai-lookup")
+    assert response.status_code == 202
+    assert response.json() == {"queued": True, "ai_pending": True}
+    queue.assert_awaited_once_with(IMPORT_ID, fresh=True)
+
+
+def test_ask_ai_again_while_one_runs_is_a_no_op(client, fake_user, fake_pool, monkeypatch):
+    monkeypatch.setattr(f"{SI}.get_import_for_preview", AsyncMock(return_value=import_row()))
+    monkeypatch.setattr(f"{SI}.inference_enabled", lambda: True)
+    monkeypatch.setattr(f"{SI}.queue_lookup", AsyncMock(return_value=False))
+    monkeypatch.setattr(f"{SI}.lookup_status", AsyncMock(return_value={"state": "running", "payees": 4}))
+    assert client.post(f"/statement-imports/{IMPORT_ID}/ai-lookup").json() == {"queued": False, "ai_pending": True}
+
+
+def test_ask_ai_again_needs_the_users_own_upload_and_ai_on(client, fake_user, fake_pool, monkeypatch):
+    queue = AsyncMock()
+    monkeypatch.setattr(f"{SI}.queue_lookup", queue)
+    monkeypatch.setattr(f"{SI}.inference_enabled", lambda: True)
+    monkeypatch.setattr(f"{SI}.get_import_for_preview", AsyncMock(return_value=None))
+    assert client.post(f"/statement-imports/{IMPORT_ID}/ai-lookup").status_code == 404
+    monkeypatch.setattr(f"{SI}.get_import_for_preview", AsyncMock(return_value=import_row()))
+    monkeypatch.setattr(f"{SI}.inference_enabled", lambda: False)
+    response = client.post(f"/statement-imports/{IMPORT_ID}/ai-lookup")
+    assert response.status_code == 503 and "unavailable" in response.json()["detail"]
+    queue.assert_not_awaited()
+
+
+def test_ask_ai_again_requires_auth(client):
+    assert client.post(f"/statement-imports/{IMPORT_ID}/ai-lookup").status_code == 401
+
+
+def test_ask_ai_again_errors_are_generic(client, fake_user, fake_pool, monkeypatch):
+    monkeypatch.setattr(f"{SI}.get_import_for_preview", AsyncMock(side_effect=RuntimeError("db down: secret")))
+    monkeypatch.setattr(f"{SI}.inference_enabled", lambda: True)
+    response = client.post(f"/statement-imports/{IMPORT_ID}/ai-lookup")
+    assert response.status_code == 500 and "secret" not in response.text
