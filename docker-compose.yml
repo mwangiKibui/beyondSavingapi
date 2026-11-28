@@ -12,6 +12,9 @@ services:
       STORAGE_SECRET_KEY: ${STORAGE_SECRET_KEY:-storageadmin}
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
       SUGGESTION_KEY_SECRET: ${SUGGESTION_KEY_SECRET:-dev-suggestion-secret-change-me}
+      # ab-345: the API queues AI lookups and reports their status (it never
+      # calls the model itself), so it needs to know AI is on.
+      DO_INFERENCE_KEY: ${DO_INFERENCE_KEY:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
     volumes:
       - ./app:/srv/app
